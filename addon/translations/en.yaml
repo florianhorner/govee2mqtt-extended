@@ -76,6 +76,17 @@ configuration:
       if standard multicast already fails — try "Broadcast to
       Each Network Interface" or "Scan Specific IP Addresses"
       instead.
+  disable_effects:
+    name: Disable Effects
+    description: >-
+      Set to true to disable publishing effect lists for all devices to MQTT discovery.
+      This can fix issues with the Google Home Integration payload limits.
+  allowed_effects:
+    name: Allowed Effects
+    description: >-
+      A comma-separated list of effect names to allow (e.g. "Aurora,Rainbow").
+      If set, only effects matching these names will be published to MQTT discovery.
+      This helps reduce the payload size while still allowing some effects.
 
 
 
