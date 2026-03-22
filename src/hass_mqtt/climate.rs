@@ -134,7 +134,10 @@ impl EntityInstance for TargetTemperatureEntity {
 
     async fn notify_state(&self, client: &HassClient) -> anyhow::Result<()> {
         let Some(device) = self.state.device_by_id(&self.device_id).await else {
-            log::warn!("Device {} not found in state, skipping notify", self.device_id);
+            log::warn!(
+                "Device {} not found in state, skipping notify",
+                self.device_id
+            );
             return Ok(());
         };
 

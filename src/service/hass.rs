@@ -687,7 +687,9 @@ pub async fn spawn_hass_integration(
             tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
             std::process::exit(1);
         } else {
-            log::error!("run_mqtt_loop exited unexpectedly. Terminating so HA can restart the addon.");
+            log::error!(
+                "run_mqtt_loop exited unexpectedly. Terminating so HA can restart the addon."
+            );
             std::process::exit(1);
         }
     });
