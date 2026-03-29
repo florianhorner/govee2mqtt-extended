@@ -43,3 +43,4 @@ schema:
   broadcast_all: "bool?"
   global_broadcast: "bool?"
   scan: "str?"
+  capability_cache_refresh_days: "int?"

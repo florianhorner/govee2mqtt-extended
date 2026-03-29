@@ -87,6 +87,10 @@ if bashio::config.has_value temperature_scale ; then
   export GOVEE_TEMPERATURE_SCALE="$(bashio::config temperature_scale)"
 fi
 
+if bashio::config.has_value capability_cache_refresh_days ; then
+  export GOVEE_CAPABILITY_CACHE_DAYS="$(bashio::config capability_cache_refresh_days)"
+fi
+
 env | grep GOVEE_ | sed -r 's/_(EMAIL|KEY|PASSWORD)=.*/_\1=REDACTED/'
 set -x
 

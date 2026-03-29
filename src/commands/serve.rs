@@ -1,5 +1,6 @@
+use crate::cache::{cache_get, CacheComputeResult, CacheGetOptions};
 use crate::lan_api::Client as LanClient;
-use crate::platform_api::GoveeApiClient;
+use crate::platform_api::{GoveeApiClient, HttpDeviceInfo};
 use crate::service::device::Device;
 use crate::service::hass::spawn_hass_integration;
 use crate::service::http::run_http_server;
@@ -13,6 +14,7 @@ use chrono::Utc;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 use tokio::time::{sleep, Duration};
 
 pub const POLL_INTERVAL: Lazy<chrono::Duration> = Lazy::new(|| chrono::Duration::seconds(900));
@@ -108,6 +110,126 @@ async fn periodic_state_poll(state: StateHandle) -> anyhow::Result<()> {
     }
 }
 
+/// Returns the configured capability cache refresh interval.
+/// Reads from GOVEE_CAPABILITY_CACHE_DAYS env var (default: 7).
+/// A value of 0 means "never refresh" (use a very long soft TTL).
+fn capability_cache_soft_ttl() -> StdDuration {
+    let days: u64 = std::env::var("GOVEE_CAPABILITY_CACHE_DAYS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7);
+    if days == 0 {
+        // "Never refresh" — use 10 years as a practical infinity
+        StdDuration::from_secs(10 * 365 * 86400)
+    } else {
+        StdDuration::from_secs(days * 86400)
+    }
+}
+
+const CAPABILITY_CACHE_TOPIC: &str = "capability-cache";
+const CAPABILITY_CACHE_HARD_TTL: StdDuration = StdDuration::from_secs(365 * 86400);
+
+/// Write an HttpDeviceInfo to the per-SKU capability cache.
+/// Uses the cache_get write-through pattern: the closure trivially returns
+/// the value we already have. This is intentional — cache_get is a
+/// read-with-compute primitive, and we're using it as a write primitive
+/// by making the "compute" a no-op that returns the pre-fetched value.
+async fn write_capability_cache(info: &HttpDeviceInfo) {
+    let sku = info.sku.clone();
+    let info_clone = info.clone();
+    if let Err(err) = cache_get(
+        CacheGetOptions {
+            topic: CAPABILITY_CACHE_TOPIC,
+            key: &sku,
+            soft_ttl: capability_cache_soft_ttl(),
+            hard_ttl: CAPABILITY_CACHE_HARD_TTL,
+            negative_ttl: StdDuration::from_secs(60),
+            allow_stale: true,
+        },
+        async move { Ok(CacheComputeResult::Value(info_clone)) },
+    )
+    .await
+    {
+        log::warn!("Failed to write capability cache for SKU {sku}: {err:#}");
+    }
+}
+
+/// Try to load cached capabilities for a device that has no http_device_info.
+/// Overwrites the `device` and `device_name` fields to match the actual device,
+/// since the cache is per-SKU and may contain a different device's ID/name.
+async fn try_hydrate_from_capability_cache(
+    sku: &str,
+    device_id: &str,
+    device_name: &str,
+) -> Option<HttpDeviceInfo> {
+    let result: anyhow::Result<HttpDeviceInfo> = cache_get(
+        CacheGetOptions {
+            topic: CAPABILITY_CACHE_TOPIC,
+            key: sku,
+            soft_ttl: capability_cache_soft_ttl(),
+            hard_ttl: CAPABILITY_CACHE_HARD_TTL,
+            negative_ttl: StdDuration::from_secs(60),
+            allow_stale: true,
+        },
+        // On cache miss, there is nothing to compute — we don't have the data.
+        // Return an error so cache_get treats this as a miss.
+        async { anyhow::bail!("no cached capabilities for SKU") },
+    )
+    .await;
+
+    match result {
+        Ok(mut info) => {
+            // Overwrite per-device fields: the cache stores per-SKU data,
+            // but device and device_name are per-device. Using stale values
+            // here would route control commands to the wrong physical device.
+            info.device = device_id.to_string();
+            info.device_name = device_name.to_string();
+            log::info!(
+                "Hydrated {sku} ({device_id}) from capability cache: \
+                 type={:?}, rgb={}, brightness={}, color_temp={:?}",
+                info.device_type,
+                info.supports_rgb(),
+                info.supports_brightness(),
+                info.get_color_temperature_range(),
+            );
+            Some(info)
+        }
+        Err(_) => None,
+    }
+}
+
+/// Log human-readable capability diffs when a refresh detects changes.
+fn log_capability_diff(sku: &str, old: &HttpDeviceInfo, new: &HttpDeviceInfo) {
+    if old.device_type != new.device_type {
+        log::info!(
+            "Capability change for {sku}: device_type {:?} -> {:?}",
+            old.device_type,
+            new.device_type
+        );
+    }
+    if old.supports_rgb() != new.supports_rgb() {
+        log::info!(
+            "Capability change for {sku}: supports_rgb {} -> {}",
+            old.supports_rgb(),
+            new.supports_rgb()
+        );
+    }
+    if old.supports_brightness() != new.supports_brightness() {
+        log::info!(
+            "Capability change for {sku}: supports_brightness {} -> {}",
+            old.supports_brightness(),
+            new.supports_brightness()
+        );
+    }
+    if old.get_color_temperature_range() != new.get_color_temperature_range() {
+        log::info!(
+            "Capability change for {sku}: color_temp_range {:?} -> {:?}",
+            old.get_color_temperature_range(),
+            new.get_color_temperature_range()
+        );
+    }
+}
+
 async fn enumerate_devices_via_platform_api(
     state: StateHandle,
     client: Option<GoveeApiClient>,
@@ -122,6 +244,19 @@ async fn enumerate_devices_via_platform_api(
 
     log::info!("Querying platform API for device list");
     for info in client.get_devices().await? {
+        // Log capability diffs if this device already had cached/live capabilities
+        {
+            let existing = state.device_by_id(&info.device).await;
+            if let Some(existing) = existing {
+                if let Some(old_info) = &existing.http_device_info {
+                    log_capability_diff(&info.sku, old_info, &info);
+                }
+            }
+        }
+
+        // Write per-SKU capability cache (for offline use on subsequent boots)
+        write_capability_cache(&info).await;
+
         let mut device = state.device_mut(&info.sku, &info.device).await;
         device.set_http_device_info(info);
     }
@@ -249,10 +384,41 @@ impl ServeCommand {
             tokio::spawn(async move {
                 while let Some(lan_device) = scan.recv().await {
                     log::trace!("LAN disco: {lan_device:?}");
+
+                    // Check if this device needs capability cache hydration
+                    // (late-discovered device that wasn't in the initial Platform API batch)
+                    let needs_hydration = {
+                        let existing = state.device_by_id(&lan_device.device).await;
+                        existing
+                            .map(|d| d.http_device_info.is_none() && !d.avoid_platform_api())
+                            .unwrap_or(true)
+                    };
+
                     state
                         .device_mut(&lan_device.sku, &lan_device.device)
                         .await
                         .set_lan_device(lan_device.clone());
+
+                    // Hydrate from capability cache if needed
+                    if needs_hydration {
+                        let device_name = state
+                            .device_by_id(&lan_device.device)
+                            .await
+                            .map(|d| d.name())
+                            .unwrap_or_default();
+                        if let Some(info) = try_hydrate_from_capability_cache(
+                            &lan_device.sku,
+                            &lan_device.device,
+                            &device_name,
+                        )
+                        .await
+                        {
+                            state
+                                .device_mut(&lan_device.sku, &lan_device.device)
+                                .await
+                                .set_http_device_info(info);
+                        }
+                    }
 
                     let state = state.clone();
                     let client = client.clone();
@@ -277,6 +443,31 @@ impl ServeCommand {
             // enough to provide high-signal warnings.
             log::info!("Waiting 10 seconds for LAN API discovery");
             sleep(Duration::from_secs(10)).await;
+        }
+
+        // Hydrate devices from capability cache: for any device discovered
+        // via LAN or undoc API that doesn't yet have http_device_info
+        // (e.g., Platform API was unreachable), try loading from the per-SKU
+        // capability cache. This is the core of the "Living Quirks" feature.
+        {
+            let devices = state.devices().await;
+            for device in &devices {
+                if device.http_device_info.is_some() {
+                    continue;
+                }
+                if device.avoid_platform_api() {
+                    continue;
+                }
+                let name = device.name();
+                if let Some(info) =
+                    try_hydrate_from_capability_cache(&device.sku, &device.id, &name).await
+                {
+                    state
+                        .device_mut(&device.sku, &device.id)
+                        .await
+                        .set_http_device_info(info);
+                }
+            }
         }
 
         log::info!("Devices returned from Govee's APIs");
