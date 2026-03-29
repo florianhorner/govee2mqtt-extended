@@ -1,6 +1,8 @@
-> **⚠️ This is a patched fork of [wez/govee2mqtt](https://github.com/wez/govee2mqtt).**
-> It fixes a UTF-8 crash that causes the bridge to crash-loop when Govee API returns Chinese preset names (affects H6076/H60B2 devices).
-> See [Rollback Instructions](#rollback-to-upstream) below for when to switch back.
+> **✅ The UTF-8 crash fix has been [merged upstream](https://github.com/wez/govee2mqtt/pull/606) and released as `2026.03.25-ab9deb66`.**
+> If you installed this fork as a workaround, you can now [switch back to upstream](#switch-back-to-upstream).
+>
+> This fork continues as a **maintained community fork** with additional fixes and device support not yet upstream.
+> See [What this fork adds](#what-this-fork-adds) below.
 
 # Govee to MQTT bridge for Home Assistant
 
@@ -8,15 +10,22 @@ This repo provides a `govee` executable whose primary purpose is to act
 as a bridge between [Govee](https://govee.com) devices and Home Assistant,
 via the [Home Assistant MQTT Integration](https://www.home-assistant.io/integrations/mqtt/).
 
-## What this fork changes
+## What this fork adds
 
 | Commit | File | Change |
 |--------|------|--------|
-| `624fb96` | `src/service/hass.rs` | Replace byte slicing (`camel[..1]`) with char iteration (`chars().next()`) to fix UTF-8 panic on non-ASCII preset names |
-| `52d0b9c` | `addon/config.yaml`, `.github/`, `README.md` | Brand fork with CI, addon images, version `2026.03.16-44fc86d2`, and config |
+| `6f2f5cc` | `addon/config.yaml`, `.github/`, `README.md` | Brand fork with CI, addon images, custom addon images, and config |
+| `da4aeb1` | `.github/workflows/`, tests | Add Claude Code CI, regression tests, and fork fixes |
+| `f41ac85` | `src/service/quirks.rs` | Add Govee H60B0 (Neon Rope Light 2) as LAN-capable light |
+| `261eb48` | `src/hass_mqtt/*.rs`, `src/service/hass.rs` | Replace `.expect()` panics with graceful handling; fix silent `exit(0)` → `exit(1)` so HA restarts the addon on failure |
+| `0666c35` | `src/hass_mqtt/*.rs`, `src/service/*.rs` | Scene quick-cycle: Next/Previous buttons, scene info sensor, categorized catalog endpoint with caching |
+| `2b87f42` | `.github/workflows/pr.yml`, `.pre-commit-config.yaml`, `src/**` | Add clippy CI gate (`-D warnings`), pre-commit hooks (fmt + clippy), fix all existing clippy warnings |
 
-**Upstream PR:** [wez/govee2mqtt#606](https://github.com/wez/govee2mqtt/pull/606) by theg1nger
-**Upstream issue:** [wez/govee2mqtt#604](https://github.com/wez/govee2mqtt/issues/604)
+**Upstream status:**
+- ✅ UTF-8 fix — [merged via #606](https://github.com/wez/govee2mqtt/pull/606) on 2026-03-25
+- ⏳ H60B0 device support — [PR #629](https://github.com/wez/govee2mqtt/pull/629) pending
+- ⏳ Panic hardening + exit code fix — [#617](https://github.com/wez/govee2mqtt/issues/617), [#618](https://github.com/wez/govee2mqtt/issues/618) filed, no PR yet
+- 🆕 Scene quick-cycle buttons + catalog — fork-only feature, not submitted upstream
 
 ## Features
 
@@ -39,7 +48,7 @@ via the [Home Assistant MQTT Integration](https://www.home-assistant.io/integrat
 |Segment Color|API Key|Find the `Segment 00X` light entities associated with your main light device in Home Assistant|
 
 * `API Key` means that you have [applied for a key from Govee](https://developer.govee.com/reference/apply-you-govee-api-key)
-  and have configured it for use in goovee2mqtt
+  and have configured it for use in govee2mqtt
 * `IoT` means that you have configured your Govee account email and password for
   use in govee2mqtt, which will then attempt to use the
   *undocumented and likely unsupported* AWS MQTT-based IoT service
@@ -57,18 +66,17 @@ via the [Home Assistant MQTT Integration](https://www.home-assistant.io/integrat
 * [Is my device supported?](docs/SKUS.md)
 * [Check out the FAQ](docs/FAQ.md)
 
-## Rollback to upstream
+## Switch back to upstream
 
-Once [PR #606](https://github.com/wez/govee2mqtt/pull/606) is merged into `wez/govee2mqtt` and a new release is published, switch back to upstream:
+The UTF-8 crash fix is now upstream in release `2026.03.25-ab9deb66`. If you only installed this fork for that fix, you can switch back:
 
-1. **Check if the fix is merged:** Visit [wez/govee2mqtt#606](https://github.com/wez/govee2mqtt/pull/606) — if it says "Merged", you're good to go.
-2. **In Home Assistant**, go to **Settings → Add-ons → Add-on Store** (three-dot menu → Repositories).
-3. **Remove** this fork's repo URL: `https://github.com/homeassilol/govee2mqtt`
-4. **Add** the upstream repo URL: `https://github.com/wez/govee2mqtt`
-5. **Refresh** and update/reinstall the Govee2MQTT add-on.
-6. **Restart** the add-on. Verify your Govee devices come back online.
+1. **In Home Assistant**, go to **Settings → Add-ons → Add-on Store** (three-dot menu → Repositories).
+2. **Remove** this fork's repo URL: `https://github.com/florianhorner/govee2mqtt`
+3. **Add** the upstream repo URL: `https://github.com/wez/govee2mqtt`
+4. **Refresh** and update/reinstall the Govee2MQTT add-on.
+5. **Restart** the add-on. Verify your Govee devices come back online.
 
-If the upstream release version is newer than `2026.03.14-0070e48-patched`, you know you're on the official build.
+**Note:** If you want the additional fixes in this fork (H60B0 support, panic hardening, exit code fix), stay on this fork until those are merged upstream.
 
 ## Want to show your support or gratitude?
 

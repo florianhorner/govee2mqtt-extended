@@ -12,7 +12,7 @@ pub enum HumidityUnits {
 }
 
 impl HumidityUnits {
-    pub fn from_reading_to_relative_percent(&self, value: f64) -> f64 {
+    pub fn reading_to_relative_percent(&self, value: f64) -> f64 {
         match self {
             Self::RelativePercent => value,
             Self::RelativePercentTimes100 => value / 100.,
@@ -299,6 +299,7 @@ fn load_quirks() -> HashMap<String, Quirk> {
         Quirk::lan_api_capable_light("H6076", FLOOR_LAMP),
         Quirk::lan_api_capable_light("H6078", FLOOR_LAMP),
         Quirk::lan_api_capable_light("H6087", WALL_SCONCE),
+        Quirk::lan_api_capable_light("H60B0", STRIP),
         Quirk::lan_api_capable_light("H610A", STRIP),
         Quirk::lan_api_capable_light("H610B", STRIP),
         Quirk::lan_api_capable_light("H6117", STRIP),

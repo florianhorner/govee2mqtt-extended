@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use tokio::time::{sleep, Duration};
 
-pub const POLL_INTERVAL: Lazy<chrono::Duration> = Lazy::new(|| chrono::Duration::seconds(900));
+pub static POLL_INTERVAL: Lazy<chrono::Duration> = Lazy::new(|| chrono::Duration::seconds(900));
 
 #[derive(clap::Parser, Debug)]
 pub struct ServeCommand {
@@ -86,13 +86,11 @@ async fn poll_single_device(state: &StateHandle, device: &Device) -> anyhow::Res
         return Ok(());
     }
 
-    if !needs_platform {
-        if state.poll_iot_api(&device).await? {
-            return Ok(());
-        }
+    if !needs_platform && state.poll_iot_api(device).await? {
+        return Ok(());
     }
 
-    state.poll_platform_api(&device).await?;
+    state.poll_platform_api(device).await?;
 
     Ok(())
 }
