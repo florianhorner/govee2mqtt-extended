@@ -851,4 +851,108 @@ mod tests {
         };
         assert_eq!(result, Some("Gentle pulsing warmth".to_string()));
     }
+
+    #[test]
+    fn test_sort_and_dedup_scenes() {
+        let scenes = vec![
+            "Sunset".to_string(),
+            "aurora".to_string(),
+            "Blaze".to_string(),
+            "aurora".to_string(),
+            "Sunset".to_string(),
+        ];
+        let result = sort_and_dedup_scenes(scenes);
+        assert_eq!(result, vec!["aurora", "Blaze", "Sunset"]);
+    }
+
+    #[test]
+    fn test_sort_and_dedup_scenes_empty() {
+        let result = sort_and_dedup_scenes(vec![]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_sort_and_dedup_scenes_case_insensitive_order() {
+        // Verify case-insensitive sorting keeps correct order
+        let scenes = vec!["Zelda".to_string(), "alpha".to_string(), "Beta".to_string()];
+        let result = sort_and_dedup_scenes(scenes);
+        assert_eq!(result, vec!["alpha", "Beta", "Zelda"]);
+    }
+
+    #[test]
+    fn test_scene_catalog_category_serde_round_trip() {
+        let category = SceneCatalogCategory {
+            name: "Nature".to_string(),
+            scenes: vec![
+                SceneCatalogEntry {
+                    name: "Forest".to_string(),
+                    icon_urls: vec!["https://example.com/forest.png".to_string()],
+                    hint: Some("Deep greens".to_string()),
+                },
+                SceneCatalogEntry {
+                    name: "Ocean".to_string(),
+                    icon_urls: vec![],
+                    hint: None,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&category).unwrap();
+        let deserialized: SceneCatalogCategory = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.name, "Nature");
+        assert_eq!(deserialized.scenes.len(), 2);
+        assert_eq!(deserialized.scenes[0].hint, Some("Deep greens".to_string()));
+        assert_eq!(deserialized.scenes[1].hint, None);
+    }
+
+    #[tokio::test]
+    async fn test_state_temperature_scale_default() {
+        let state = State::new();
+        let scale = state.get_temperature_scale().await;
+        // Default should be Celsius
+        assert!(matches!(scale, TemperatureScale::Celsius));
+    }
+
+    #[tokio::test]
+    async fn test_state_temperature_scale_round_trip() {
+        let state = State::new();
+        state
+            .set_temperature_scale(TemperatureScale::Fahrenheit)
+            .await;
+        let scale = state.get_temperature_scale().await;
+        assert!(matches!(scale, TemperatureScale::Fahrenheit));
+    }
+
+    #[tokio::test]
+    async fn test_state_hass_disco_prefix_default_empty() {
+        let state = State::new();
+        let prefix = state.get_hass_disco_prefix().await;
+        assert_eq!(prefix, "");
+    }
+
+    #[tokio::test]
+    async fn test_state_hass_disco_prefix_round_trip() {
+        let state = State::new();
+        state
+            .set_hass_disco_prefix("homeassistant".to_string())
+            .await;
+        let prefix = state.get_hass_disco_prefix().await;
+        assert_eq!(prefix, "homeassistant");
+    }
+
+    #[tokio::test]
+    async fn test_state_device_mut_creates_device() {
+        let state = State::new();
+        {
+            let _device = state.device_mut("H6001", "AA:BB:CC:DD:EE:FF").await;
+        }
+        let devices = state.devices().await;
+        assert_eq!(devices.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_state_devices_empty_by_default() {
+        let state = State::new();
+        let devices = state.devices().await;
+        assert!(devices.is_empty());
+    }
 }
