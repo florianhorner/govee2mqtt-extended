@@ -6,6 +6,7 @@ use crate::platform_api::{
     from_json, http_response_body, DeviceCapability, DeviceCapabilityKind, DeviceParameters,
     EnumOption,
 };
+use anyhow::Context;
 use reqwest::Method;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,7 @@ use uuid::Uuid;
 
 // <https://github.com/constructorfleet/homebridge-ultimate-govee/blob/main/src/data/clients/RestClient.ts>
 
-const APP_VERSION: &str = "6.5.02";
+const APP_VERSION: &str = "7.4.10";
 const HALF_DAY: Duration = Duration::from_secs(3600 * 12);
 const ONE_DAY: Duration = Duration::from_secs(86400);
 const ONE_WEEK: Duration = Duration::from_secs(86400 * 7);
@@ -54,7 +55,7 @@ impl<T: std::fmt::Debug> std::ops::Deref for Redacted<T> {
 
 fn user_agent() -> String {
     format!(
-        "GoveeHome/{APP_VERSION} (com.ihoment.GoVeeSensor; build:2; iOS 16.5.0) Alamofire/5.6.4"
+        "GoveeHome/{APP_VERSION} (com.ihoment.GoVeeSensor; build:8; iOS 26.5.0) Alamofire/5.11.0"
     )
 }
 
@@ -205,7 +206,7 @@ impl GoveeUndocumentedApi {
             .build()?
             .request(
                 Method::POST,
-                "https://app2.govee.com/account/rest/account/v1/login",
+                "https://app2.govee.com/account/rest/account/v2/login",
             )
             .header("appVersion", APP_VERSION)
             .header("clientId", &self.client_id)
@@ -221,7 +222,33 @@ impl GoveeUndocumentedApi {
             .send()
             .await?;
 
-        let resp: Response = http_response_body(response).await?;
+        // Read the response body manually so we can check for 454 (2FA required)
+        // before attempting deserialization. A 454 must not be negative-cached,
+        // because the user needs to retry with a code within 15 minutes.
+        let url = response.url().clone();
+        let status = response.status();
+        let body_bytes = response.bytes().await?;
+
+        // Govee returns HTTP 200 with {"status": 454} when 2FA is required
+        if let Ok(probe) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+            if probe.get("status").and_then(|s| s.as_u64()) == Some(454) {
+                anyhow::bail!(
+                    "Govee account requires 2FA verification. \
+                     A code has been sent to your email. Set the GOVEE_2FA_CODE \
+                     environment variable (or govee_2fa_code addon option) to the \
+                     code and restart. The code is valid for approximately 15 minutes."
+                );
+            }
+        }
+
+        if !status.is_success() {
+            anyhow::bail!(
+                "request {url} status {}: {}. Response body: {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or(""),
+                String::from_utf8_lossy(&body_bytes)
+            );
+        }
 
         #[derive(Deserialize, Serialize, Debug)]
         #[allow(non_snake_case, dead_code)]
@@ -230,6 +257,13 @@ impl GoveeUndocumentedApi {
             message: String,
             status: u64,
         }
+
+        let resp: Response = serde_json::from_slice(&body_bytes).with_context(|| {
+            format!(
+                "parsing {url} login response: {}",
+                String::from_utf8_lossy(&body_bytes)
+            )
+        })?;
 
         let ttl = Duration::from_secs(resp.client.token_expire_cycle as u64);
         Ok(CacheComputeResult::WithTtl(resp.client, ttl))
@@ -242,7 +276,9 @@ impl GoveeUndocumentedApi {
                 key: "account-info",
                 soft_ttl: HALF_DAY,
                 hard_ttl: HALF_DAY,
-                negative_ttl: FIFTEEN_MINS,
+                // Short negative TTL so that 2FA (454) errors don't block retries.
+                // The user needs to be able to retry with a code within 15 minutes.
+                negative_ttl: Duration::from_secs(10),
                 allow_stale: false,
             },
             async { self.login_account_impl().await },
