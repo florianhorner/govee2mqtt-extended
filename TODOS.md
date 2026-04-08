@@ -40,6 +40,7 @@
 **Improvements:** Add a Default column to each table showing the default value or "required" / "auto-detected".
 **File:** `docs/CONFIG.md`
 **Effort:** Small.
+**Status:** Partially done — MQTT table now has a Default column. Govee credentials and LAN tables still need it.
 
 ## P3: DOCKER.md section structure
 **What:** The `.env` skeleton has inline comments but no section grouping, and doesn't explain *why* credentials are recommended.

@@ -79,6 +79,18 @@ If it doesn't, [file an issue](https://github.com/wez/govee2mqtt/issues) with
 your device SKU and we can investigate whether a quirks entry is needed.
 See [Supported Devices](SKUS.md) for more details.
 
+## How do the Scene Next / Previous buttons work?
+
+The extended fork adds **"Scene Next"** and **"Scene Previous"** buttons to
+each light device in Home Assistant. These let you cycle through all
+available scenes for a device without opening the Govee app or picking
+from a long list.
+
+A **"Scene Info"** sensor shows the name and category of the currently
+active scene.
+
+These buttons are only available in the [extended fork](../README.md#what-this-fork-adds).
+
 ## The device MAC addresses in the logs don't match my network MACs
 
 Govee device IDs are **not** network MAC addresses. They are internal
