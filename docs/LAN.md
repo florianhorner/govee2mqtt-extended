@@ -17,7 +17,7 @@ that same group and limit the amount of network traffic expended on
 discovery.
 
 In practice, multicast-UDP is not well supported by various routers, especially
-on WiFI enabled networks.
+on Wi-Fi networks.
 
 Govee2MQTT provides a couple of options that can help in situations where
 multicast-UDP isn't working well in your environment, or where you have more

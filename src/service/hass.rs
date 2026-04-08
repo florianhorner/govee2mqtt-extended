@@ -52,7 +52,7 @@ pub struct HassArguments {
     /// The temperature scale to use when showing temperature values as
     /// entities in home assistant. Can be either "C" or "F" for Celsius
     /// or Fahrenheit respectively.
-    /// You may also set this vai the GOVEE_TEMPERATURE_SCALE environment
+    /// You may also set this via the GOVEE_TEMPERATURE_SCALE environment
     /// variable.
     #[arg(long, global = true)]
     temperature_scale: Option<String>,

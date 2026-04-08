@@ -4,7 +4,7 @@
 > This fork continues as a **maintained community fork** with additional fixes and device support not yet upstream.
 > See [What this fork adds](#what-this-fork-adds) below.
 
-# Govee to MQTT bridge for Home Assistant
+# Govee2MQTT: Govee-to-Home-Assistant Bridge
 
 This repo provides a `govee` executable whose primary purpose is to act
 as a bridge between [Govee](https://govee.com) devices and Home Assistant,
@@ -39,25 +39,23 @@ via the [Home Assistant MQTT Integration](https://www.home-assistant.io/integrat
   API](https://developer.govee.com/reference/get-you-devices) in case the AWS
   IoT or LAN control is unavailable.
 
-|Feature|Requires|Notes|
-|-------|--------|-------------|
-|DIY Scenes|API Key|Find in the list of Effects for the light in Home Assistant|
-|Music Modes|API Key|Find in the list of Effects for the light in Home Assistant|
-|Tap-to-Run / One Click Scene|IoT|Find in the overall list of Scenes in Home Assistant, as well as under the `Govee to MQTT` device|
-|Live Device Status Updates|LAN and/or IoT|Devices typically report most changes within a couple of seconds.|
-|Segment Color|API Key|Find the `Segment 00X` light entities associated with your main light device in Home Assistant|
+**What the "Requires" column means:**
 
-* `API Key` means that you have [applied for a key from Govee](https://developer.govee.com/reference/apply-you-govee-api-key)
-  and have configured it for use in govee2mqtt
-* `IoT` means that you have configured your Govee account email and password for
-  use in govee2mqtt, which will then attempt to use the
-  *undocumented and likely unsupported* AWS MQTT-based IoT service
-* `LAN` means that you have enabled the [Govee LAN API](https://app-h5.govee.com/user-manual/wlan-guide)
-  on supported devices and that the LAN API protocol is functional on your network
+* **API Key** — You've [applied for a free Govee API key](https://developer.govee.com/reference/apply-you-govee-api-key) and entered it in the configuration.
+* **Govee Account** — You've entered your Govee email and password. This connects to Govee's cloud IoT service for real-time updates and Tap-to-Run support.
+* **LAN API** — You've [enabled the LAN API](https://app-h5.govee.com/user-manual/wlan-guide) on supported devices in the Govee Home app, and your network allows the required UDP traffic.
+
+|Feature|Requires|Where to find it in Home Assistant|
+|-------|--------|----------------------------------|
+|DIY Scenes|API Key|Effects list on the light entity|
+|Music Modes|API Key|Effects list on the light entity|
+|Tap-to-Run / One Click|Govee Account|Scenes list, and under the "Govee to MQTT" device|
+|Live Status Updates|LAN API and/or Govee Account|Automatic — devices update within seconds|
+|Segment Color|API Key|`Segment 001`, `002`, etc. light entities under your device|
 
 ## Usage
 
-* [Installing the HASS Add-On](docs/ADDON.md) - for HAOS and Supervised HASS users
+* [Installing as a Home Assistant App](docs/ADDON.md) - for HAOS and Supervised installations
 * [Running it in Docker](docs/DOCKER.md)
 * [Configuration](docs/CONFIG.md)
 
@@ -70,11 +68,11 @@ via the [Home Assistant MQTT Integration](https://www.home-assistant.io/integrat
 
 The UTF-8 crash fix is now upstream in release `2026.03.25-ab9deb66`. If you only installed this fork for that fix, you can switch back:
 
-1. **In Home Assistant**, go to **Settings → Add-ons → Add-on Store** (three-dot menu → Repositories).
+1. **In Home Assistant**, go to **Settings → Apps** (three-dot menu → Repositories).
 2. **Remove** this fork's repo URL: `https://github.com/florianhorner/govee2mqtt-extended`
 3. **Add** the upstream repo URL: `https://github.com/wez/govee2mqtt`
-4. **Refresh** and update/reinstall the Govee2MQTT add-on.
-5. **Restart** the add-on. Verify your Govee devices come back online.
+4. **Refresh** and update/reinstall the Govee2MQTT app.
+5. **Restart** the app. Verify your Govee devices come back online.
 
 **Note:** If you want the additional fixes in this fork (H60B0 support, panic hardening, exit code fix), stay on this fork until those are merged upstream.
 

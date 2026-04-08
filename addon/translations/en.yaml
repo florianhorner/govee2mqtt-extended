@@ -3,92 +3,78 @@ configuration:
   temperature_scale:
     name: Temperature Scale
     description: >-
-      Specify which temperature scale to use when mapping entities
-      into Home Assistant. Can be either "C" for Celsius or "F" for Fahrenheit.
+      Which temperature scale to display in Home Assistant.
+      Enter "C" for Celsius or "F" for Fahrenheit.
   govee_email:
     name: Govee Account Email
     description: >-
-      The email address you registered with your Govee Account.
-      Configuring this will cause govee2mqtt to require working
-      internet connectivity on startup.
+      Your Govee account email address. Needed for room names, scenes,
+      and devices without LAN support. Requires internet on startup.
   govee_password:
     name: Govee Account Password
     description: >-
-      The password you registered with your Govee Account
+      Your Govee account password. Used only to authenticate with
+      Govee's servers — never sent anywhere else.
   govee_api_key:
     name: Govee API Key
     description: >-
-      Functions that use the official Govee APIs require an API Key.
-      If you don't already have one, you can find instructions on obtaining one
-      at https://developer.govee.com/reference/apply-you-govee-api-key
-      Configuring this will cause govee2mqtt to require working
-      internet connectivity on startup.
+      Your Govee developer API key. Enables scene control, segment
+      colors, and music modes. Get one free at
+      https://developer.govee.com/reference/apply-you-govee-api-key.
+      Requires internet on startup.
 
   mqtt_host:
-    name: MQTT Broker Host Name
+    name: MQTT Broker Host
     description: >-
-      The host name or IP address of the MQTT Broker on your network.
-      If you are using the Mosquitto Addon, you can leave this blank
-      as it will be handled automatically by Home Assistant.
+      Host name or IP address of your MQTT broker.
+      Leave blank if you use the Mosquitto app — Home Assistant
+      fills this in automatically.
   mqtt_port:
-    name: MQTT Broker Port Number
+    name: MQTT Broker Port
     description: >-
-      The port number of the MQTT Broker on your network.
-      If you are using the Mosquitto Addon, you can leave this blank
-      as it will be handled automatically by Home Assistant.
+      Port number of your MQTT broker (default: 1883).
+      Leave blank if you use the Mosquitto app.
   mqtt_username:
-    name: MQTT Broker Username
+    name: MQTT Username
     description: >-
-      If your MQTT broker requires authentication, the username that
-      should be used.
-      If you are using the Mosquitto Addon, you can leave this blank
-      as it will be handled automatically by Home Assistant.
+      Username for your MQTT broker, if it requires authentication.
+      Leave blank if you use the Mosquitto app.
   mqtt_password:
-    name: MQTT Broker Password
+    name: MQTT Password
     description: >-
-      If your MQTT broker requires authentication, the password that
-      should be used.
-      If you are using the Mosquitto Addon, you can leave this blank
-      as it will be handled automatically by Home Assistant.
+      Password for your MQTT broker, if it requires authentication.
+      Leave blank if you use the Mosquitto app.
   debug_level:
-    name: Debug Filter
+    name: Log Verbosity
     description: >-
-      If you need to troubleshoot, set this to a Rust debug level filter.
-      The easiest value to enter for this is "govee=trace".
-      Be aware that in trace mode some sensitive information will
-      be output to the log. Take care to redact any topic or token
-      strings before you paste and share it with others.
+      Only needed for troubleshooting. Enter "govee=trace" for
+      maximum detail. Warning: trace mode may log sensitive data
+      like tokens — redact these before sharing logs.
   no_multicast:
-    name: Disable Multicast UDP Broadcast for LAN API Discovery
+    name: Disable Multicast Discovery
     description: >-
-      If multicast-UDP doesn't work in your network, you can disable
-      the use of the default multicast group 239.255.255.250. If
-      you disable this, you should enable some of the other LAN
-      discovery options.
+      Disables the standard multicast method for finding Govee
+      devices on your network. Only enable this if you are using
+      one of the alternative discovery methods below.
   broadcast_all:
-    name: Send discovery to each network interface
+    name: Broadcast to Each Network Interface
     description: >-
-      If multicast-UDP doesn't work in your network, you may wish
-      to enable this option. It will enumerate the non-loopback
-      network interfaces on your system, and send a discovery packet
-      to the broadcast address of each one.
+      Alternative discovery method: sends a discovery packet to
+      every network interface on your system. Try this if the
+      default multicast discovery does not find your devices.
   scan:
-    name: Additional IPs and broadcast addresses to scan
+    name: Scan Specific IP Addresses
     description: >-
-      Enter a comma-separated list of IP addresses, broadcast
-      addresses or multicast addresses to which to send discovery
-      packets.  You can use this to list out the individual addresses
-      of your Govee devices, assuming that they are configured with
-      static IP addresses and that they are reachable from the
-      home assistant machine.
+      Comma-separated list of IP addresses to scan directly.
+      Use this to target specific Govee devices (assign them
+      static IPs first) or broadcast addresses for other subnets.
   global_broadcast:
-    name: Send discovery to global broadcast address
+    name: Global Broadcast Discovery
     description: >-
-      If multicast-UDP doesn't work in your network, you may wish
-      to enable this option. It will send discovery packets to the
-      global broadcast address 255.255.255.255. To be honest, if
-      multicast-UDP doesn't work, this isn't likely to work any
-      better.
+      Sends discovery packets to 255.255.255.255. Rarely helps
+      if standard multicast already fails — try "Broadcast to
+      Each Network Interface" or "Scan Specific IP Addresses"
+      instead.
 
 
 

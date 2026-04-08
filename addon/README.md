@@ -1,5 +1,5 @@
-# Govee to MQTT bridge: Home Assistant Add-On
+# Govee2MQTT Bridge
 
-This addon provides a bridge between [Govee](https://govee.com) lights and Home Assistant,
-via the [Home Assistant MQTT Integration](https://www.home-assistant.io/integrations/mqtt/).
+Bridges [Govee](https://govee.com) smart home devices to Home Assistant
+via the [MQTT integration](https://www.home-assistant.io/integrations/mqtt/).
 

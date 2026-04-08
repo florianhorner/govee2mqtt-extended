@@ -1,83 +1,79 @@
-# Frequently asked Questions
+# Frequently Asked Questions
 
 ## Why can't I turn off a Segment?
 
-The Govee API for segments can only specify brightness and color, rather than
-power state for the segment.
+Govee's API only supports setting brightness and color for segments — not
+power state. However, Home Assistant assumes every light entity has a power
+toggle, so one appears in the UI even though it has no effect.
 
-However, Home Assistant's Light entity assumes that there is a power state
-control for all lights, so when the entity is made available to Home Assistant
-it shows up with a power control.
-
-Consequently, the power control for a segment does nothing and cannot be
-removed from the Home Assistant UI for the light entity.
+This is a Home Assistant limitation and cannot be removed from the light
+entity UI.
 
 ## Why is my control over a Segment limited?
 
-Govee to MQTT merely passes your control requests on to the Govee device,
-and what happens next depends upon Govee. Some devices are more flexible
-than others.  For example, some devices cannot set a segment brightness to 0,
-while others have their individual brightness bound to the brightness of
-the overall light entity.
+Govee2MQTT passes your control requests directly to the Govee device.
+What happens after that depends on the device's firmware. Some devices are
+more flexible than others — for example, some cannot set segment brightness
+to 0, while others tie segment brightness to the main light's brightness.
 
-Govee to MQTT has no way to control this device-specific behavior.
+Govee2MQTT has no way to override this device-specific behavior.
 
 ## How do I enable Video Effects for a Light?
 
-The Govee API doesn't support returning video effects, so they are not made
-available in the list of effects for a light.
+Govee's API does not expose video effects directly. To make them available
+in Home Assistant:
 
-What you can do to make video effects available in Home Assistant is to use the
-Govee Home App to create either a "Tap-to-Run" shortcut or a saved "Snapshot"
-that activates the desired mode for the device.
+1. Open the **Govee Home** app and create a **Tap-to-Run** shortcut or a
+   saved **Snapshot** that activates the desired video effect.
+2. In Home Assistant, go to the **"Govee to MQTT"** device in the MQTT
+   integration and click **"Purge Caches"**.
 
-Then, go to the "Govee to MQTT" device in the MQTT integration in Home
-Assistant and click the "Purge Caches" button.
+After purging:
+* **Tap-to-Run** shortcuts appear as Scene entities in Home Assistant.
+* **Snapshots** appear in the Effects list on the device itself.
 
-* Tap-to-Run will be mapped into Home Assistant as a Scene entity.
-* Snapshots will appear in the list of Effects on the device itself.
+## My devices appear greyed out / unavailable in Home Assistant
 
-## My Device(s) appear as Greyed Out and Unavailable in Home Assistant
+This usually means Home Assistant had trouble registering the device entity
+via MQTT. To troubleshoot:
 
-This suggests that there is a problem with (re)registering the entity
-in Home Assistant.
+1. Check the **Home Assistant logs** for entries mentioning `gv2mqtt` or
+   `mqtt` — these often explain the root cause.
+2. Try deleting the affected device(s) from the MQTT integration, then
+   clicking **"Purge Caches"** on the "Govee to MQTT" device.
 
-There may be more information available in the Home Assistant logs.  Look for
-log entries that reference `gv2mqtt` or `mqtt`.  Please make a point of
-collecting that and reporting an issue.
-
-You may also wish to try deleting the device(s) from the MQTT integration
-in Home Assistant, then going to the "Govee to MQTT" device and clicking
-the "Purge Caches" button to see how the situation evolves.
+If the issue persists, please [file an issue](https://github.com/wez/govee2mqtt/issues)
+with the relevant log entries.
 
 <img src="https://github.com/wez/govee2mqtt/assets/117777/565d8580-f068-4ec3-8c16-11d2808688bf" width="50%">
 
 ## Is my device supported?
 
-Check out [this page](SKUS.md) for more details on supported devices.
+See [Supported Devices](SKUS.md) for the full list.
 
-## Please add support for HXXXX
+## Can you add support for device HXXXX?
 
-As is explained in [this page](SKUS.md), there is little direct knowledge of
-specific devices in this software, which acts as a bridge into Govee's
-documented and undocumented APIs. There isn't anything practical that can be
-done here to directly control a device that isn't supported by Govee's APIs.
+Govee2MQTT supports any device that Govee exposes through its APIs — there
+is very little device-specific code in the bridge itself. If your device has
+Wi-Fi and a Govee API, it should work automatically.
 
-## The device MAC addresses shown in the logs don't match the MACs on my network!?
+If it doesn't, [file an issue](https://github.com/wez/govee2mqtt/issues) with
+your device SKU and we can investigate whether a quirks entry is needed.
+See [Supported Devices](SKUS.md) for more details.
 
-Govee device IDs are not network MAC addresses. For some devices the device ID
-is a superset of the BLE MAC for the device, but if you look carefully you'll
-see that the device ID is too large to be a MAC.
+## The device MAC addresses in the logs don't match my network MACs
 
-## This device should be available via the LAN API, but didn't respond to probing yet
+Govee device IDs are **not** network MAC addresses. They are internal
+identifiers that may include parts of the BLE MAC but are longer than a
+standard MAC address. This is expected behavior.
 
-Look at [this page](LAN.md) for more details on the LAN API and things you can try.
+## "This device should be available via the LAN API, but didn't respond to probing yet"
+
+See [LAN API Troubleshooting](LAN.md) for common causes and solutions.
 
 ## "devices not belong you" error in logs
 
-This error appears to be returned from Govee when trying to use the Platform
-API with devices that are BLE-only and have no WiFi support.  Please file an
-issue about this so that we can add an entry to the quirks database.
-
-
+This error comes from Govee's Platform API when it encounters BLE-only
+devices with no Wi-Fi support. Please [file an issue](https://github.com/wez/govee2mqtt/issues)
+with your device SKU so we can add it to the quirks database.
 

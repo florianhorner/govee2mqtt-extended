@@ -4,13 +4,13 @@ Support depends largely on what Govee exposes via its documented APIs.
 There are some devices for which the undocumented APIs have been
 reverse engineered.
 
-If the device has no WiFi, then Govee2MQTT is not able to control
-it at this time, as there is no BLE support in Govee2MQTT at this time.
+If the device has no Wi-Fi, then Govee2MQTT cannot control
+it, as there is no BLE support in Govee2MQTT yet.
 
 Only devices that support the LAN API are able to be controlled locally without
 internet access, however, the LAN API only enables a subset of the full device
 functionality. All known LAN API compatible devices are lights; there are no
-known applicance devices that support fully local control. This is not a
+known appliance devices that support fully local control. This is not a
 limitation of Govee2MQTT, but a limitation of the hardware itself.
 
 |Family|LAN API?|Platform API?|Undocumented API?|
