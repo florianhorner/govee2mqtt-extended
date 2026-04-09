@@ -158,16 +158,16 @@ async fn enumerate_devices_via_undo_api(
     Ok(())
 }
 
-const ISSUE_76_EXPLANATION: &str = "Startup cannot automatically continue because entity names\n\
-    could become inconsistent especially across frequent similar\n\
-    intermittent issues if/as they occur on an ongoing basis.\n\
-    Please see https://github.com/wez/govee2mqtt/issues/76\n\
-    A workaround is to remove the Govee API credentials from your\n\
-    configuration, which will cause this govee2mqtt to use only\n\
-    the LAN API. Two consequences of that will be loss of control\n\
-    over devices that do not support the LAN API, and also devices\n\
-    changing entity ID to less descriptive names due to lack of\n\
-    metadata availability via the LAN API.";
+const ISSUE_76_EXPLANATION: &str = "\
+    Startup paused: Govee's API did not return your device list.\n\
+    Continuing without it would cause devices to get new, less descriptive\n\
+    entity IDs in Home Assistant, which can break automations and dashboards.\n\
+    \n\
+    Workaround: remove your Govee API credentials from the configuration.\n\
+    This limits govee2mqtt to LAN-only control (no cloud-only devices,\n\
+    less descriptive entity names).\n\
+    \n\
+    Details: https://github.com/wez/govee2mqtt/issues/76";
 
 impl ServeCommand {
     pub async fn run(&self, args: &crate::Args) -> anyhow::Result<()> {

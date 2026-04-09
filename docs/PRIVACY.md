@@ -2,7 +2,7 @@
 
 Beyond data that is unavoidably sent to Govee's cloud servers (which are hosted
 in AWS) as a necessary part of controlling your devices, **no** data about your
-device(s) or `govee2mqtt` usage leave your device or are sent to the maintainers
+device(s) or `govee2mqtt` usage leaves your device or is sent to the maintainers
 of `govee2mqtt`.
 
 Any credentials you configure `govee2mqtt` to use are used solely to authenticate

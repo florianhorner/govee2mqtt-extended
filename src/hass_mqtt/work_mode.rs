@@ -73,12 +73,7 @@ impl ParsedWorkMode {
                     m.label = "Manual: Mist Level".to_string();
                 }
             }
-            "H7131" => {
-                if let Some(m) = self.modes.get_mut("gearMode") {
-                    m.label = "Heat".to_string();
-                }
-            }
-            "H7173" => {
+            "H7131" | "H7173" => {
                 if let Some(m) = self.modes.get_mut("gearMode") {
                     m.label = "Heat".to_string();
                 }

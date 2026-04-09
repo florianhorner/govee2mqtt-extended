@@ -1,59 +1,67 @@
-# Govee LAN API Information
+# LAN API: Local Device Control
 
-[Govee's LAN control API](https://app-h5.govee.com/user-manual/wlan-guide) is a
-UDP based protocol with the following requirements:
+The LAN API lets Govee2MQTT control your devices directly over your home
+network — no internet required. This means faster response times and
+continued operation even if your internet goes down.
 
-* Govee2MQTT must be able to bind to UDP port `4002` on the machine where it runs
-* Each Govee device must individually have had its LAN API access enabled
-  in its settings in the Govee Home App
-* UDP ports 4001 and 4003 must be reachable on each Govee device
+**Not all devices support the LAN API.** Check
+[Govee's LAN API guide](https://app-h5.govee.com/user-manual/wlan-guide)
+for a list of supported devices.
 
-## Device Discovery
+## Prerequisites
 
-Govee devices with LAN protocol enabled will listen for discovery packets
-UDP port 4001.  They join the multicast group `239.255.255.250` so that
-a client performing discovery, in theory, only needs to multicast to
-that same group and limit the amount of network traffic expended on
-discovery.
+Before troubleshooting, make sure you've done these:
 
-In practice, multicast-UDP is not well supported by various routers, especially
-on WiFI enabled networks.
+1. **Enable LAN API on each device** — In the Govee Home app, go to
+   the device's settings (gear icon) and turn on "LAN Control."
+2. **Govee2MQTT must be on the same network** as your Govee devices.
+3. **UDP ports 4001, 4002, and 4003** must not be blocked by your
+   router or firewall.
 
-Govee2MQTT provides a couple of options that can help in situations where
-multicast-UDP isn't working well in your environment, or where you have more
-unusual network topology.
+## If your devices aren't found
 
-* You can specify a list of IP address to which discovery packets should
-  be sent directly
-* You can specify a number of variations on regular UDP broadcasts that
-  might work better than multicast in some situations
+Govee2MQTT discovers devices by sending a message to a special network
+address (multicast). Some routers and Wi-Fi setups block this traffic.
 
-For a device to be shown as usable via the LAN API in Govee2MQTT:
+**Try these in order:**
 
-* UDP ports `4001` and `4003` must both be reachable from the Govee2MQTT instance
-* The Govee device will respond to the source IP address of the packets sent
-  from Govee2MQTT, but UDP port `4002` will be used instead of the originating
-  port. Your network must allow this sort of "reply" to route back to Govee2MQTT.
+### 1. Enable "Broadcast to Each Network Interface"
 
-See [LAN API Control Config](CONFIG.md#lan-api-control) for more details on how
-to configure these options.
+This sends discovery messages to every network adapter on your system
+instead of using multicast. In most cases, this solves the problem.
 
-## Router / Network Setup tips
+Set `broadcast_all` to `true` in the app config (or `GOVEE_LAN_BROADCAST_ALL=true`
+in Docker).
 
-* Some routers have optimizations that prevent multicast-UDP from crossing from
-  the WLAN to the LAN. Check your router's manual and configuration options.
-  Don't confuse it with multicast-DNS. While that also uses UDP, it is a
-  specialization and having that working doesn't imply that multicast-UDP in
-  general will work.
+### 2. Target specific device IPs
 
-* Consider enabling the `broadcast_all` option for the addon, which uses
-  explicit UDP broadcasts to each network interface, rather than multicast.
+If broadcasting doesn't work, you can tell Govee2MQTT exactly where your
+devices are:
 
-* Assign a static IP to the device in your DHCP setup, then add that IP to the
-  [scan list](CONFIG.md#lan-api-control) in the addon config, which will use
-  unicast UDP packets to each device.  This is heavier on your network, but
-  more compatible with certain VLAN setups.
+1. Assign a **static IP address** to each Govee device in your router's
+   DHCP settings (this prevents the IP from changing).
+2. Enter those IPs in the `scan` field (comma-separated), e.g.
+   `10.0.0.50,10.0.0.51`.
 
-* If you have an IOT VLAN or similar, ensure that your firewall is not blocking
-  the ports mentioned above
+### 3. Check your router settings
 
+- Some routers block multicast traffic between Wi-Fi and wired networks.
+  Look for "multicast" or "IGMP" settings in your router's admin panel.
+- If your Govee devices are on a separate network or VLAN, make sure
+  your firewall allows UDP traffic on ports 4001-4003 between networks.
+- Don't confuse "multicast DNS" (mDNS/Bonjour) with general multicast —
+  having mDNS working doesn't guarantee other multicast traffic works.
+
+## Technical details
+
+For those who want the full picture:
+
+- Govee devices with LAN API listen on **UDP port 4001** and join
+  multicast group **239.255.255.250**.
+- Govee2MQTT binds to **UDP port 4002** to receive responses.
+- When a device responds, it sends to the **source IP** of the discovery
+  packet but always uses **port 4002** (not the originating port).
+  Your network must allow this return traffic.
+
+See [Configuration → LAN API Control](CONFIG.md#lan-api-control) for all
+available settings.

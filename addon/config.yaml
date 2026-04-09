@@ -1,8 +1,8 @@
-name: Govee to MQTT Bridge (Extended)
+name: Govee2MQTT Bridge (Extended)
 image: ghcr.io/florianhorner/govee2mqtt-{arch}
 version: "2026.03.28-cce5dc3c"
 slug: govee2mqtt
-description: Control Govee Devices
+description: Bridge Govee devices to Home Assistant via MQTT
 url: https://github.com/florianhorner/govee2mqtt-extended
 arch:
   - amd64

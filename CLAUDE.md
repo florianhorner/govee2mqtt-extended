@@ -14,7 +14,7 @@ cargo fmt --all -- --check
 ## Project Structure
 
 - `src/` — Rust source code
-- `addon/` — Home Assistant add-on configuration
+- `addon/` — Home Assistant app (add-on) configuration
 - `scripts/` — Build and release scripts
 - `docs/` — Documentation
 - `test-data/` — Test fixtures
