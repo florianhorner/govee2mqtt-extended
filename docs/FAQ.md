@@ -82,7 +82,8 @@ See [Supported Devices](SKUS.md) for more details.
 ## How do the Scene Next / Previous buttons work?
 
 The extended fork adds **"Scene Next"** and **"Scene Previous"** buttons to
-each light device in Home Assistant. These let you cycle through all
+compatible light devices in Home Assistant. These are currently shown for
+lights that support **RGB** or **color temperature** control. They let you cycle through all
 available scenes for a device without opening the Govee app or picking
 from a long list.
 
@@ -106,4 +107,3 @@ See [LAN API Troubleshooting](LAN.md) for common causes and solutions.
 This error comes from Govee's Platform API when it encounters BLE-only
 devices with no Wi-Fi support. Please [file an issue](https://github.com/wez/govee2mqtt/issues)
 with your device SKU so we can add it to the quirks database.
-
