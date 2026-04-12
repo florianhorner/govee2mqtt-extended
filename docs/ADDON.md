@@ -46,7 +46,7 @@ and Home Assistant both check. The Mosquitto broker app runs this mailbox.
 
 4. **Click** "Repositories"
 5. **Enter** `https://github.com/wez/govee2mqtt` and click **"Add"**
-   > **Extended fork:** Use `https://github.com/florianhorner/govee2mqtt-extended` instead for additional fixes and device support. See the [README](../README.md#what-this-fork-adds) for details.
+   > **Using this fork?** Use `https://github.com/florianhorner/govee2mqtt-extended` instead for additional fixes and device support. See the [README](../README.md#what-this-fork-adds) for details.
 6. You should see:
 
 ![image](https://github.com/wez/govee-lan-hass/assets/117777/a2603e2d-dec1-4711-8d94-c957bf4a7a01)
@@ -85,7 +85,7 @@ Once Govee2MQTT starts, here's what happens in Home Assistant:
 
 - A **light entity** with on/off, brightness, color, and color temperature controls
 - An **effects list** with your DIY scenes and music modes (requires API key)
-- **"Scene Next" / "Scene Previous" buttons** for cycling through scenes (extended fork only)
+- **"Scene Next" / "Scene Previous" buttons** for cycling through scenes (this fork only)
 - **Segment entities** (e.g. "Segment 001") if your device supports segment control (requires API key)
 
 **For humidifiers, heaters, fans**, etc.: a climate or humidifier entity with the controls Govee's API exposes for that model.

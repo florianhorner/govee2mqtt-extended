@@ -1,5 +1,10 @@
-> **This is a maintained community fork** with additional fixes and device support not yet in the upstream project.
-> If you installed this fork for the UTF-8 crash fix (now [merged upstream](https://github.com/wez/govee2mqtt/pull/606)), you can [switch back](#switch-back-to-upstream).
+> **Fork of [wez/govee2mqtt](https://github.com/wez/govee2mqtt)** with device fixes, crash hardening, and scene cycling.
+> Prefer upstream unless you need these specific changes.
+> Maintained by [@florianhorner](https://github.com/florianhorner).
+>
+> **Use this fork if** you need H60B0 support, 2FA login, scene quick-cycle, or can't wait for upstream fixes.
+> When these changes land upstream, switch back — this fork is a staging ground, not a permanent alternative.
+>
 > See [What this fork adds](#what-this-fork-adds) for details.
 
 # Govee2MQTT: Govee-to-Home-Assistant Bridge
@@ -58,11 +63,11 @@ Choose the installation method that matches your Home Assistant setup:
 
 ## What this fork adds
 
-This is a community fork of [wez/govee2mqtt](https://github.com/wez/govee2mqtt) with
-additional fixes and features:
+This fork of [wez/govee2mqtt](https://github.com/wez/govee2mqtt)
+adds device support, stability fixes, and features I needed for my setup:
 
 * **H60B0 (Neon Rope Light 2)** — added as LAN-capable device
-* **Panic hardening** — `.expect()` panics replaced with graceful error handling
+* **Panic hardening (in progress)** — critical `.expect()` panics replaced with graceful error handling
 * **Exit code fix** — silent `exit(0)` changed to `exit(1)` so Home Assistant properly restarts the app on failure
 * **Scene quick-cycle** — Next/Previous buttons and scene info sensor
 * **CI improvements** — clippy gate, pre-commit hooks, automated testing
@@ -70,7 +75,7 @@ additional fixes and features:
 **Upstream status:**
 - ✅ UTF-8 fix — [merged via #606](https://github.com/wez/govee2mqtt/pull/606) on 2026-03-25
 - ⏳ H60B0 device support — [PR #629](https://github.com/wez/govee2mqtt/pull/629) pending
-- ⏳ Panic hardening + exit code fix — [#617](https://github.com/wez/govee2mqtt/issues/617), [#618](https://github.com/wez/govee2mqtt/issues/618) filed, no PR yet
+- ⏳ Panic hardening + exit code fix — [#617](https://github.com/wez/govee2mqtt/issues/617), [#618](https://github.com/wez/govee2mqtt/issues/618) filed, PRs planned
 - 🆕 Scene quick-cycle buttons + catalog — fork-only feature, not submitted upstream
 
 ## Switch back to upstream
@@ -86,6 +91,8 @@ The UTF-8 crash fix is now upstream in release `2026.03.25-ab9deb66`. If you onl
 **Note:** If you want the additional fixes in this fork (H60B0 support, panic hardening, exit code fix), stay on this fork until those are merged upstream.
 
 ## Credits
+
+This fork is maintained by [@florianhorner](https://github.com/florianhorner).
 
 This work is based on wez's earlier work with [Govee LAN
 Control](https://github.com/wez/govee-lan-hass/).

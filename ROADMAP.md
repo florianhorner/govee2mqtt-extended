@@ -1,6 +1,6 @@
 # Roadmap
 
-What's planned for the extended fork. Items move up as they're worked on.
+What's planned for this fork. Items move up as they're worked on.
 PRs and ideas welcome — [open an issue](https://github.com/florianhorner/govee2mqtt-extended/issues).
 
 ---

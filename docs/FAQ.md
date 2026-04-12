@@ -81,7 +81,7 @@ See [Supported Devices](SKUS.md) for more details.
 
 ## How do the Scene Next / Previous buttons work?
 
-The extended fork adds **"Scene Next"** and **"Scene Previous"** buttons to
+This fork adds **"Scene Next"** and **"Scene Previous"** buttons to
 compatible light devices in Home Assistant. These are currently shown for
 lights that support **RGB** or **color temperature** control. They let you cycle through all
 available scenes for a device without opening the Govee app or picking
@@ -90,7 +90,7 @@ from a long list.
 A **"Scene Info"** sensor shows the name and category of the currently
 active scene.
 
-These buttons are only available in the [extended fork](../README.md#what-this-fork-adds).
+These buttons are only available in [this fork](../README.md#what-this-fork-adds).
 
 ## The device MAC addresses in the logs don't match my network MACs
 
