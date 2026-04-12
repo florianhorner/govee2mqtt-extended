@@ -3,10 +3,10 @@ check:
 	cargo check
 
 test:
-	cargo nextest run
+	cargo test --all
 
 fmt:
-	cargo +nightly fmt
+	cargo fmt --all
 
 docker:
 	docker build .
