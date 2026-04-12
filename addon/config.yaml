@@ -1,8 +1,9 @@
-name: Govee2MQTT Bridge (Extended)
+name: Govee2MQTT Bridge (Fork)
 image: ghcr.io/florianhorner/govee2mqtt-{arch}
 version: "2026.03.28-cce5dc3c"
 slug: govee2mqtt
-description: Bridge Govee devices to Home Assistant via MQTT
+stage: experimental
+description: Fork of wez/govee2mqtt with extra device support, crash fixes, and scene cycling. Prefer upstream if you don't need these additions.
 url: https://github.com/florianhorner/govee2mqtt
 arch:
   - amd64
