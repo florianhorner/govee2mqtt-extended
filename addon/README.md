@@ -1,9 +1,10 @@
 # Govee2MQTT Bridge (Fork)
 
-> **Prefer upstream?** If you don't need the extras below, use the original
-> [wez/govee2mqtt](https://github.com/wez/govee2mqtt) — it's the authoritative source.
-> This fork exists to ship device support, crash fixes, and features that
-> haven't landed upstream yet. Fixes are contributed back via PRs.
+> Fork of [wez/govee2mqtt](https://github.com/wez/govee2mqtt) with device fixes, crash hardening, and scene cycling.
+> Prefer upstream unless you need these specific changes.
+>
+> **Use this fork if** you need H60B0 support, 2FA login, scene quick-cycle, or can't wait for upstream fixes.
+> When these changes land upstream, switch back — this fork is a staging ground, not a permanent alternative.
 
 Control your Govee lights, LED strips, humidifiers, and other smart devices
 directly from Home Assistant — including automations, dashboards, and

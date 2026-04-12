@@ -3,7 +3,7 @@ image: ghcr.io/florianhorner/govee2mqtt-{arch}
 version: "2026.03.28-cce5dc3c"
 slug: govee2mqtt
 stage: experimental
-description: Fork of wez/govee2mqtt with extra device support, crash fixes, and scene cycling. Prefer upstream if you don't need these additions.
+description: Fork of wez/govee2mqtt with device fixes, crash hardening, and scene cycling. Prefer upstream unless you need these specific changes.
 url: https://github.com/florianhorner/govee2mqtt-extended
 arch:
   - amd64

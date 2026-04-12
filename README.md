@@ -1,9 +1,10 @@
-> **Fork of [wez/govee2mqtt](https://github.com/wez/govee2mqtt)** with
-> additional device support, crash fixes, and scene cycling.
+> **Fork of [wez/govee2mqtt](https://github.com/wez/govee2mqtt)** with device fixes, crash hardening, and scene cycling.
+> Prefer upstream unless you need these specific changes.
 > Maintained by [@florianhorner](https://github.com/florianhorner).
-> If you installed this fork for the UTF-8 crash fix (now
-> [merged upstream](https://github.com/wez/govee2mqtt/pull/606)),
-> you can [switch back](#switch-back-to-upstream).
+>
+> **Use this fork if** you need H60B0 support, 2FA login, scene quick-cycle, or can't wait for upstream fixes.
+> When these changes land upstream, switch back — this fork is a staging ground, not a permanent alternative.
+>
 > See [What this fork adds](#what-this-fork-adds) for details.
 
 # Govee2MQTT: Govee-to-Home-Assistant Bridge
