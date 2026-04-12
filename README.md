@@ -66,7 +66,7 @@ This fork of [wez/govee2mqtt](https://github.com/wez/govee2mqtt)
 adds device support, stability fixes, and features I needed for my setup:
 
 * **H60B0 (Neon Rope Light 2)** — added as LAN-capable device
-* **Panic hardening** — `.expect()` panics replaced with graceful error handling
+* **Panic hardening (in progress)** — critical `.expect()` panics replaced with graceful error handling
 * **Exit code fix** — silent `exit(0)` changed to `exit(1)` so Home Assistant properly restarts the app on failure
 * **Scene quick-cycle** — Next/Previous buttons and scene info sensor
 * **CI improvements** — clippy gate, pre-commit hooks, automated testing
