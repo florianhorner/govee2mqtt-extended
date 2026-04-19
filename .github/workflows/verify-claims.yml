@@ -1,0 +1,11 @@
+name: verify-claims
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, ready_for_review]
+
+jobs:
+  verify:
+    uses: florianhorner/gh-workflows/.github/workflows/verify-claims.yml@v1
+    with:
+      owned_repos: "florianhorner/govee2mqtt-extended"
