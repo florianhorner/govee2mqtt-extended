@@ -22,7 +22,7 @@ on:
       - ".dockerignore"
 
 env:
-  IMAGE: ghcr.io/florianhorner/govee2mqtt
+  IMAGE: ghcr.io/sake1011/govee2mqtt-extended-v2
 
 jobs:
   build:
