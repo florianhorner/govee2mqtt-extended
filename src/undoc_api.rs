@@ -81,10 +81,15 @@ pub struct UndocApiArguments {
     #[arg(long, global = true)]
     pub govee_password: Option<String>,
 
+    /// Two-factor authentication code, sent by Govee to the account email
+    /// after a 454 response. Required only if the account has 2FA enabled.
+    /// Read from GOVEE_2FA_CODE if not passed via CLI.
+    #[arg(long, global = true)]
+    pub govee_2fa_code: Option<String>,
+
     /// Where to store the AWS IoT key file.
     #[arg(long, global = true, default_value = "/dev/shm/govee.iot.key")]
     pub govee_iot_key: PathBuf,
-
     /// Where to store the AWS IoT certificate file.
     #[arg(long, global = true, default_value = "/dev/shm/govee.iot.cert")]
     pub govee_iot_cert: PathBuf,
@@ -127,10 +132,18 @@ impl UndocApiArguments {
         })
     }
 
+    pub fn opt_2fa_code(&self) -> anyhow::Result<Option<String>> {
+        match &self.govee_2fa_code {
+            Some(code) => Ok(Some(code.to_string())),
+            None => opt_env_var("GOVEE_2FA_CODE"),
+        }
+    }
+
     pub fn api_client(&self) -> anyhow::Result<GoveeUndocumentedApi> {
         let email = self.email()?;
         let password = self.password()?;
-        Ok(GoveeUndocumentedApi::new(email, password))
+        let code = self.opt_2fa_code()?;
+        Ok(GoveeUndocumentedApi::new(email, password).with_code(code))
     }
 }
 
@@ -138,6 +151,7 @@ impl UndocApiArguments {
 pub struct GoveeUndocumentedApi {
     email: String,
     password: String,
+    code: Option<String>,
     client_id: String,
 }
 
@@ -150,8 +164,52 @@ impl GoveeUndocumentedApi {
         Self {
             email,
             password,
+            code: None,
             client_id,
         }
+    }
+
+    /// Builder-style setter for the optional 2FA verification code.
+    /// Returns self for chaining: GoveeUndocumentedApi::new(...).with_code(...)
+    pub fn with_code(mut self, code: Option<String>) -> Self {
+        self.code = code;
+        self
+    }
+
+    /// POST to the verification endpoint to request a 2FA code be sent
+    /// to the account's email address. Govee uses type=8 for login verification.
+    /// This is an internal helper used when login returns 454.
+    async fn request_verification_code(&self) -> anyhow::Result<()> {
+        let response = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()?
+            .request(
+                Method::POST,
+                "https://app2.govee.com/account/rest/account/v1/verification",
+            )
+            .header("appVersion", APP_VERSION)
+            .header("clientId", &self.client_id)
+            .header("clientType", "1")
+            .header("iotVersion", "0")
+            .header("timestamp", ms_timestamp())
+            .header("User-Agent", user_agent())
+            .json(&serde_json::json!({
+                "email": self.email,
+                "type": 8,
+            }))
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "Failed to request 2FA verification code: HTTP {} - {}",
+                status.as_u16(),
+                body
+            );
+        }
+        Ok(())
     }
 
     #[allow(unused)]
@@ -201,6 +259,17 @@ impl GoveeUndocumentedApi {
     }
 
     async fn login_account_impl(&self) -> anyhow::Result<CacheComputeResult<LoginAccountResponse>> {
+        // Build the login JSON body. The "code" field is added only when a
+        // 2FA verification code is set on this client instance.
+        let mut login_body = serde_json::json!({
+            "email": self.email,
+            "password": self.password,
+            "client": &self.client_id,
+        });
+        if let Some(code) = &self.code {
+            login_body["code"] = serde_json::Value::String(code.clone());
+        }
+
         let response = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()?
@@ -214,29 +283,67 @@ impl GoveeUndocumentedApi {
             .header("iotVersion", "0")
             .header("timestamp", ms_timestamp())
             .header("User-Agent", user_agent())
-            .json(&serde_json::json!({
-                "email": self.email,
-                "password": self.password,
-                "client": &self.client_id,
-            }))
+            .json(&login_body)
             .send()
             .await?;
 
         // Read the response body manually so we can check for 454 (2FA required)
-        // before attempting deserialization. A 454 must not be negative-cached,
-        // because the user needs to retry with a code within 15 minutes.
+        // and 455 (invalid code) before attempting deserialization. A 454/455
+        // must not be negative-cached, because the user needs to retry with a
+        // code within 15 minutes.
         let url = response.url().clone();
         let status = response.status();
         let body_bytes = response.bytes().await?;
 
-        // Govee returns HTTP 200 with {"status": 454} when 2FA is required
         if let Ok(probe) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-            if probe.get("status").and_then(|s| s.as_u64()) == Some(454) {
+            let api_status = probe.get("status").and_then(|s| s.as_u64());
+
+            // 454 = 2FA verification required.
+            if api_status == Some(454) {
+                if self.code.is_some() {
+                    // A code was supplied but Govee still says 2FA is required.
+                    // This usually means the code expired or is malformed.
+                    anyhow::bail!(
+                        "Govee 2FA verification failed (status 454 returned despite \
+                         code being supplied). The code may have expired (~15 min \
+                         validity) or be incorrect. Remove govee_2fa_code from your \
+                         addon configuration and restart to request a fresh code."
+                    );
+                } else {
+                    // No code supplied yet. Trigger Govee to email a fresh one
+                    // and instruct the user how to proceed.
+                    let trigger_result = self.request_verification_code().await;
+                    let trigger_note = match trigger_result {
+                        Ok(()) => "A fresh verification code has been requested and \
+                                   sent to your account email.",
+                        Err(e) => {
+                            // We still want to fail loudly, but tell the user that
+                            // the email request itself also failed.
+                            return Err(anyhow::anyhow!(
+                                "Govee account requires 2FA verification, but \
+                                 requesting the verification email also failed: {e}. \
+                                 Try logging into the Govee Home app on your phone \
+                                 to trigger an email manually, then set govee_2fa_code \
+                                 in your addon configuration and restart."
+                            ));
+                        }
+                    };
+                    anyhow::bail!(
+                        "Govee account requires 2FA verification. {trigger_note} \
+                         Set the govee_2fa_code option in your Home Assistant addon \
+                         configuration (or the GOVEE_2FA_CODE environment variable) \
+                         to the code from the email and restart the addon. The code \
+                         is valid for approximately 15 minutes."
+                    );
+                }
+            }
+
+            // 455 = invalid / expired verification code (observed on some forks).
+            if api_status == Some(455) {
                 anyhow::bail!(
-                    "Govee account requires 2FA verification. \
-                     A code has been sent to your email. Set the GOVEE_2FA_CODE \
-                     environment variable (or govee_2fa_code addon option) to the \
-                     code and restart. The code is valid for approximately 15 minutes."
+                    "Govee 2FA verification code was rejected (status 455 - invalid \
+                     or expired). Remove govee_2fa_code from your addon configuration \
+                     and restart to trigger a fresh code."
                 );
             }
         }

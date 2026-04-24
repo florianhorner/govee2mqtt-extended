@@ -1,10 +1,10 @@
-name: Govee2MQTT Bridge (Fork)
-image: ghcr.io/florianhorner/govee2mqtt-{arch}
-version: "2026.04.21-db289bf3"
+name: Govee2MQTT Bridge (sake1011 2FA Patch)
+image: ghcr.io/sake1011/govee2mqtt-extended-v2-{arch}
+version: "2026.04.24-97b44c3c"
 slug: govee2mqtt
 stage: experimental
 description: Fork of wez/govee2mqtt with device fixes, crash hardening, and scene cycling. Prefer upstream unless you need these specific changes.
-url: https://github.com/florianhorner/govee2mqtt-extended
+url: https://github.com/sake1011/govee2mqtt-extended_v2
 arch:
   - amd64
   - aarch64
@@ -34,6 +34,7 @@ schema:
   temperature_scale: "str?"
   govee_email: "str?"
   govee_password: "password?"
+  govee_2fa_code: "password?"
   govee_api_key: "password?"
   mqtt_host: "str?"
   mqtt_port: "int?"
