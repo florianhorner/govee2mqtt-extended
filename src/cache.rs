@@ -96,6 +96,26 @@ pub fn invalidate_key(topic: &str, key: &str) -> anyhow::Result<()> {
     Ok(topic.delete(key)?)
 }
 
+/// Marker error: when a cached future returns `Err(anyhow::Error::from(NoCacheError(_)))`,
+/// `cache_get` skips the negative-cache write entirely. Use for transient errors where
+/// the caller must be able to retry sooner than `negative_ttl` (e.g. 2FA verification
+/// codes that expire in ~15 minutes — caching the failure for 15 min would trap the user
+/// in a loop matching the code's own validity window).
+#[derive(Debug)]
+pub struct NoCacheError(pub anyhow::Error);
+
+impl std::fmt::Display for NoCacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for NoCacheError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
 /// Cache an item with a soft TTL; we'll retry the operation
 /// if the TTL has expired, but allow stale reads
 pub async fn cache_get<T, Fut>(options: CacheGetOptions<'_>, future: Fut) -> anyhow::Result<T>
@@ -151,30 +171,42 @@ where
             updater.write(data.as_bytes(), options.hard_ttl)?;
             Ok(value)
         }
-        Err(err) => match cache_entry.take() {
-            Some(mut entry) if options.allow_stale => {
-                entry.expires = Utc::now() + options.negative_ttl;
+        Err(err) => {
+            // Opt-out: callers can return Err(NoCacheError(...).into()) to bypass
+            // both the stale-read path and the negative-cache write. The next call
+            // will re-execute the future instead of returning the cached failure.
+            if err.downcast_ref::<NoCacheError>().is_some() {
+                log::trace!(
+                    "cache_get: NoCacheError marker, skipping negative cache write for {}",
+                    options.key
+                );
+                return Err(err);
+            }
+            match cache_entry.take() {
+                Some(mut entry) if options.allow_stale => {
+                    entry.expires = Utc::now() + options.negative_ttl;
 
-                log::warn!("{err:#}, will use prior results");
-                if matches!(&entry.result, CacheResult::Err(_)) {
-                    entry.result = CacheResult::Err(format!("{err:#}"));
+                    log::warn!("{err:#}, will use prior results");
+                    if matches!(&entry.result, CacheResult::Err(_)) {
+                        entry.result = CacheResult::Err(format!("{err:#}"));
+                    }
+
+                    let data = serde_json::to_string_pretty(&entry)?;
+                    updater.write(data.as_bytes(), options.hard_ttl)?;
+
+                    entry.result.into_result()
                 }
+                _ => {
+                    let entry = CacheEntry {
+                        expires: Utc::now() + options.negative_ttl,
+                        result: CacheResult::Err(format!("{err:#}")),
+                    };
 
-                let data = serde_json::to_string_pretty(&entry)?;
-                updater.write(data.as_bytes(), options.hard_ttl)?;
-
-                entry.result.into_result()
+                    let data = serde_json::to_string_pretty(&entry)?;
+                    updater.write(data.as_bytes(), options.hard_ttl)?;
+                    entry.result.into_result()
+                }
             }
-            _ => {
-                let entry = CacheEntry {
-                    expires: Utc::now() + options.negative_ttl,
-                    result: CacheResult::Err(format!("{err:#}")),
-                };
-
-                let data = serde_json::to_string_pretty(&entry)?;
-                updater.write(data.as_bytes(), options.hard_ttl)?;
-                entry.result.into_result()
-            }
-        },
+        }
     }
 }

@@ -1,5 +1,5 @@
 #![allow(unused)]
-use crate::cache::{cache_get, CacheComputeResult, CacheGetOptions};
+use crate::cache::{cache_get, CacheComputeResult, CacheGetOptions, NoCacheError};
 use crate::lan_api::{boolean_int, truthy};
 use crate::opt_env_var;
 use crate::platform_api::{
@@ -53,6 +53,18 @@ impl<T: std::fmt::Debug> std::ops::Deref for Redacted<T> {
     }
 }
 
+/// Inspect a Govee login response body for the `status` field. Govee uses
+/// HTTP 200 with `{"status": 454}` to signal "2FA required" and `{"status":
+/// 455}` for "code invalid/expired", so we have to look inside the JSON
+/// payload rather than relying on the HTTP status code. Returns `None` when
+/// the body is not JSON or the field is missing/non-numeric — the caller
+/// then falls through to normal response parsing.
+fn classify_login_status(body_bytes: &[u8]) -> Option<u64> {
+    serde_json::from_slice::<serde_json::Value>(body_bytes)
+        .ok()
+        .and_then(|v| v.get("status").and_then(|s| s.as_u64()))
+}
+
 fn user_agent() -> String {
     format!(
         "GoveeHome/{APP_VERSION} (com.ihoment.GoVeeSensor; build:8; iOS 26.5.0) Alamofire/5.11.0"
@@ -80,6 +92,13 @@ pub struct UndocApiArguments {
     /// the GOVEE_PASSWORD environment variable.
     #[arg(long, global = true)]
     pub govee_password: Option<String>,
+
+    /// One-time verification code from Govee. Required when the account has 2FA
+    /// enabled and login returns status 454. Trigger a fresh code by signing in
+    /// to the Govee mobile app, paste it here, and restart the addon. The code
+    /// is valid for ~15 minutes. If not passed, read from GOVEE_2FA_CODE.
+    #[arg(long, global = true)]
+    pub govee_2fa_code: Option<String>,
 
     /// Where to store the AWS IoT key file.
     #[arg(long, global = true, default_value = "/dev/shm/govee.iot.key")]
@@ -127,10 +146,18 @@ impl UndocApiArguments {
         })
     }
 
+    pub fn opt_2fa_code(&self) -> anyhow::Result<Option<String>> {
+        match &self.govee_2fa_code {
+            Some(code) => Ok(Some(code.to_string())),
+            None => opt_env_var("GOVEE_2FA_CODE"),
+        }
+    }
+
     pub fn api_client(&self) -> anyhow::Result<GoveeUndocumentedApi> {
         let email = self.email()?;
         let password = self.password()?;
-        Ok(GoveeUndocumentedApi::new(email, password))
+        let code = self.opt_2fa_code()?;
+        Ok(GoveeUndocumentedApi::new(email, password).with_code(code))
     }
 }
 
@@ -138,6 +165,13 @@ impl UndocApiArguments {
 pub struct GoveeUndocumentedApi {
     email: String,
     password: String,
+    /// Optional 2FA verification code. Govee accepts this as the `code` field on
+    /// the login request body when the account has two-factor enabled. The code
+    /// is config-driven: the addon reads it from `govee_2fa_code` / GOVEE_2FA_CODE
+    /// at startup and it lives on this struct for the process lifetime. If Govee
+    /// rejects it (status 455), the addon bails uncacheable and the user supplies
+    /// a fresh code on the next restart.
+    code: Option<String>,
     client_id: String,
 }
 
@@ -150,8 +184,17 @@ impl GoveeUndocumentedApi {
         Self {
             email,
             password,
+            code: None,
             client_id,
         }
+    }
+
+    /// Builder-style setter for the 2FA verification code. Pass `None` if 2FA is
+    /// not enabled on the account; pass `Some(code)` after an earlier login
+    /// returned status 454 and the user has retrieved the code from email.
+    pub fn with_code(mut self, code: Option<String>) -> Self {
+        self.code = code;
+        self
     }
 
     #[allow(unused)]
@@ -200,7 +243,25 @@ impl GoveeUndocumentedApi {
         crate::cache::invalidate_key("undoc-api", "account-info").ok();
     }
 
+    /// Build the JSON body sent on every login request. The `code` field is
+    /// added only when a 2FA verification code has been configured; sending an
+    /// empty `code` to Govee for an account without 2FA causes a different
+    /// rejection. Pulled out as a helper so the shape can be unit-tested.
+    fn build_login_body(&self) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "email": self.email,
+            "password": self.password,
+            "client": &self.client_id,
+        });
+        if let Some(code) = &self.code {
+            body["code"] = serde_json::Value::String(code.clone());
+        }
+        body
+    }
+
     async fn login_account_impl(&self) -> anyhow::Result<CacheComputeResult<LoginAccountResponse>> {
+        let body = self.build_login_body();
+
         let response = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()?
@@ -214,31 +275,48 @@ impl GoveeUndocumentedApi {
             .header("iotVersion", "0")
             .header("timestamp", ms_timestamp())
             .header("User-Agent", user_agent())
-            .json(&serde_json::json!({
-                "email": self.email,
-                "password": self.password,
-                "client": &self.client_id,
-            }))
+            .json(&body)
             .send()
             .await?;
 
         // Read the response body manually so we can check for 454 (2FA required)
-        // before attempting deserialization. A 454 must not be negative-cached,
-        // because the user needs to retry with a code within 15 minutes.
+        // and 455 (invalid/expired code) before attempting deserialization. Both
+        // statuses are wrapped in NoCacheError so cache_get skips the negative
+        // cache write — the user must be able to retry with a fresh code within
+        // the ~15 minute validity window.
         let url = response.url().clone();
         let status = response.status();
         let body_bytes = response.bytes().await?;
 
-        // Govee returns HTTP 200 with {"status": 454} when 2FA is required
-        if let Ok(probe) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-            if probe.get("status").and_then(|s| s.as_u64()) == Some(454) {
-                anyhow::bail!(
-                    "Govee account requires 2FA verification. \
-                     A code has been sent to your email. Set the GOVEE_2FA_CODE \
-                     environment variable (or govee_2fa_code addon option) to the \
-                     code and restart. The code is valid for approximately 15 minutes."
-                );
+        match classify_login_status(&body_bytes) {
+            // 454 = 2FA verification required. Govee returns HTTP 200 with
+            // {"status": 454} when the account has 2FA enabled.
+            Some(454) => {
+                let msg = if self.code.is_some() {
+                    "Govee 2FA verification failed (status 454 returned despite \
+                     a code being supplied). The code may have expired (~15 min \
+                     validity) or be incorrect. Generate a fresh code by signing \
+                     in to the Govee mobile app, update govee_2fa_code, and \
+                     restart the addon."
+                } else {
+                    "Govee account requires 2FA verification. Sign in to the \
+                     Govee mobile app to trigger a verification email, then set \
+                     govee_2fa_code in the addon configuration (or the \
+                     GOVEE_2FA_CODE environment variable) and restart. The code \
+                     is valid for approximately 15 minutes."
+                };
+                return Err(NoCacheError(anyhow::anyhow!("{msg}")).into());
             }
+            // 455 = verification code rejected as invalid or expired.
+            Some(455) => {
+                return Err(NoCacheError(anyhow::anyhow!(
+                    "Govee 2FA verification code was rejected as invalid or \
+                     expired (status 455). Generate a fresh code via the Govee \
+                     mobile app, update govee_2fa_code, and restart."
+                ))
+                .into());
+            }
+            _ => {}
         }
 
         if !status.is_success() {
@@ -1003,5 +1081,85 @@ mod test {
         let resp: DevicesResponse =
             from_json(include_str!("../test-data/undoc-device-list-issue-21.json")).unwrap();
         k9::assert_matches_snapshot!(format!("{resp:#?}"));
+    }
+
+    // --- 2FA login support ---
+
+    #[test]
+    fn login_body_omits_code_when_unset() {
+        let api = GoveeUndocumentedApi::new("a@b.com", "pw");
+        let body = api.build_login_body();
+        assert_eq!(body["email"], "a@b.com");
+        assert_eq!(body["password"], "pw");
+        assert!(
+            body.get("code").is_none(),
+            "code field must be absent when self.code is None: {body}"
+        );
+    }
+
+    #[test]
+    fn login_body_includes_code_when_set() {
+        let api = GoveeUndocumentedApi::new("a@b.com", "pw").with_code(Some("123456".to_string()));
+        let body = api.build_login_body();
+        assert_eq!(body["code"], "123456");
+    }
+
+    #[test]
+    fn login_body_omits_code_when_explicit_none() {
+        let api = GoveeUndocumentedApi::new("a@b.com", "pw").with_code(None);
+        let body = api.build_login_body();
+        assert!(body.get("code").is_none());
+    }
+
+    #[test]
+    fn classify_454() {
+        assert_eq!(
+            classify_login_status(br#"{"status":454,"message":"need 2FA"}"#),
+            Some(454)
+        );
+    }
+
+    #[test]
+    fn classify_455() {
+        assert_eq!(classify_login_status(br#"{"status":455}"#), Some(455));
+    }
+
+    #[test]
+    fn classify_200() {
+        assert_eq!(
+            classify_login_status(br#"{"status":200,"client":{}}"#),
+            Some(200)
+        );
+    }
+
+    #[test]
+    fn classify_non_json_returns_none() {
+        assert_eq!(classify_login_status(b"<html>Bad Gateway</html>"), None);
+    }
+
+    #[test]
+    fn classify_missing_status_returns_none() {
+        assert_eq!(classify_login_status(br#"{"message":"hi"}"#), None);
+    }
+
+    /// Load-bearing test for the cache-bypass contract: a NoCacheError wrapped
+    /// in anyhow::Error MUST round-trip through downcast_ref. cache_get relies
+    /// on this exact path to decide whether to skip the negative-cache write.
+    #[test]
+    fn no_cache_error_downcasts_via_anyhow() {
+        let err: anyhow::Error = NoCacheError(anyhow::anyhow!("transient")).into();
+        assert!(
+            err.downcast_ref::<NoCacheError>().is_some(),
+            "NoCacheError must downcast back from anyhow::Error or cache_get cannot detect it"
+        );
+        assert!(format!("{err:#}").contains("transient"));
+    }
+
+    /// Plain anyhow::Error must NOT downcast to NoCacheError. Guards against a
+    /// future refactor that accidentally makes everything bypass the cache.
+    #[test]
+    fn plain_anyhow_error_does_not_downcast_to_no_cache_error() {
+        let err: anyhow::Error = anyhow::anyhow!("not a 2FA error");
+        assert!(err.downcast_ref::<NoCacheError>().is_none());
     }
 }
