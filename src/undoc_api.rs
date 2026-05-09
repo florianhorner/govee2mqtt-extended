@@ -65,6 +65,54 @@ fn classify_login_status(body_bytes: &[u8]) -> Option<u64> {
         .and_then(|v| v.get("status").and_then(|s| s.as_u64()))
 }
 
+/// Normalize a user-supplied 2FA code: strip surrounding whitespace and treat
+/// an empty result as "no code provided." Govee codes are 6 digits with no
+/// padding, but users routinely paste from email with trailing newlines or
+/// surrounding spaces; sending those verbatim trips status 455 with a
+/// misleading "code expired" message, which is a bad UX. Handling here keeps
+/// the trim policy in one place (vs scattered across CLI/env/HA-config code
+/// paths).
+fn normalize_2fa_code(raw: Option<String>) -> Option<String> {
+    raw.and_then(|s| {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+/// Build the right NoCacheError for a Govee login response status, or None if
+/// the status is not a 2FA condition. Pulled out of `login_account_impl` so
+/// the user-facing messaging can be unit-tested without an HTTP mock.
+fn build_2fa_error(status: u64, code_was_set: bool) -> Option<NoCacheError> {
+    match status {
+        454 => {
+            let msg = if code_was_set {
+                "Govee 2FA verification failed (status 454 returned despite \
+                 a code being supplied). The code may have expired (~15 min \
+                 validity) or be incorrect. Generate a fresh code by signing \
+                 in to the Govee mobile app, update govee_2fa_code, and \
+                 restart the addon."
+            } else {
+                "Govee account requires 2FA verification. Sign in to the \
+                 Govee mobile app to trigger a verification email, then set \
+                 govee_2fa_code in the addon configuration (or the \
+                 GOVEE_2FA_CODE environment variable) and restart. The code \
+                 is valid for approximately 15 minutes."
+            };
+            Some(NoCacheError(anyhow::anyhow!("{msg}")))
+        }
+        455 => Some(NoCacheError(anyhow::anyhow!(
+            "Govee 2FA verification code was rejected as invalid or expired \
+             (status 455). Generate a fresh code via the Govee mobile app, \
+             update govee_2fa_code, and restart."
+        ))),
+        _ => None,
+    }
+}
+
 fn user_agent() -> String {
     format!(
         "GoveeHome/{APP_VERSION} (com.ihoment.GoVeeSensor; build:8; iOS 26.5.0) Alamofire/5.11.0"
@@ -192,8 +240,14 @@ impl GoveeUndocumentedApi {
     /// Builder-style setter for the 2FA verification code. Pass `None` if 2FA is
     /// not enabled on the account; pass `Some(code)` after an earlier login
     /// returned status 454 and the user has retrieved the code from email.
+    ///
+    /// The code is normalized: surrounding whitespace is stripped and an empty
+    /// result is treated as `None`. This means `with_code(Some(""))` and
+    /// `with_code(Some("  \n"))` both leave the client in the no-code state,
+    /// rather than sending an empty `code` field that Govee would reject as
+    /// invalid with a misleading message.
     pub fn with_code(mut self, code: Option<String>) -> Self {
-        self.code = code;
+        self.code = normalize_2fa_code(code);
         self
     }
 
@@ -288,35 +342,18 @@ impl GoveeUndocumentedApi {
         let status = response.status();
         let body_bytes = response.bytes().await?;
 
-        match classify_login_status(&body_bytes) {
-            // 454 = 2FA verification required. Govee returns HTTP 200 with
-            // {"status": 454} when the account has 2FA enabled.
-            Some(454) => {
-                let msg = if self.code.is_some() {
-                    "Govee 2FA verification failed (status 454 returned despite \
-                     a code being supplied). The code may have expired (~15 min \
-                     validity) or be incorrect. Generate a fresh code by signing \
-                     in to the Govee mobile app, update govee_2fa_code, and \
-                     restart the addon."
-                } else {
-                    "Govee account requires 2FA verification. Sign in to the \
-                     Govee mobile app to trigger a verification email, then set \
-                     govee_2fa_code in the addon configuration (or the \
-                     GOVEE_2FA_CODE environment variable) and restart. The code \
-                     is valid for approximately 15 minutes."
-                };
-                return Err(NoCacheError(anyhow::anyhow!("{msg}")).into());
+        if let Some(api_status) = classify_login_status(&body_bytes) {
+            if let Some(err) = build_2fa_error(api_status, self.code.is_some()) {
+                // Defense-in-depth: clear any pre-existing entry under this key
+                // before bailing. The caller's `cache_get` already skips the
+                // negative-cache write because the error wraps NoCacheError, but
+                // a stale entry written by an older fork version (with a longer
+                // negative_ttl) could still trap retries. Invalidating here
+                // guarantees the very next call re-executes login_account_impl
+                // with whatever fresh code the user has set.
+                self.invalidate_account_login();
+                return Err(anyhow::Error::from(err));
             }
-            // 455 = verification code rejected as invalid or expired.
-            Some(455) => {
-                return Err(NoCacheError(anyhow::anyhow!(
-                    "Govee 2FA verification code was rejected as invalid or \
-                     expired (status 455). Generate a fresh code via the Govee \
-                     mobile app, update govee_2fa_code, and restart."
-                ))
-                .into());
-            }
-            _ => {}
         }
 
         if !status.is_success() {
@@ -1161,5 +1198,208 @@ mod test {
     fn plain_anyhow_error_does_not_downcast_to_no_cache_error() {
         let err: anyhow::Error = anyhow::anyhow!("not a 2FA error");
         assert!(err.downcast_ref::<NoCacheError>().is_none());
+    }
+
+    // --- code normalization (R1/R2: whitespace, empty string from CLI/HA) ---
+
+    #[test]
+    fn normalize_strips_surrounding_whitespace() {
+        assert_eq!(
+            normalize_2fa_code(Some("  123456  ".to_string())),
+            Some("123456".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_strips_trailing_newline_from_email_paste() {
+        assert_eq!(
+            normalize_2fa_code(Some("123456\n".to_string())),
+            Some("123456".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_treats_empty_string_as_none() {
+        assert_eq!(normalize_2fa_code(Some(String::new())), None);
+    }
+
+    #[test]
+    fn normalize_treats_whitespace_only_as_none() {
+        assert_eq!(normalize_2fa_code(Some("  \t \n".to_string())), None);
+    }
+
+    #[test]
+    fn normalize_passes_none_through() {
+        assert_eq!(normalize_2fa_code(None), None);
+    }
+
+    #[test]
+    fn with_code_normalizes_input() {
+        let api =
+            GoveeUndocumentedApi::new("a@b.com", "pw").with_code(Some("  654321\n".to_string()));
+        let body = api.build_login_body();
+        assert_eq!(
+            body["code"], "654321",
+            "with_code must trim whitespace before storing"
+        );
+    }
+
+    #[test]
+    fn with_code_empty_string_does_not_set_code_field() {
+        let api = GoveeUndocumentedApi::new("a@b.com", "pw").with_code(Some(String::new()));
+        let body = api.build_login_body();
+        assert!(
+            body.get("code").is_none(),
+            "with_code(Some(\"\")) must not set code field; got {body}"
+        );
+    }
+
+    // --- 2FA error helper (build_2fa_error) ---
+
+    #[test]
+    fn build_2fa_error_returns_none_for_success_status() {
+        assert!(build_2fa_error(200, false).is_none());
+        assert!(build_2fa_error(200, true).is_none());
+    }
+
+    #[test]
+    fn build_2fa_error_returns_none_for_unrelated_status() {
+        assert!(build_2fa_error(401, false).is_none());
+        assert!(build_2fa_error(500, true).is_none());
+    }
+
+    #[test]
+    fn build_2fa_error_454_no_code_mentions_mobile_app() {
+        let err = build_2fa_error(454, false).expect("454 with no code must produce error");
+        let msg = format!("{}", err.0);
+        assert!(
+            msg.contains("Govee mobile app"),
+            "user must be told to use mobile app: {msg}"
+        );
+        assert!(
+            msg.contains("govee_2fa_code"),
+            "user must see the config field name: {msg}"
+        );
+        assert!(
+            msg.contains("15 minutes"),
+            "user must see the validity window: {msg}"
+        );
+    }
+
+    #[test]
+    fn build_2fa_error_454_with_code_mentions_expired() {
+        let err = build_2fa_error(454, true).expect("454 with code must produce error");
+        let msg = format!("{}", err.0);
+        assert!(
+            msg.contains("expired") || msg.contains("incorrect"),
+            "user must understand the code itself was rejected: {msg}"
+        );
+        assert!(
+            msg.contains("Generate a fresh code"),
+            "user must be told to refresh: {msg}"
+        );
+    }
+
+    #[test]
+    fn build_2fa_error_454_messages_differ_by_code_state() {
+        let no_code_msg = format!("{}", build_2fa_error(454, false).unwrap().0);
+        let with_code_msg = format!("{}", build_2fa_error(454, true).unwrap().0);
+        assert_ne!(
+            no_code_msg, with_code_msg,
+            "454 message must distinguish 'no code yet' from 'code rejected'"
+        );
+    }
+
+    #[test]
+    fn build_2fa_error_455_mentions_invalid_or_expired() {
+        let err = build_2fa_error(455, true).expect("455 must produce error");
+        let msg = format!("{}", err.0);
+        assert!(
+            msg.contains("invalid") || msg.contains("expired"),
+            "455 message must explain the rejection: {msg}"
+        );
+        assert!(
+            msg.contains("455"),
+            "user must see the status code for log searches: {msg}"
+        );
+    }
+
+    /// 454/455 errors MUST flow through cache_get without being negative-cached.
+    /// This is the contract that lets users retry inside the 15-min window.
+    #[test]
+    fn build_2fa_error_results_downcast_to_no_cache_error_via_anyhow() {
+        for status in [454_u64, 455_u64] {
+            let err = build_2fa_error(status, false).expect("must produce error");
+            let any_err: anyhow::Error = err.into();
+            assert!(
+                any_err.downcast_ref::<NoCacheError>().is_some(),
+                "status {status} error must round-trip as NoCacheError so cache_get bypasses negative cache"
+            );
+        }
+    }
+
+    #[test]
+    fn build_2fa_error_does_not_leak_email_or_response_body() {
+        // Defensive contract: error messages are hardcoded strings, never
+        // built from server response bodies. If a future refactor adds
+        // {raw_body} interpolation here, this test fails as a tripwire.
+        for (status, code_set) in [(454_u64, false), (454_u64, true), (455_u64, true)] {
+            let msg = format!("{}", build_2fa_error(status, code_set).unwrap().0);
+            assert!(
+                !msg.contains("@") && !msg.contains("<html"),
+                "2FA error message must not contain user email or HTML response body: {msg}"
+            );
+        }
+    }
+
+    // --- UndocApiArguments → api_client wiring ---
+
+    #[test]
+    fn api_client_threads_2fa_code_into_login_body() {
+        let args = UndocApiArguments {
+            govee_email: Some("a@b.com".to_string()),
+            govee_password: Some("pw".to_string()),
+            govee_2fa_code: Some("987654".to_string()),
+            govee_iot_key: PathBuf::from("/tmp/k"),
+            govee_iot_cert: PathBuf::from("/tmp/c"),
+            amazon_root_ca: PathBuf::from("/tmp/ca"),
+        };
+        let client = args.api_client().expect("api_client builds");
+        let body = client.build_login_body();
+        assert_eq!(body["code"], "987654");
+        assert_eq!(body["email"], "a@b.com");
+    }
+
+    #[test]
+    fn api_client_with_no_2fa_code_omits_code_field() {
+        let args = UndocApiArguments {
+            govee_email: Some("a@b.com".to_string()),
+            govee_password: Some("pw".to_string()),
+            govee_2fa_code: None,
+            govee_iot_key: PathBuf::from("/tmp/k"),
+            govee_iot_cert: PathBuf::from("/tmp/c"),
+            amazon_root_ca: PathBuf::from("/tmp/ca"),
+        };
+        let client = args.api_client().expect("api_client builds");
+        let body = client.build_login_body();
+        assert!(body.get("code").is_none());
+    }
+
+    #[test]
+    fn api_client_normalizes_2fa_code_with_whitespace() {
+        let args = UndocApiArguments {
+            govee_email: Some("a@b.com".to_string()),
+            govee_password: Some("pw".to_string()),
+            govee_2fa_code: Some("  111222\n".to_string()),
+            govee_iot_key: PathBuf::from("/tmp/k"),
+            govee_iot_cert: PathBuf::from("/tmp/c"),
+            amazon_root_ca: PathBuf::from("/tmp/ca"),
+        };
+        let client = args.api_client().expect("api_client builds");
+        let body = client.build_login_body();
+        assert_eq!(
+            body["code"], "111222",
+            "whitespace from email paste must be normalized end-to-end"
+        );
     }
 }
