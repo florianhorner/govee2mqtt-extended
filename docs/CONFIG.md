@@ -51,6 +51,14 @@ You can leave `govee_2fa_code` set after a successful login; Govee remembers the
 device. If your token later expires and Govee demands a new code, you'll see the
 454 message again — repeat the steps above.
 
+> **Note on token refresh:** Govee's session tokens last days, sometimes weeks.
+> When the token eventually expires the addon re-runs the login. If Govee
+> requires a fresh 2FA challenge per login (rather than remembering the device),
+> the addon will fail with status 454 or 455 in the logs and you'll need to
+> generate and paste a new code. This is rare in practice but worth knowing if
+> Home Assistant suddenly stops seeing your Govee devices long after you set
+> things up — check the addon logs first.
+
 ## LAN API Control
 
 Many Govee devices support local control over your home network, without

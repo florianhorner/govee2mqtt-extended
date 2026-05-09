@@ -83,6 +83,21 @@ fn normalize_2fa_code(raw: Option<String>) -> Option<String> {
     })
 }
 
+/// Decide how to surface an HTTP-layer login failure. 5xx is transient by
+/// definition (gateway flake, Govee maintenance) and must NOT be negative-
+/// cached, otherwise a 10-second-cached failure slows recovery from a Govee
+/// outage that resolved in 2 seconds. 4xx is deterministic (auth wrong, bad
+/// request) and benefits from short negative caching to avoid hammering the
+/// API. The 454/455 cases are handled separately via `build_2fa_error` so
+/// they never hit this branch.
+fn classify_login_http_error(status_code: u16, message: String) -> anyhow::Error {
+    if (500..600).contains(&status_code) {
+        NoCacheError(anyhow::anyhow!("{message}")).into()
+    } else {
+        anyhow::anyhow!("{message}")
+    }
+}
+
 /// Build the right NoCacheError for a Govee login response status, or None if
 /// the status is not a 2FA condition. Pulled out of `login_account_impl` so
 /// the user-facing messaging can be unit-tested without an HTTP mock.
@@ -161,12 +176,20 @@ pub struct UndocApiArguments {
     pub amazon_root_ca: PathBuf,
 }
 
+/// Resolve a config value from a CLI/HA-config field first, falling back to
+/// an environment variable. Three accessors on `UndocApiArguments` share this
+/// shape; collapsing them into one helper keeps future credential additions
+/// (community login, IoT cert) honest.
+fn opt_arg_or_env(field: &Option<String>, env_var: &str) -> anyhow::Result<Option<String>> {
+    match field {
+        Some(v) => Ok(Some(v.clone())),
+        None => opt_env_var(env_var),
+    }
+}
+
 impl UndocApiArguments {
     pub fn opt_email(&self) -> anyhow::Result<Option<String>> {
-        match &self.govee_email {
-            Some(key) => Ok(Some(key.to_string())),
-            None => opt_env_var("GOVEE_EMAIL"),
-        }
+        opt_arg_or_env(&self.govee_email, "GOVEE_EMAIL")
     }
 
     pub fn email(&self) -> anyhow::Result<String> {
@@ -179,10 +202,7 @@ impl UndocApiArguments {
     }
 
     pub fn opt_password(&self) -> anyhow::Result<Option<String>> {
-        match &self.govee_password {
-            Some(key) => Ok(Some(key.to_string())),
-            None => opt_env_var("GOVEE_PASSWORD"),
-        }
+        opt_arg_or_env(&self.govee_password, "GOVEE_PASSWORD")
     }
 
     pub fn password(&self) -> anyhow::Result<String> {
@@ -195,10 +215,7 @@ impl UndocApiArguments {
     }
 
     pub fn opt_2fa_code(&self) -> anyhow::Result<Option<String>> {
-        match &self.govee_2fa_code {
-            Some(code) => Ok(Some(code.to_string())),
-            None => opt_env_var("GOVEE_2FA_CODE"),
-        }
+        opt_arg_or_env(&self.govee_2fa_code, "GOVEE_2FA_CODE")
     }
 
     pub fn api_client(&self) -> anyhow::Result<GoveeUndocumentedApi> {
@@ -357,12 +374,13 @@ impl GoveeUndocumentedApi {
         }
 
         if !status.is_success() {
-            anyhow::bail!(
+            let msg = format!(
                 "request {url} status {}: {}. Response body: {}",
                 status.as_u16(),
                 status.canonical_reason().unwrap_or(""),
                 String::from_utf8_lossy(&body_bytes)
             );
+            return Err(classify_login_http_error(status.as_u16(), msg));
         }
 
         #[derive(Deserialize, Serialize, Debug)]
@@ -391,8 +409,11 @@ impl GoveeUndocumentedApi {
                 key: "account-info",
                 soft_ttl: HALF_DAY,
                 hard_ttl: HALF_DAY,
-                // Short negative TTL so that 2FA (454) errors don't block retries.
-                // The user needs to be able to retry with a code within 15 minutes.
+                // Short negative TTL is a fallback only — 2FA failures (454/455)
+                // and 5xx HTTP errors bypass the negative cache entirely via the
+                // NoCacheError marker, so any retry happens on the very next call
+                // rather than waiting this out. This 10-second floor only catches
+                // hard 4xx/parse failures we genuinely expect to remain wrong.
                 negative_ttl: Duration::from_secs(10),
                 allow_stale: false,
             },
@@ -1128,6 +1149,10 @@ mod test {
         let body = api.build_login_body();
         assert_eq!(body["email"], "a@b.com");
         assert_eq!(body["password"], "pw");
+        assert_eq!(
+            body["client"], api.client_id,
+            "client field must equal the deterministic client_id derived from email"
+        );
         assert!(
             body.get("code").is_none(),
             "code field must be absent when self.code is None: {body}"
@@ -1336,6 +1361,75 @@ mod test {
                 "status {status} error must round-trip as NoCacheError so cache_get bypasses negative cache"
             );
         }
+    }
+
+    // --- HTTP error classification (P2.1: 5xx must bypass negative cache) ---
+
+    #[test]
+    fn http_500_classifies_as_no_cache_error() {
+        let err = classify_login_http_error(500, "internal".to_string());
+        assert!(
+            err.downcast_ref::<NoCacheError>().is_some(),
+            "5xx must bypass negative cache so transient gateway issues don't slow retries"
+        );
+    }
+
+    #[test]
+    fn http_503_classifies_as_no_cache_error() {
+        let err = classify_login_http_error(503, "unavailable".to_string());
+        assert!(err.downcast_ref::<NoCacheError>().is_some());
+    }
+
+    #[test]
+    fn http_599_classifies_as_no_cache_error() {
+        // Boundary: highest 5xx still bypasses cache.
+        let err = classify_login_http_error(599, "edge".to_string());
+        assert!(err.downcast_ref::<NoCacheError>().is_some());
+    }
+
+    #[test]
+    fn http_403_classifies_as_plain_error_for_short_negative_caching() {
+        let err = classify_login_http_error(403, "forbidden".to_string());
+        assert!(
+            err.downcast_ref::<NoCacheError>().is_none(),
+            "4xx is deterministic — short negative cache is fine and avoids hammering"
+        );
+    }
+
+    #[test]
+    fn http_400_classifies_as_plain_error() {
+        let err = classify_login_http_error(400, "bad request".to_string());
+        assert!(err.downcast_ref::<NoCacheError>().is_none());
+    }
+
+    #[test]
+    fn http_499_classifies_as_plain_error_just_below_5xx_boundary() {
+        // Boundary: highest non-5xx stays on the plain path.
+        let err = classify_login_http_error(499, "client closed".to_string());
+        assert!(err.downcast_ref::<NoCacheError>().is_none());
+    }
+
+    #[test]
+    fn http_error_message_propagates_through_classify() {
+        let err = classify_login_http_error(502, "bad gateway upstream".to_string());
+        assert!(format!("{err:#}").contains("bad gateway upstream"));
+    }
+
+    // --- DRY refactor: opt_arg_or_env behavior preserved ---
+
+    #[test]
+    fn opt_arg_or_env_returns_field_when_set() {
+        let field = Some("from-cli".to_string());
+        let v = opt_arg_or_env(&field, "NEVER_LOOKED_UP_BECAUSE_FIELD_SET").unwrap();
+        assert_eq!(v, Some("from-cli".to_string()));
+    }
+
+    #[test]
+    fn opt_arg_or_env_returns_none_when_neither_set() {
+        let field: Option<String> = None;
+        // Use a name unlikely to collide with anything in the environment.
+        let v = opt_arg_or_env(&field, "GOVEE_TEST_DEFINITELY_UNSET_VAR_XYZ123").unwrap();
+        assert_eq!(v, None);
     }
 
     #[test]
