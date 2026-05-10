@@ -41,11 +41,13 @@ To get past it:
    The code is valid for **about 15 minutes** — work fast.
 2. **Set the code.** In Home Assistant, open the addon configuration panel and paste
    the code into `govee_2fa_code`. In Docker, set `GOVEE_2FA_CODE` in your `.env`.
-3. **Restart the addon.** Govee2MQTT will retry the login with the code attached.
+3. **Restart Govee2MQTT.** Restart the Home Assistant add-on or the Docker
+   container so it retries the login with the code attached.
 
-If you see status **454** in the logs, no code was set — go to step 1.
-If you see status **455**, the code was rejected (expired or wrong) — generate a fresh
-one and update the config.
+If you see status **454** in the logs, either no code was set or the supplied
+code was rejected/expired — go back to step 1.
+If you see status **455**, the code was rejected (expired or wrong) — generate
+a fresh one and update the config.
 
 You can leave `govee_2fa_code` set after a successful login; Govee remembers the
 device. If your token later expires and Govee demands a new code, you'll see the
