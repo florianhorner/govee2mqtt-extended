@@ -96,14 +96,52 @@ pub fn invalidate_key(topic: &str, key: &str) -> anyhow::Result<()> {
     Ok(topic.delete(key)?)
 }
 
+/// Marker error: when a cached future returns `Err(anyhow::Error::from(NoCacheError(_)))`,
+/// `cache_get` skips the negative-cache write entirely. Use for transient errors where
+/// the caller must be able to retry sooner than `negative_ttl` (e.g. 2FA verification
+/// codes that expire in ~15 minutes — caching the failure for 15 min would trap the user
+/// in a loop matching the code's own validity window).
+#[derive(Debug)]
+pub struct NoCacheError(pub anyhow::Error);
+
+impl std::fmt::Display for NoCacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for NoCacheError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
 /// Cache an item with a soft TTL; we'll retry the operation
-/// if the TTL has expired, but allow stale reads
+/// if the TTL has expired, but allow stale reads.
+///
+/// Thin wrapper around [`cache_get_inner`] that uses the global [`CACHE`].
+/// Tests use the inner directly with a fresh in-memory cache to stay hermetic.
 pub async fn cache_get<T, Fut>(options: CacheGetOptions<'_>, future: Fut) -> anyhow::Result<T>
 where
     T: Serialize + DeserializeOwned + std::fmt::Debug + Clone,
     Fut: Future<Output = anyhow::Result<CacheComputeResult<T>>>,
 {
-    let topic = CACHE.load().topic(options.topic)?;
+    cache_get_inner(&CACHE.load(), options, future).await
+}
+
+/// Inner cache_get that takes an explicit `&Cache`. Exposed at crate visibility
+/// so unit tests can construct hermetic caches and verify the negative-cache
+/// bypass without touching the global singleton.
+pub(crate) async fn cache_get_inner<T, Fut>(
+    cache: &Cache,
+    options: CacheGetOptions<'_>,
+    future: Fut,
+) -> anyhow::Result<T>
+where
+    T: Serialize + DeserializeOwned + std::fmt::Debug + Clone,
+    Fut: Future<Output = anyhow::Result<CacheComputeResult<T>>>,
+{
+    let topic = cache.topic(options.topic)?;
     let (updater, current_value) = topic.get_for_update(options.key).await?;
     let now = Utc::now();
 
@@ -151,30 +189,218 @@ where
             updater.write(data.as_bytes(), options.hard_ttl)?;
             Ok(value)
         }
-        Err(err) => match cache_entry.take() {
-            Some(mut entry) if options.allow_stale => {
-                entry.expires = Utc::now() + options.negative_ttl;
+        Err(err) => {
+            // Opt-out: callers can return Err(NoCacheError(...).into()) to bypass
+            // both the stale-read path and the negative-cache write. The next call
+            // will re-execute the future instead of returning the cached failure.
+            if err.downcast_ref::<NoCacheError>().is_some() {
+                log::trace!(
+                    "cache_get: NoCacheError marker, skipping negative cache write for {}",
+                    options.key
+                );
+                return Err(err);
+            }
+            match cache_entry.take() {
+                Some(mut entry) if options.allow_stale => {
+                    entry.expires = Utc::now() + options.negative_ttl;
 
-                log::warn!("{err:#}, will use prior results");
-                if matches!(&entry.result, CacheResult::Err(_)) {
-                    entry.result = CacheResult::Err(format!("{err:#}"));
+                    log::warn!("{err:#}, will use prior results");
+                    if matches!(&entry.result, CacheResult::Err(_)) {
+                        entry.result = CacheResult::Err(format!("{err:#}"));
+                    }
+
+                    let data = serde_json::to_string_pretty(&entry)?;
+                    updater.write(data.as_bytes(), options.hard_ttl)?;
+
+                    entry.result.into_result()
                 }
+                _ => {
+                    let entry = CacheEntry {
+                        expires: Utc::now() + options.negative_ttl,
+                        result: CacheResult::Err(format!("{err:#}")),
+                    };
 
-                let data = serde_json::to_string_pretty(&entry)?;
-                updater.write(data.as_bytes(), options.hard_ttl)?;
-
-                entry.result.into_result()
+                    let data = serde_json::to_string_pretty(&entry)?;
+                    updater.write(data.as_bytes(), options.hard_ttl)?;
+                    entry.result.into_result()
+                }
             }
-            _ => {
-                let entry = CacheEntry {
-                    expires: Utc::now() + options.negative_ttl,
-                    result: CacheResult::Err(format!("{err:#}")),
-                };
+        }
+    }
+}
 
-                let data = serde_json::to_string_pretty(&entry)?;
-                updater.write(data.as_bytes(), options.hard_ttl)?;
-                entry.result.into_result()
-            }
-        },
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Fresh in-memory SQLite-backed cache for each test. No global state, no
+    /// cross-test pollution, no risk of writing to the user's real cache file.
+    fn fresh_cache() -> Cache {
+        let conn =
+            sqlite_cache::rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+        Cache::new(
+            CacheConfig {
+                flush_gc_ratio: 1024,
+                flush_interval: Duration::from_secs(900),
+                max_ttl: None,
+            },
+            conn,
+        )
+        .expect("Cache::new")
+    }
+
+    fn opts(key: &'static str, negative_ttl: Duration) -> CacheGetOptions<'static> {
+        CacheGetOptions {
+            topic: "test",
+            key,
+            soft_ttl: Duration::from_secs(60),
+            hard_ttl: Duration::from_secs(60),
+            negative_ttl,
+            allow_stale: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn caches_ok_value_so_future_runs_only_once() {
+        let cache = fresh_cache();
+        let calls = AtomicUsize::new(0);
+
+        let f1 = async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, anyhow::Error>(CacheComputeResult::Value(42_u64))
+        };
+        let v1 = cache_get_inner(&cache, opts("ok", Duration::from_secs(10)), f1)
+            .await
+            .unwrap();
+
+        let f2 = async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, anyhow::Error>(CacheComputeResult::Value(42_u64))
+        };
+        let v2 = cache_get_inner(&cache, opts("ok", Duration::from_secs(10)), f2)
+            .await
+            .unwrap();
+
+        assert_eq!(v1, 42);
+        assert_eq!(v2, 42);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "second call should hit cache, not re-execute"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_err_writes_negative_cache_so_future_runs_only_once() {
+        let cache = fresh_cache();
+        let calls = AtomicUsize::new(0);
+
+        let f1 = async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<CacheComputeResult<u64>, _>(anyhow::anyhow!("boom"))
+        };
+        let r1 = cache_get_inner(&cache, opts("err", Duration::from_secs(60)), f1).await;
+
+        let f2 = async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<CacheComputeResult<u64>, _>(anyhow::anyhow!("boom"))
+        };
+        let r2 = cache_get_inner(&cache, opts("err", Duration::from_secs(60)), f2).await;
+
+        assert!(r1.is_err());
+        assert!(r2.is_err());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "plain Err must be negative-cached; future must NOT re-execute"
+        );
+    }
+
+    /// The load-bearing test for the bug-fix: a future returning a NoCacheError
+    /// MUST cause cache_get to skip the negative-cache write entirely. The next
+    /// call must re-execute the future, not return a cached failure. This is
+    /// what lets a 2FA verification code retry succeed inside its 15-min
+    /// validity window.
+    #[tokio::test]
+    async fn no_cache_error_skips_negative_cache_so_future_re_executes() {
+        let cache = fresh_cache();
+        let calls = AtomicUsize::new(0);
+
+        let f1 = async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<CacheComputeResult<u64>, _>(NoCacheError(anyhow::anyhow!("transient")).into())
+        };
+        let r1 = cache_get_inner(&cache, opts("nocache", Duration::from_secs(60)), f1).await;
+
+        let f2 = async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<CacheComputeResult<u64>, _>(NoCacheError(anyhow::anyhow!("transient")).into())
+        };
+        let r2 = cache_get_inner(&cache, opts("nocache", Duration::from_secs(60)), f2).await;
+
+        assert!(r1.is_err());
+        assert!(r2.is_err());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "NoCacheError must NOT be cached; second call MUST re-execute the future"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_cache_error_message_propagates_and_downcast_survives() {
+        let cache = fresh_cache();
+        let f = async {
+            Err::<CacheComputeResult<u64>, _>(
+                NoCacheError(anyhow::anyhow!("specific message")).into(),
+            )
+        };
+        let err = cache_get_inner(&cache, opts("msg", Duration::from_secs(60)), f)
+            .await
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("specific message"),
+            "error message lost: got {err:#}"
+        );
+        assert!(
+            err.downcast_ref::<NoCacheError>().is_some(),
+            "downcast must survive cache_get's pass-through"
+        );
+    }
+
+    /// Regression guard: existing successful cache entries must still be
+    /// served on subsequent calls regardless of whether subsequent futures
+    /// would have returned NoCacheError. Just confirms cache_get's read path
+    /// is independent of the future type.
+    #[tokio::test]
+    async fn fresh_ok_entry_is_returned_without_running_future() {
+        let cache = fresh_cache();
+        let calls = AtomicUsize::new(0);
+
+        let f1 = async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, anyhow::Error>(CacheComputeResult::WithTtl(
+                "hello".to_string(),
+                Duration::from_secs(30),
+            ))
+        };
+        let _ = cache_get_inner(&cache, opts("ttl-ok", Duration::from_secs(60)), f1)
+            .await
+            .unwrap();
+
+        // Second call: future would NoCacheError, but cache should not run it.
+        let f2 = async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<CacheComputeResult<String>, _>(
+                NoCacheError(anyhow::anyhow!("would bypass")).into(),
+            )
+        };
+        let v2 = cache_get_inner(&cache, opts("ttl-ok", Duration::from_secs(60)), f2)
+            .await
+            .unwrap();
+        assert_eq!(v2, "hello");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

@@ -24,10 +24,42 @@ your credentials before your first run:
 |---|---|----------|-------|
 |`--govee-email`|`GOVEE_EMAIL`|`govee_email`|Your Govee account email|
 |`--govee-password`|`GOVEE_PASSWORD`|`govee_password`|Your Govee account password|
+|`--govee-2fa-code`|`GOVEE_2FA_CODE`|`govee_2fa_code`|One-time verification code, only needed if your account has 2FA. See below.|
 |`--api-key`|`GOVEE_API_KEY`|`govee_api_key`|Your Govee API key ([get one here](https://developer.govee.com/reference/apply-you-govee-api-key))|
 
 *Concerned about sharing your credentials? See [Privacy](PRIVACY.md) for
 details on how your data is used.*
+
+### Two-factor authentication (2FA)
+
+If your Govee account has two-factor authentication enabled, login will fail with a
+clear error in the add-on logs ("Govee account requires 2FA verification...").
+To get past it:
+
+1. **Trigger a fresh code.** Sign in to the Govee Home mobile app on your phone with
+   the same account. Govee emails a 6-digit verification code to the address on file.
+   The code is valid for **about 15 minutes** — work fast.
+2. **Set the code.** In Home Assistant, open the add-on configuration panel and paste
+   the code into `govee_2fa_code`. In Docker, set `GOVEE_2FA_CODE` in your `.env`.
+3. **Restart Govee2MQTT.** Restart the Home Assistant add-on or the Docker
+   container so it retries the login with the code attached.
+
+If you see status **454** in the logs, either no code was set or the supplied
+code was rejected/expired — go back to step 1.
+If you see status **455**, the code was rejected (expired or wrong) — generate
+a fresh one and update the config.
+
+You can leave `govee_2fa_code` set after a successful login; Govee remembers the
+device. If your token later expires and Govee demands a new code, you'll see the
+454 message again — repeat the steps above.
+
+> **Note on token refresh:** Govee's session tokens last days, sometimes weeks.
+> When the token eventually expires the add-on re-runs the login. If Govee
+> requires a fresh 2FA challenge per login (rather than remembering the device),
+> the add-on will fail with status 454 or 455 in the logs and you'll need to
+> generate and paste a new code. This is rare in practice but worth knowing if
+> Home Assistant suddenly stops seeing your Govee devices long after you set
+> things up — check the add-on logs first.
 
 ## LAN API Control
 
