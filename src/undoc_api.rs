@@ -244,7 +244,9 @@ impl Clone for GoveeUndocumentedApi {
         Self {
             email: self.email.clone(),
             password: self.password.clone(),
-            code: std::sync::Mutex::new(self.code.lock().unwrap().clone()),
+            code: std::sync::Mutex::new(
+                self.code.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            ),
             client_id: self.client_id.clone(),
         }
     }
@@ -274,7 +276,7 @@ impl GoveeUndocumentedApi {
     /// rather than sending an empty `code` field that Govee would reject as
     /// invalid with a misleading message.
     pub fn with_code(mut self, code: Option<String>) -> Self {
-        *self.code.lock().unwrap() = normalize_2fa_code(code);
+        *self.code.lock().unwrap_or_else(|e| e.into_inner()) = normalize_2fa_code(code);
         self
     }
 
@@ -334,7 +336,12 @@ impl GoveeUndocumentedApi {
             "password": self.password,
             "client": &self.client_id,
         });
-        if let Some(code) = self.code.lock().unwrap().as_deref() {
+        if let Some(code) = self
+            .code
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_deref()
+        {
             body["code"] = serde_json::Value::String(code.to_string());
         }
         body
@@ -370,7 +377,13 @@ impl GoveeUndocumentedApi {
         let body_bytes = response.bytes().await?;
 
         if let Some(api_status) = classify_login_status(&body_bytes) {
-            if let Some(err) = build_2fa_error(api_status, self.code.lock().unwrap().is_some()) {
+            if let Some(err) = build_2fa_error(
+                api_status,
+                self.code
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some(),
+            ) {
                 // Defense-in-depth: clear any pre-existing entry under this key
                 // before bailing. The caller's `cache_get` already skips the
                 // negative-cache write because the error wraps NoCacheError, but
@@ -408,8 +421,9 @@ impl GoveeUndocumentedApi {
             )
         })?;
 
-        let ttl = Duration::from_secs(resp.client.token_expire_cycle as u64);
-        *self.code.lock().unwrap() = None;
+        let ttl =
+            Duration::from_secs(resp.client.token_expire_cycle as u64).max(Duration::from_secs(60));
+        *self.code.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(CacheComputeResult::WithTtl(resp.client, ttl))
     }
 

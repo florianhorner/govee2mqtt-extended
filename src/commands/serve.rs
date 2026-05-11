@@ -217,7 +217,7 @@ impl ServeCommand {
 
             // only record the client after we've completed the
             // initial undoc disco attempt
-            state.set_undoc_client(client).await;
+            state.set_undoc_client(client.with_code(None)).await;
 
             // spawn periodic discovery task
             let state = state.clone();
