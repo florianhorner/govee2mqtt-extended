@@ -226,18 +226,28 @@ impl UndocApiArguments {
     }
 }
 
-#[derive(Clone)]
 pub struct GoveeUndocumentedApi {
     email: String,
     password: String,
     /// Optional 2FA verification code. Govee accepts this as the `code` field on
     /// the login request body when the account has two-factor enabled. The code
     /// is config-driven: the addon reads it from `govee_2fa_code` / GOVEE_2FA_CODE
-    /// at startup and it lives on this struct for the process lifetime. If Govee
-    /// rejects it (status 455), the addon bails uncacheable and the user supplies
-    /// a fresh code on the next restart.
-    code: Option<String>,
+    /// at startup. After a successful login it is cleared so it is not replayed on
+    /// subsequent token refreshes; if Govee later requires 2FA again the addon
+    /// exits with status 455 and the user restarts with a fresh code.
+    code: std::sync::Mutex<Option<String>>,
     client_id: String,
+}
+
+impl Clone for GoveeUndocumentedApi {
+    fn clone(&self) -> Self {
+        Self {
+            email: self.email.clone(),
+            password: self.password.clone(),
+            code: std::sync::Mutex::new(self.code.lock().unwrap().clone()),
+            client_id: self.client_id.clone(),
+        }
+    }
 }
 
 impl GoveeUndocumentedApi {
@@ -249,7 +259,7 @@ impl GoveeUndocumentedApi {
         Self {
             email,
             password,
-            code: None,
+            code: std::sync::Mutex::new(None),
             client_id,
         }
     }
@@ -264,7 +274,7 @@ impl GoveeUndocumentedApi {
     /// rather than sending an empty `code` field that Govee would reject as
     /// invalid with a misleading message.
     pub fn with_code(mut self, code: Option<String>) -> Self {
-        self.code = normalize_2fa_code(code);
+        *self.code.lock().unwrap() = normalize_2fa_code(code);
         self
     }
 
@@ -324,8 +334,8 @@ impl GoveeUndocumentedApi {
             "password": self.password,
             "client": &self.client_id,
         });
-        if let Some(code) = &self.code {
-            body["code"] = serde_json::Value::String(code.clone());
+        if let Some(code) = self.code.lock().unwrap().as_deref() {
+            body["code"] = serde_json::Value::String(code.to_string());
         }
         body
     }
@@ -360,7 +370,7 @@ impl GoveeUndocumentedApi {
         let body_bytes = response.bytes().await?;
 
         if let Some(api_status) = classify_login_status(&body_bytes) {
-            if let Some(err) = build_2fa_error(api_status, self.code.is_some()) {
+            if let Some(err) = build_2fa_error(api_status, self.code.lock().unwrap().is_some()) {
                 // Defense-in-depth: clear any pre-existing entry under this key
                 // before bailing. The caller's `cache_get` already skips the
                 // negative-cache write because the error wraps NoCacheError, but
@@ -399,6 +409,7 @@ impl GoveeUndocumentedApi {
         })?;
 
         let ttl = Duration::from_secs(resp.client.token_expire_cycle as u64);
+        *self.code.lock().unwrap() = None;
         Ok(CacheComputeResult::WithTtl(resp.client, ttl))
     }
 
@@ -1276,6 +1287,18 @@ mod test {
         assert!(
             body.get("code").is_none(),
             "with_code(Some(\"\")) must not set code field; got {body}"
+        );
+    }
+
+    #[test]
+    fn code_is_cleared_after_successful_login_impl() {
+        let api = GoveeUndocumentedApi::new("a@b.com", "pw").with_code(Some("123456".into()));
+        // Simulate what login_account_impl does on success:
+        *api.code.lock().unwrap() = None;
+        let body = api.build_login_body();
+        assert!(
+            body.get("code").is_none(),
+            "code must be absent after clearing"
         );
     }
 
