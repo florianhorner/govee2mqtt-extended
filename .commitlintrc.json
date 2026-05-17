@@ -1,0 +1,55 @@
+{
+  "_comment": "Per-repo commitlint config. Canonical spec + machine-readable rules live at https://github.com/florianhorner/engineering-standards. The vendored SHA-pinned copy of the rules is at .config/commit-rules.json \u2014 do not hand-edit either file; re-run bootstrap-repo.sh to refresh.",
+  "extends": [
+    "@commitlint/config-conventional"
+  ],
+  "rules": {
+    "type-enum": [
+      2,
+      "always",
+      [
+        "feat",
+        "fix",
+        "docs",
+        "style",
+        "refactor",
+        "test",
+        "chore",
+        "ci",
+        "build",
+        "perf",
+        "revert"
+      ]
+    ],
+    "subject-case": [
+      0
+    ],
+    "subject-empty": [
+      2,
+      "never"
+    ],
+    "subject-full-stop": [
+      2,
+      "never",
+      "."
+    ],
+    "header-max-length": [
+      2,
+      "always",
+      72
+    ],
+    "body-max-line-length": [
+      0
+    ],
+    "footer-max-line-length": [
+      0
+    ]
+  },
+  "plugins": [
+    {
+      "rules": {
+        "engineering-standards-rules": "./.config/commit-rules.json"
+      }
+    }
+  ]
+}

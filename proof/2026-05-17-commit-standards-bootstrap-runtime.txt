@@ -1,0 +1,36 @@
+Bootstrap runtime artifact for commit-message-standards adoption.
+
+Generated: 2026-05-17T16:32:36Z
+Engineering-standards SHA: 1fe9a730a3779349ddcea67974f10050a7548a47
+Source: https://github.com/florianhorner/engineering-standards/commit/1fe9a730a3779349ddcea67974f10050a7548a47
+
+Bootstrap result: 12 pass / 0 warn / 0 fail
+TTHW: 4s
+
+Files touched:
+  .config/commit-rules.json
+  .config/commit-rules.meta.json
+  .commitlintrc.json
+  .github/workflows/commit-lint.yml
+  .github/dependabot.yml
+  CLAUDE.md
+  CONTRIBUTING.md
+  AUTHOR-NOTES.md
+  /Users/florianhorner/.git-hooks/commit-msg
+  proof/2026-05-17-commit-standards-bootstrap-runtime.txt
+
+Verification:
+- JSON validates: yes
+- Local hook generated: yes
+- Workflow installed: yes
+- Validator dry-run: 3/3 existing commits pass
+
+Suggested PR body Proof block (prose form avoids gh-workflows@v1.1 parser bug):
+
+## Proof
+
+- [ ] build: n/a — bootstrap is config + docs only
+- [x] tests: commit-lint reusable workflow validates this PR head
+- [ ] lint: n/a — no source files modified
+- [x] runtime: proof/2026-05-17-commit-standards-bootstrap-runtime.txt
+- [ ] schema: n/a — no MQTT or HA interface changes

@@ -20,3 +20,52 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
+
+# BEGIN: commit-message-standards
+# Dependabot config fragment. bootstrap-repo.sh patches these entries into
+# .github/dependabot.yml so Dependabot's commits pass the conventional-commits
+# check (Dependabot's default subject "Bump foo from 1 to 2" fails the format
+# rule per Eng E8). The `commit-message.prefix: "chore"` line is the
+# load-bearing part — everything else is sensible defaults.
+#
+# Spec reference: https://github.com/florianhorner/engineering-standards/blob/main/specs/commit-message-spec.md#bot-allowlist
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+      prefix-development: "chore"
+      include: "scope"
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+      prefix-development: "chore"
+      include: "scope"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+# END: commit-message-standards

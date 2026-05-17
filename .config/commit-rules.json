@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema_version": "1.1.0",
+  "spec_url": "https://github.com/florianhorner/engineering-standards/blob/main/specs/commit-message-spec.md",
+  "format": "[vMAJOR.MINOR.PATCH.MICRO ]type(scope): subject",
+  "subject": {
+    "max_length": 72,
+    "imperative": true,
+    "no_trailing_period": true,
+    "version_prefix": {
+      "allowed": true,
+      "pattern": "v[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+ ",
+      "rationale": "Optional 4-component ship-version prefix (vMAJOR.MINOR.PATCH.MICRO). gstack workspace-aware /ship puts it at the front of PR titles / squash subjects as a landing-queue claim. Direct commits omit it; short version prefixes (v2, v1.2.3) stay banned via VERSION_IN_SUBJECT."
+    }
+  },
+  "types": {
+    "allowed": [
+      "feat",
+      "fix",
+      "docs",
+      "style",
+      "refactor",
+      "test",
+      "chore",
+      "ci",
+      "build",
+      "perf",
+      "revert"
+    ]
+  },
+  "exemptions": {
+    "subject_patterns": [
+      "^Merge ",
+      "^Revert ",
+      "^cherry-pick: ",
+      "^\\[hotfix\\] "
+    ],
+    "trusted_bots": [
+      "renovate[bot]",
+      "dependabot[bot]",
+      "pre-commit-ci[bot]",
+      "app/github-actions"
+    ],
+    "trusted_bot_skips": [
+      "WHY_REQUIRED"
+    ]
+  },
+  "body": {
+    "rules": [
+      {
+        "rule_id": "WHY_REQUIRED",
+        "when": "type == 'feat' AND lines_changed > 50",
+        "severity": "block",
+        "scope": "ci_only",
+        "local_severity": "warn",
+        "message": "feat with >50 lines must include a `Why:` body line.",
+        "fix_hint": "Add a body section starting with 'Why: <one-line reason>'. See spec for templates.",
+        "spec_anchor": "specs/commit-message-spec.md#why-body"
+      }
+    ]
+  },
+  "banned_patterns": {
+    "body_only": [
+      {
+        "rule_id": "OPERATOR_ATTRIBUTION",
+        "pattern": "florian asked|as requested|per request|per my request",
+        "flags": "i",
+        "severity": "block",
+        "message": "Don't attribute the commit to the operator/prompter; explain WHY the change is needed instead.",
+        "fix_hint": "Replace 'florian asked me to fix X' with 'fix X because Y'.",
+        "spec_anchor": "specs/commit-message-spec.md#banned-patterns"
+      },
+      {
+        "rule_id": "AGENT_SELF_TALK",
+        "pattern": "addressed all|fix all|fixed all|cleaned up everything",
+        "flags": "i",
+        "severity": "block",
+        "message": "Agent self-talk like 'addressed all comments' is empty; describe specific changes.",
+        "fix_hint": "Replace with the specific issues fixed: 'fix N+1 in Foo.query, dedupe Bar.helper'.",
+        "spec_anchor": "specs/commit-message-spec.md#banned-patterns"
+      }
+    ],
+    "subject_only": [
+      {
+        "rule_id": "WEB_UI_DEFAULT",
+        "pattern": "^Add files via upload$|^Update [A-Z][A-Za-z]*\\.md$|^Initial commit$",
+        "severity": "block",
+        "message": "GitHub web-UI default subject; rewrite to describe the change.",
+        "fix_hint": "Use type(scope): subject format. Example: 'docs(readme): clarify install steps'.",
+        "spec_anchor": "specs/commit-message-spec.md#subjects"
+      },
+      {
+        "rule_id": "VERSION_IN_SUBJECT",
+        "pattern": "^v[0-9]+(\\.[0-9]+){0,2}([ :]|$)",
+        "severity": "block",
+        "message": "Short version prefixes (v2, v1.2.3) don't belong in commit subjects; let CHANGELOG do that. The 4-component ship-version prefix (v1.2.3.4) is allowed.",
+        "fix_hint": "Drop the short version prefix. Use 'chore(release): 1.2.3', or the 4-component 'v1.2.3.4 type: subject' form for a gstack /ship PR title.",
+        "spec_anchor": "specs/commit-message-spec.md#subjects"
+      }
+    ]
+  },
+  "trailers": {
+    "metadata": {
+      "Skill-Run": {
+        "description": "Which gstack skill triggered the commit (e.g., 'ship', 'investigate'). OMIT if not in a skill session \u2014 never fabricate.",
+        "env_source": "COMMIT_SKILL_RUN"
+      },
+      "Test-Suite": {
+        "description": "<pass>/<total> if test results known (e.g., '247/247'). OMIT if unknown.",
+        "env_source": "COMMIT_TEST_SUITE"
+      },
+      "Reviewed-By": {
+        "description": "codex|subagent|none if /review or /codex ran since last commit on this branch. OMIT if unknown.",
+        "env_source": "COMMIT_REVIEWED_BY"
+      },
+      "Tool": {
+        "description": "claude-code|codex|conductor|cloud \u2014 tool that created the commit. OMIT if undetectable.",
+        "env_source": "COMMIT_TOOL"
+      }
+    },
+    "policy": {
+      "fork_strip": [
+        "Skill-Run",
+        "Reviewed-By",
+        "Tool"
+      ],
+      "fork_strip_rationale": "Strip agent telemetry trailers when committing to a fork branch destined upstream. Different audience (upstream maintainer vs portfolio recruiter). Preserves Co-Authored-By and Tested.",
+      "fork_detection_command": "gh repo view --json isFork --jq .isFork",
+      "preserved_on_fork": [
+        "Co-Authored-By",
+        "Tested",
+        "Refs",
+        "Signed-off-by"
+      ]
+    },
+    "override": {
+      "trailer": "Policy-Override",
+      "format": "Policy-Override: <reason>",
+      "audit_log": "~/.commit-bypass.log",
+      "ci_behavior": "record exception, do not block",
+      "valid_when": "subject matches exemption pattern OR --no-verify used with this trailer"
+    }
+  },
+  "validator": {
+    "locale": "C.UTF-8",
+    "regex_engine": "POSIX-ERE",
+    "no_pcre": true,
+    "no_non_capturing_groups": true,
+    "test_corpus": "specs/test-corpus/"
+  },
+  "error_format": {
+    "template": "BLOCK: <rule_id> <message>\nFIX: <fix_hint>\nSPEC: <spec_url>#<rule_id>\nOFFENDING: <literal failing line>",
+    "rationale": "Uniform across local hook + CI so agents have deterministic output to act on. Per DX D2."
+  }
+}
