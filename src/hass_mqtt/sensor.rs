@@ -115,24 +115,28 @@ impl CapabilitySensor {
         let unit_of_measurement = match instance.instance.as_str() {
             "sensorTemperature" => Some(state.get_temperature_scale().await.unit_of_measurement()),
             "sensorHumidity" => Some("%"),
+            "carbonDioxideConcentration" => Some("ppm"),
             _ => None,
         };
 
         let device_class = match instance.instance.as_str() {
             "sensorTemperature" => Some(DEVICE_CLASS_TEMPERATURE),
             "sensorHumidity" => Some(DEVICE_CLASS_HUMIDITY),
+            "carbonDioxideConcentration" => Some("carbon_dioxide"),
             _ => None,
         };
 
         let state_class = match instance.instance.as_str() {
             "sensorTemperature" => Some(StateClass::Measurement),
             "sensorHumidity" => Some(StateClass::Measurement),
+            "carbonDioxideConcentration" => Some(StateClass::Measurement),
             _ => None,
         };
 
         let name = match instance.instance.as_str() {
             "sensorTemperature" => "Temperature".to_string(),
             "sensorHumidity" => "Humidity".to_string(),
+            "carbonDioxideConcentration" => "CO\u{2082}".to_string(),
             "online" => "Connected to Govee Cloud".to_string(),
             _ => instance.instance.to_string(),
         };
