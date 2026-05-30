@@ -1161,6 +1161,34 @@ mod test {
             "\"something\""
         );
     }
+
+    fn enum_option_name(json: &str) -> String {
+        let opt: EnumOption = serde_json::from_str(json).unwrap();
+        opt.name
+    }
+
+    /// A localized object name must resolve to the protocol `key`, not the `en`
+    /// display label, so exact-match control lookups (on/off, scenes) still work.
+    #[test]
+    fn enum_option_name_prefers_key_over_en() {
+        k9::assert_equal!(
+            enum_option_name(r#"{"name": {"key": "on", "en": "On"}, "value": 1}"#),
+            "on"
+        );
+    }
+
+    #[test]
+    fn enum_option_name_plain_string_passthrough() {
+        k9::assert_equal!(enum_option_name(r#"{"name": "off", "value": 0}"#), "off");
+    }
+
+    #[test]
+    fn enum_option_name_falls_back_to_en_without_key() {
+        k9::assert_equal!(
+            enum_option_name(r#"{"name": {"en": "Aurora"}, "value": 2}"#),
+            "Aurora"
+        );
+    }
 }
 
 fn deserialize_name_field<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -1174,12 +1202,22 @@ where
     match v {
         Value::String(s) => Ok(s),
         Value::Object(map) => {
-            if let Some(Value::String(en)) = map.get("en") {
-                Ok(en.clone())
-            } else if let Some(Value::String(key)) = map.get("key") {
+            // Prefer `key`: it is the stable protocol identifier (e.g. "on"/"off")
+            // that EnumOption.name is matched against by enum_parameter_by_name /
+            // set_toggle_state / set_scene_by_name. The `en` field is only a
+            // localized display label; preferring it breaks exact-match control
+            // lookups (e.g. {"key":"on","en":"On"} -> toggle fails "has no on/off").
+            if let Some(Value::String(key)) = map.get("key") {
                 Ok(key.clone())
+            } else if let Some(Value::String(en)) = map.get("en") {
+                Ok(en.clone())
             } else {
-                Ok(serde_json::Value::Object(map).to_string())
+                let blob = serde_json::Value::Object(map).to_string();
+                log::warn!(
+                    "EnumOption name has no `key` or `en` string field; \
+                     using raw JSON {blob} as the name (control lookups may fail)"
+                );
+                Ok(blob)
             }
         }
         _ => Ok(v.to_string()),
