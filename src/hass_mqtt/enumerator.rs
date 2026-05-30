@@ -210,15 +210,15 @@ pub async fn enumerate_entities_for_device(
                 }
 
                 DeviceCapabilityKind::Other(ref s) if s == "devices.capabilities.movie_setting" => {
-               // Ignore movieMode capability (not yet supported)
+                    // Ignore movieMode capability (not yet supported)
                 }
 
-               kind => {
-                   log::warn!(
-                       "Do something about {kind:?} {} for {d} {cap:?}",
-                       cap.instance
-                     );
-                 }
+                kind => {
+                    log::warn!(
+                        "Do something about {kind:?} {} for {d} {cap:?}",
+                        cap.instance
+                    );
+                }
             }
         }
 
