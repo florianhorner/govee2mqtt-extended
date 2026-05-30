@@ -218,6 +218,14 @@ impl EntityInstance for CapabilitySensor {
                         None => "".to_string(),
                     }
                 }
+                "carbonDioxideConcentration" => {
+                    // HA expects a numeric ppm value; extract /value rather than
+                    // falling through to the raw JSON state.
+                    match cap.state.pointer("/value").and_then(|v| v.as_f64()) {
+                        Some(v) => format!("{v:.0}"),
+                        None => "".to_string(),
+                    }
+                }
                 _ => cap.state.to_string(),
             };
 
