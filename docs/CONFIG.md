@@ -106,3 +106,19 @@ app, leave these fields blank — they are filled in automatically.
 |`--mqtt-port`|`GOVEE_MQTT_PORT`|`mqtt_port`|`1883`|Port number of your MQTT broker|
 |`--mqtt-username`|`GOVEE_MQTT_USER`|`mqtt_username`|*(none)*|Username, if your broker requires authentication|
 |`--mqtt-password`|`GOVEE_MQTT_PASSWORD`|`mqtt_password`|*(none)*|Password, if your broker requires authentication|
+
+## Effects (Scenes)
+
+By default Govee2MQTT publishes each light's full list of scene "effects" to
+Home Assistant. Very long effect lists can overflow the Google Home
+integration, which rejects oversized MQTT discovery payloads. These options
+let you trim or disable the published effect list. They are environment-only
+(no CLI flag).
+
+|CLI|ENV|App Config|Default|Purpose|
+|---|---|----------|-------|-------|
+|*(none)*|`GOVEE_DISABLE_EFFECTS=true`|`disable_effects`|*(off)*|Stop publishing effect lists for every device. Use this if a long effect list breaks the Google Home integration.|
+|*(none)*|`GOVEE_ALLOWED_EFFECTS=Aurora,Rainbow`|`allowed_effects`|*(all)*|Comma-separated allowlist; only effects matching these names are published. Keeps some effects while shrinking the payload.|
+
+`disable_effects` wins: if it is set, no effects are published regardless of
+`allowed_effects`.
