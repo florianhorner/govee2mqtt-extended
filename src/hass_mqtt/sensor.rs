@@ -378,7 +378,8 @@ impl EntityInstance for SceneInfoSensor {
             return Ok(());
         };
 
-        let scene_name = device.active_scene_name().unwrap_or("None").to_string();
+        let active = device.active_scene_name();
+        let scene_name = active.unwrap_or("None").to_string();
 
         let catalog = self
             .state
@@ -386,20 +387,23 @@ impl EntityInstance for SceneInfoSensor {
             .await
             .unwrap_or_default();
 
-        // Build flat ordered list for index lookup
-        let flat: Vec<(&str, &str)> = catalog
+        // Build flat ordered list (entry + category) for index + thumbnail/hint lookup
+        let flat: Vec<_> = catalog
             .iter()
-            .flat_map(|cat| {
-                cat.scenes
-                    .iter()
-                    .map(move |s| (s.name.as_str(), cat.name.as_str()))
-            })
+            .flat_map(|cat| cat.scenes.iter().map(move |s| (s, cat.name.as_str())))
             .collect();
 
-        let current_idx = flat
-            .iter()
-            .position(|(name, _)| name.eq_ignore_ascii_case(&scene_name));
+        // Only resolve an index when a scene is actually active; never match the
+        // "None" sentinel against the catalog (a scene literally named "None" must
+        // not look active when nothing is playing).
+        let current_idx = active.and_then(|name| {
+            flat.iter()
+                .position(|(s, _)| s.name.eq_ignore_ascii_case(name))
+        });
 
+        // Keep `scene_name`, `category`, `index`, `total`, `next_scene`, `prev_scene`
+        // exactly as before — existing HA automations, templates, and the user's
+        // dashboard consume them. The new fields further down are strictly additive.
         let (category, index, next_scene, prev_scene) = if let Some(idx) = current_idx {
             let total = flat.len();
             let next_idx = (idx + 1) % total;
@@ -407,22 +411,49 @@ impl EntityInstance for SceneInfoSensor {
             (
                 flat[idx].1.to_string(),
                 idx,
-                flat[next_idx].0.to_string(),
-                flat[prev_idx].0.to_string(),
+                flat[next_idx].0.name.clone(),
+                flat[prev_idx].0.name.clone(),
             )
         } else {
-            let next = flat.first().map(|(n, _)| n.to_string()).unwrap_or_default();
-            let prev = flat.last().map(|(n, _)| n.to_string()).unwrap_or_default();
+            let next = flat
+                .first()
+                .map(|(s, _)| s.name.clone())
+                .unwrap_or_default();
+            let prev = flat.last().map(|(s, _)| s.name.clone()).unwrap_or_default();
             ("Unknown".to_string(), 0, next, prev)
         };
 
+        // Additive, render-ready fields for the v2 Scene Deck card. We publish data,
+        // not UI strings — the card composes its display copy from `has_active_scene`,
+        // `scene_name`, and `is_on`.
+        let has_active_scene = active.is_some();
+        let thumbnail = current_idx
+            .and_then(|idx| flat[idx].0.icon_urls.first().cloned())
+            .unwrap_or_default();
+        let hint = current_idx
+            .and_then(|idx| flat[idx].0.hint.clone())
+            .unwrap_or_default();
+        // Mirror the light entity's on/off semantics (see light.rs) so the card and the
+        // light entity never disagree: an absent `light_on` (or no device state yet)
+        // means "light off". Always a bool so consumers never see JSON null.
+        let is_on = device
+            .device_state()
+            .and_then(|s| s.light_on)
+            .unwrap_or(false);
+
         let attributes = json!({
+            // existing contract — unchanged
             "scene_name": scene_name,
             "category": category,
             "index": index,
             "total": flat.len(),
             "next_scene": next_scene,
             "prev_scene": prev_scene,
+            // additive
+            "has_active_scene": has_active_scene,
+            "thumbnail": thumbnail,
+            "hint": hint,
+            "is_on": is_on,
         });
 
         self.sensor.notify_state(client, &scene_name).await?;

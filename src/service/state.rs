@@ -447,11 +447,13 @@ impl State {
         if let Some(lan_dev) = &device.lan_device {
             log::info!("Using LAN API to set {device} color temperature");
             lan_dev.send_color_temperature_kelvin(kelvin).await?;
-            self.poll_lan_api(lan_dev, |status| status.color_temperature_kelvin == kelvin)
-                .await?;
+            // Clear before polling: poll_lan_api emits the state notification, so the
+            // scene must already be cleared or HA briefly sees the new color + old scene.
             self.device_mut(&device.sku, &device.id)
                 .await
                 .set_active_scene(None);
+            self.poll_lan_api(lan_dev, |status| status.color_temperature_kelvin == kelvin)
+                .await?;
             return Ok(());
         }
 
@@ -460,6 +462,9 @@ impl State {
                 if let Some(info) = &device.undoc_device_info {
                     log::info!("Using IoT API to set {device} color temperature");
                     iot.set_color_temperature(&info.entry, kelvin).await?;
+                    self.device_mut(&device.sku, &device.id)
+                        .await
+                        .set_active_scene(None);
                     return Ok(());
                 }
             }
@@ -554,11 +559,13 @@ impl State {
             let color = crate::lan_api::DeviceColor { r, g, b };
             log::info!("Using LAN API to set {device} color");
             lan_dev.send_color_rgb(color).await?;
-            self.poll_lan_api(lan_dev, |status| status.color == color)
-                .await?;
+            // Clear before polling: poll_lan_api emits the state notification, so the
+            // scene must already be cleared or HA briefly sees the new color + old scene.
             self.device_mut(&device.sku, &device.id)
                 .await
                 .set_active_scene(None);
+            self.poll_lan_api(lan_dev, |status| status.color == color)
+                .await?;
             return Ok(());
         }
 
@@ -567,6 +574,9 @@ impl State {
                 if let Some(info) = &device.undoc_device_info {
                     log::info!("Using IoT API to set {device} color");
                     iot.set_color_rgb(&info.entry, r, g, b).await?;
+                    self.device_mut(&device.sku, &device.id)
+                        .await
+                        .set_active_scene(None);
                     return Ok(());
                 }
             }

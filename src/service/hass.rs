@@ -470,6 +470,11 @@ async fn mqtt_light_segment_command(
             client
                 .set_segment_rgb(info, segment, color.r, color.g, color.b)
                 .await?;
+            // A solid per-segment color ends any scene the bridge had applied.
+            state
+                .device_mut(&device.sku, &device.id)
+                .await
+                .set_active_scene(None);
         }
     } else {
         anyhow::bail!("set segments for {device}: Platform API is not available");

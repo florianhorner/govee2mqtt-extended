@@ -87,8 +87,16 @@ lights that support **RGB** or **color temperature** control. They let you cycle
 available scenes for a device without opening the Govee app or picking
 from a long list.
 
-A **"Scene Info"** sensor shows the name and category of the currently
-active scene.
+A **"Scene Info"** sensor reports the currently active scene. Its state is the
+scene name (`None` when no scene is active); its attributes include `category`,
+`index`/`total`, and `next_scene`/`prev_scene`, plus render-ready extras for
+dashboards: `has_active_scene`, `thumbnail`, `hint`, and `is_on`.
+
+Govee's API never reports which scene is live, so the bridge tracks the scene it
+last applied: it keeps that scene through the scene's own color animation and
+clears it when the light is turned off or set to a solid color/temperature. A
+scene set from the Govee app stays unknown until the light is next changed
+through the bridge.
 
 These buttons are only available in [this fork](../README.md#what-this-fork-adds).
 
