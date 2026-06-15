@@ -623,30 +623,15 @@ impl State {
 
     pub async fn device_list_scenes(&self, device: &Device) -> anyhow::Result<Vec<String>> {
         // TODO: some plumbing to maintain offline scene controls for preferred-LAN control
-        if let Some(client) = self.get_platform_client().await {
-            if let Some(info) = &device.http_device_info {
-                return Ok(sort_and_dedup_scenes(client.list_scene_names(info).await?));
-            }
-        }
-
-        if let Ok(categories) = GoveeUndocumentedApi::get_scenes_for_device(&device.sku).await {
-            let mut names = vec![];
-            for cat in categories {
-                for scene in cat.scenes {
-                    for effect in scene.light_effects {
-                        if effect.scene_code != 0 {
-                            names.push(scene.scene_name);
-                            break;
-                        }
-                    }
-                }
-            }
-            return Ok(sort_and_dedup_scenes(names));
-        }
-
-        log::trace!("Platform API unavailable: Don't know how to list scenes for {device}");
-
-        Ok(vec![])
+        // Flatten the cached categorized catalog to a flat name list so this path shares
+        // the same `scene_catalog_cache` as `device_list_scenes_categorized()` rather than
+        // hitting the Govee API on every call.
+        let catalog = self.device_list_scenes_categorized(device).await?;
+        let names = catalog
+            .into_iter()
+            .flat_map(|cat| cat.scenes.into_iter().map(|scene| scene.name))
+            .collect();
+        Ok(sort_and_dedup_scenes(names))
     }
 
     /// Returns the scene catalog with category structure preserved.

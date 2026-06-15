@@ -1,12 +1,30 @@
 # TODOs
 
-## Cache device_list_scenes() results
-**What:** Make the existing flat `device_list_scenes()` read from the same catalog cache as `device_list_scenes_categorized()`.
-**Why:** The existing function hits the Govee API on every call with no caching, same as the new categorized version. Once the catalog cache exists (Fix #1 in the scene-cycle PR), the flat function should read from it too.
-**Pros:** Fewer API calls globally, consistent behavior, reduces rate-limit risk for all scene interactions.
-**Cons:** Minor additional scope, needs cache invalidation on device re-enumeration.
-**Context:** `state.rs:600` already has a TODO comment: "some plumbing to maintain offline scene controls for preferred-LAN control". This aligns with that goal.
-**Depends on:** Scene Quick-Cycle PR's catalog cache implementation (Fix #1).
+## Make the scene catalog cache source-aware (platform vs undoc)
+**What:** When `device_list_scenes()` / `device_list_scenes_categorized()` serve a cached
+catalog that was populated from the **undocumented** API while platform data was absent or
+empty, later calls keep returning the undoc set even after the Platform API becomes
+available — so platform-only entries (e.g. `Music:` modes from
+`GoveeApiClient::list_scene_names()`, `platform_api.rs:301`) never appear.
+**Why:** Affects HA effect/select options (`light.rs:174`, `select.rs:112`). Surfaced by
+Codex review of the `device_list_scenes()` caching change.
+**Options:** tag the cache with its source and invalidate when platform info arrives, or
+keep the flat path platform-first and use the cached catalog only as a fallback.
+**Effort:** Small-medium.
+
+## Scene catalog cache: clone-read vs canonical-write
+**What:** `device_list_scenes_categorized()` reads the cache from the caller's cloned
+`Device` (`state.rs:646`) but writes to the canonical device in `State` (`state.rs:654`).
+During a single HA enumeration pass the same stale clone flows through
+`DeviceLight::for_device()` then `SceneModeSelect::new()`
+(`enumerator.rs:168,179`), so the second flat call refetches from Govee instead of seeing
+the cache the first call just stored.
+**Why:** Limits the in-pass benefit of the cache (it still helps across passes / state
+notifications, since those re-read the canonical device). Pre-existing in the categorized
+path; surfaced by Codex review.
+**Options:** re-read the canonical device by id before fetching, or centralize scene-cache
+access inside `State`.
+**Effort:** Small.
 
 ## Enrich Platform API scenes with undoc API icons/hints
 **What:** For devices that go through Platform API (which only returns scene names), try the undocumented API as a secondary source to add icon URLs and hint text.
