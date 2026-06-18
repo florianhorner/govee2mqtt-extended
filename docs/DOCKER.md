@@ -11,18 +11,22 @@ To deploy in docker:
    See [CONFIG.md](CONFIG.md) for more details.
 
 ```bash
-# Optional, but strongly recommended
+## Govee Credentials
+# Optional, but strongly recommended. Credentials let Govee2MQTT discover
+# room names, cloud-only devices, Tap-to-Run shortcuts, and other app metadata.
 GOVEE_EMAIL=user@example.com
 GOVEE_PASSWORD=secret
 # Optional, but recommended
 GOVEE_API_KEY=UUID
 
+## MQTT
 GOVEE_MQTT_HOST=mqtt
 GOVEE_MQTT_PORT=1883
 # Uncomment if your mqtt broker requires authentication
 #GOVEE_MQTT_USER=user
 #GOVEE_MQTT_PASSWORD=password
 
+## Display
 # Specify the temperature scale to use, either C for Celsius
 # or F for Fahrenheit
 GOVEE_TEMPERATURE_SCALE=C
@@ -67,4 +71,3 @@ $ docker compose up -d
 ```console
 $ docker logs govee2mqtt --follow
 ```
-

@@ -55,6 +55,7 @@ async fn resolve_device_read_only(state: &StateHandle, id: &str) -> Result<Devic
 async fn list_devices(State(state): State<StateHandle>) -> Result<Response, Response> {
     let mut devices = state.devices().await;
     devices.sort_by_key(|d| (d.room_name().map(|name| name.to_string()), d.name()));
+    let mqtt_connected = state.get_hass_client().await.is_some();
 
     #[derive(Serialize)]
     struct DeviceItem {
@@ -64,17 +65,31 @@ async fn list_devices(State(state): State<StateHandle>) -> Result<Response, Resp
         pub room: Option<String>,
         pub ip: Option<IpAddr>,
         pub state: Option<DeviceState>,
+        pub mqtt_connected: bool,
+        pub api_available: bool,
+        pub lan_active: bool,
+        pub cloud_online: Option<bool>,
     }
 
     let devices: Vec<_> = devices
         .into_iter()
-        .map(|d| DeviceItem {
-            name: d.name(),
-            room: d.room_name().map(|r| r.to_string()),
-            ip: d.ip_addr(),
-            state: d.device_state(),
-            sku: d.sku,
-            id: d.id,
+        .map(|d| {
+            let device_state = d.device_state();
+            let cloud_online = device_state.as_ref().and_then(|state| state.online);
+            let api_available = d.http_device_info.is_some();
+            let ip = d.ip_addr();
+            DeviceItem {
+                name: d.name(),
+                room: d.room_name().map(|r| r.to_string()),
+                ip,
+                state: device_state,
+                mqtt_connected,
+                api_available,
+                lan_active: ip.is_some(),
+                cloud_online,
+                sku: d.sku,
+                id: d.id,
+            }
         })
         .collect();
 
@@ -206,7 +221,9 @@ async fn list_one_clicks(State(state): State<StateHandle>) -> Result<Response, R
     let undoc = state
         .get_undoc_client()
         .await
-        .ok_or_else(|| anyhow::anyhow!("Undoc API client is not available"))
+        .ok_or_else(|| {
+            anyhow::anyhow!("Govee cloud API unavailable: is your email/password configured?")
+        })
         .map_err(generic)?;
     let items = undoc.parse_one_clicks().await.map_err(generic)?;
 
@@ -220,7 +237,9 @@ async fn activate_one_click(
     let undoc = state
         .get_undoc_client()
         .await
-        .ok_or_else(|| anyhow::anyhow!("Undoc API client is not available"))
+        .ok_or_else(|| {
+            anyhow::anyhow!("Govee cloud API unavailable: is your email/password configured?")
+        })
         .map_err(generic)?;
     let items = undoc.parse_one_clicks().await.map_err(generic)?;
     let item = items

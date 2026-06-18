@@ -12,15 +12,11 @@ PRs and ideas welcome — [open an issue](https://github.com/florianhorner/govee
 
 ## Next (committed, scoped)
 
-- **Fix hardcoded `"uuid"` request IDs** — Platform API methods send a literal `"uuid"` string instead of a generated UUID. Could cause server-side dedup issues. One-line fix x4 (`src/platform_api.rs`)
-- **Error message consistency** — standardize Rust log messages to `"{action} failed for {device}: {reason}"` pattern. Replace cryptic messages like `"no lan client"` and `"cannot find device {id}!?"`
 - **Upstream PR: panic hardening + exit code fix** — [#617](https://github.com/wez/govee2mqtt/issues/617), [#618](https://github.com/wez/govee2mqtt/issues/618) are filed, need clean PRs
 
 ## Later (ideas, not committed)
 
-- **Web UI improvements** — connection status indicators, room grouping, help links for "Missing" devices
-- **Config description defaults** — add a "Default" column to config tables so users know what happens when fields are blank
-- **Docker `.env` grouping** — organize the env skeleton with section headers (`## Govee credentials`, `## MQTT`, `## Display`)
+- **Scene catalog enrichment** — merge undocumented API icons/hints into Platform API scene catalogs when names line up cleanly
 - **Additional device support** — community-requested SKUs as they come in
 
 ## Upstream tracker

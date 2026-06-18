@@ -1,0 +1,18 @@
+# Gate proof — PR2 web-ui-cleanup
+# branch: florianhorner/web-ui-cleanup  base: origin/main 7d993f8
+# generated: 2026-06-18T21:41:23Z
+
+## cargo build --all
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt/tel-aviv)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.52s
+
+## cargo clippy --all -- -D warnings
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt/tel-aviv)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.72s
+
+## cargo fmt --all -- --check
+fmt exit: 
+
+## cargo test --all
+test platform_api::test::request_ids_are_unique_uuids ... ok
+test result: ok. 102 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
