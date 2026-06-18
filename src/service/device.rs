@@ -5,7 +5,7 @@ use crate::platform_api::{
     DeviceCapability, DeviceCapabilityState, DeviceType, HttpDeviceInfo, HttpDeviceState,
 };
 use crate::service::quirks::{resolve_quirk, Quirk, BULB};
-use crate::service::state::SceneCatalogCategory;
+use crate::service::state::SceneCatalogCache;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -49,7 +49,7 @@ pub struct Device {
     /// itself sets a solid color/temperature (see the command paths in state.rs).
     active_scene: Option<String>,
     /// Cached scene catalog to avoid repeated API calls during state notifications
-    scene_catalog_cache: Option<Vec<SceneCatalogCategory>>,
+    scene_catalog_cache: Option<SceneCatalogCache>,
 }
 
 impl std::fmt::Display for Device {
@@ -366,14 +366,20 @@ impl Device {
         self.active_scene.as_deref()
     }
 
-    /// Returns the cached scene catalog, if available
-    pub fn scene_catalog(&self) -> Option<&Vec<SceneCatalogCategory>> {
+    /// Returns the full cached scene catalog metadata, if available
+    pub fn scene_catalog_cache(&self) -> Option<&SceneCatalogCache> {
         self.scene_catalog_cache.as_ref()
     }
 
     /// Caches the scene catalog for this device
-    pub fn set_scene_catalog(&mut self, catalog: Vec<SceneCatalogCategory>) {
+    pub fn set_scene_catalog(&mut self, catalog: SceneCatalogCache) {
         self.scene_catalog_cache = Some(catalog);
+    }
+
+    /// Drops the cached scene catalog so the next request refetches it. Used by the
+    /// MQTT cache-purge button, which otherwise only clears the on-disk cache.
+    pub fn clear_scene_catalog(&mut self) {
+        self.scene_catalog_cache = None;
     }
 
     /// Records the active scene name the bridge just applied, or clears it.

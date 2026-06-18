@@ -22,6 +22,14 @@ pub struct SceneCatalogCategory {
     pub scenes: Vec<SceneCatalogEntry>,
 }
 
+#[derive(Clone, Debug)]
+pub struct SceneCatalogCache {
+    /// Platform-capability fingerprint at fetch time. Used to detect when platform
+    /// device metadata has arrived/changed so a cached catalog can be refreshed.
+    pub platform_signature: Option<String>,
+    pub categories: Vec<SceneCatalogCategory>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SceneCatalogEntry {
     pub name: String,
@@ -292,7 +300,7 @@ impl State {
                 self.notify_of_state_change(&device.device).await?;
                 Ok(())
             }
-            None => anyhow::bail!("no lan client"),
+            None => anyhow::bail!("LAN control unavailable: no LAN client connected"),
         }
     }
 
@@ -330,7 +338,7 @@ impl State {
             .get_light_power_toggle_instance_name()
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Don't know how to toggle just the light portion of {device}. \
+                    "Unsupported light-only power command for {device}. \
                      Please share the device metadata and state if you report this issue"
                 )
             })?;
@@ -634,6 +642,15 @@ impl State {
         Ok(sort_and_dedup_scenes(names))
     }
 
+    /// Clears every device's in-memory scene-catalog cache. The MQTT cache-purge
+    /// button only recreates the on-disk cache; without this, a stale scene catalog
+    /// would survive a purge and only clear on a full restart.
+    pub async fn clear_scene_catalogs(&self) {
+        for device in self.devices_by_id.lock().await.values_mut() {
+            device.clear_scene_catalog();
+        }
+    }
+
     /// Returns the scene catalog with category structure preserved.
     /// Unlike `device_list_scenes()` which returns a flat `Vec<String>`,
     /// this preserves category groupings and icon URLs from the Govee API.
@@ -642,49 +659,87 @@ impl State {
         &self,
         device: &Device,
     ) -> anyhow::Result<Vec<SceneCatalogCategory>> {
-        // Return cached catalog if available
-        if let Some(cached) = device.scene_catalog() {
-            return Ok(cached.clone());
+        let device = self
+            .device_by_id(&device.id)
+            .await
+            .unwrap_or_else(|| device.clone());
+        let cached = device.scene_catalog_cache().cloned();
+
+        if let Some(cached) = &cached {
+            if !self.should_refresh_scene_catalog(&device, cached).await {
+                return Ok(cached.categories.clone());
+            }
         }
 
-        let catalog = self.fetch_scene_catalog(device).await?;
+        let mut catalog = match self.fetch_scene_catalog(&device).await {
+            Ok(catalog) => catalog,
+            Err(err) => {
+                if let Some(cached) = cached {
+                    log::warn!(
+                        "Scene catalog refresh failed for {device}: {err:#}; using cached catalog"
+                    );
+                    return Ok(cached.categories);
+                }
+                return Err(err);
+            }
+        };
 
-        // Cache the result for future calls
-        if !catalog.is_empty() {
+        // On refresh, keep the cached scenes if the fresh fetch came back empty (e.g. a
+        // transient upstream failure) rather than serving an empty list. The fresh
+        // `platform_signature` is still adopted below so the refresh check settles
+        // instead of refetching on every state notification. (The platform-vs-undoc
+        // source tradeoff is handled inside `fetch_scene_catalog`, which uses the
+        // platform names as the authoritative spine and enriches them with undoc
+        // icons/hints — so a refresh never drops controllable scenes or their media.)
+        if let Some(cached) = &cached {
+            if catalog.categories.is_empty() && !cached.categories.is_empty() {
+                catalog.categories = cached.categories.clone();
+            }
+        }
+
+        // Cache the (possibly preserved) catalog so the platform-signature refresh
+        // check stabilizes. A still-empty result is left uncached so a device whose
+        // metadata hasn't loaded yet isn't pinned to "no scenes".
+        if !catalog.categories.is_empty() {
             self.device_mut(&device.sku, &device.id)
                 .await
                 .set_scene_catalog(catalog.clone());
         }
 
-        Ok(catalog)
+        Ok(catalog.categories)
     }
 
     /// Fetches the scene catalog from the Govee API (no caching).
-    async fn fetch_scene_catalog(
-        &self,
-        device: &Device,
-    ) -> anyhow::Result<Vec<SceneCatalogCategory>> {
-        // Try platform API first (no category info — wrap in "All")
-        if let Some(client) = self.get_platform_client().await {
+    async fn fetch_scene_catalog(&self, device: &Device) -> anyhow::Result<SceneCatalogCache> {
+        let platform_client = self.get_platform_client().await;
+        let platform_signature = platform_client
+            .as_ref()
+            .and_then(|_| scene_platform_signature(device));
+
+        // Platform API is the authoritative set of controllable scene names but carries
+        // no icons/hints. When it returns names, use them as the spine and enrich each
+        // with icon/hint metadata from the undocumented API, matched by name. Scenes with
+        // no undoc match still appear (without a thumbnail); undoc-only scenes the platform
+        // can't drive are intentionally dropped. This is strictly >= using either source
+        // alone: it never hides a controllable scene and never loses a thumbnail that exists.
+        if let Some(client) = platform_client {
             if let Some(info) = &device.http_device_info {
                 let names = sort_and_dedup_scenes(client.list_scene_names(info).await?);
                 if !names.is_empty() {
-                    return Ok(vec![SceneCatalogCategory {
-                        name: "All".to_string(),
-                        scenes: names
-                            .into_iter()
-                            .map(|name| SceneCatalogEntry {
-                                name,
-                                icon_urls: vec![],
-                                hint: None,
-                            })
-                            .collect(),
-                    }]);
+                    let media = scene_media_by_name(&device.sku).await;
+                    return Ok(SceneCatalogCache {
+                        platform_signature,
+                        categories: vec![SceneCatalogCategory {
+                            name: "All".to_string(),
+                            scenes: enrich_scene_names(names, &media),
+                        }],
+                    });
                 }
             }
         }
 
-        // Try undocumented API (has categories)
+        // No platform names available — fall back to the undocumented catalog wholesale
+        // (preserves its real category groupings, icons, and hints).
         if let Ok(categories) = GoveeUndocumentedApi::get_scenes_for_device(&device.sku).await {
             let mut result = vec![];
             for cat in categories {
@@ -715,10 +770,29 @@ impl State {
                     });
                 }
             }
-            return Ok(result);
+            return Ok(SceneCatalogCache {
+                platform_signature,
+                categories: result,
+            });
         }
 
-        Ok(vec![])
+        Ok(SceneCatalogCache {
+            platform_signature,
+            categories: vec![],
+        })
+    }
+
+    async fn should_refresh_scene_catalog(
+        &self,
+        device: &Device,
+        cache: &SceneCatalogCache,
+    ) -> bool {
+        if self.get_platform_client().await.is_none() {
+            return false;
+        }
+
+        let current_signature = scene_platform_signature(device);
+        current_signature.is_some() && cache.platform_signature != current_signature
     }
 
     pub async fn device_set_target_temperature(
@@ -778,7 +852,7 @@ impl State {
     // reference, as that will deadlock!
     pub async fn notify_of_state_change(self: &Arc<Self>, device_id: &str) -> anyhow::Result<()> {
         let Some(canonical_device) = self.device_by_id(device_id).await else {
-            anyhow::bail!("cannot find device {device_id}!?");
+            anyhow::bail!("Device not found: {device_id}");
         };
 
         if let Some(hass) = self.get_hass_client().await {
@@ -796,9 +870,111 @@ pub fn sort_and_dedup_scenes(mut scenes: Vec<String>) -> Vec<String> {
     scenes
 }
 
+fn scene_platform_signature(device: &Device) -> Option<String> {
+    let info = device.http_device_info.as_ref()?;
+    let mut capabilities: Vec<_> = info
+        .capabilities
+        .iter()
+        .map(|cap| format!("{:?}:{}", cap.kind, cap.instance))
+        .collect();
+    capabilities.sort();
+    Some(format!(
+        "{}:{}:{}",
+        info.sku,
+        info.device,
+        capabilities.join("|")
+    ))
+}
+
+/// Best-effort map of scene name (lowercased) -> (icon_urls, hint) from the
+/// undocumented API, used to enrich the authoritative platform scene list. Returns
+/// an empty map when the undocumented API is unavailable, so enrichment degrades to
+/// platform-names-only rather than failing. The first occurrence of a name wins.
+async fn scene_media_by_name(sku: &str) -> HashMap<String, (Vec<String>, Option<String>)> {
+    let mut media = HashMap::new();
+    if let Ok(categories) = GoveeUndocumentedApi::get_scenes_for_device(sku).await {
+        for cat in categories {
+            for scene in cat.scenes {
+                let hint = if scene.scenes_hint.is_empty() {
+                    None
+                } else {
+                    Some(scene.scenes_hint)
+                };
+                media
+                    .entry(scene.scene_name.to_ascii_lowercase())
+                    .or_insert((scene.icon_urls, hint));
+            }
+        }
+    }
+    media
+}
+
+/// Builds scene entries from the authoritative platform name list, attaching undoc
+/// icon/hint metadata where the name matches (case-insensitively). Every platform
+/// name yields exactly one entry; a name with no media match still appears with empty
+/// media. Undoc-only names (not in `names`) are not represented — the platform decides
+/// the controllable set.
+fn enrich_scene_names(
+    names: Vec<String>,
+    media: &HashMap<String, (Vec<String>, Option<String>)>,
+) -> Vec<SceneCatalogEntry> {
+    names
+        .into_iter()
+        .map(|name| {
+            let (icon_urls, hint) = media
+                .get(&name.to_ascii_lowercase())
+                .cloned()
+                .unwrap_or_default();
+            SceneCatalogEntry {
+                name,
+                icon_urls,
+                hint,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform_api::{DeviceCapabilityKind, GoveeApiClient, HttpDeviceInfo};
+
+    fn test_scene_catalog_cache(
+        platform_signature: Option<String>,
+        scene_name: &str,
+    ) -> SceneCatalogCache {
+        SceneCatalogCache {
+            platform_signature,
+            categories: vec![SceneCatalogCategory {
+                name: "All".to_string(),
+                scenes: vec![SceneCatalogEntry {
+                    name: scene_name.to_string(),
+                    icon_urls: vec![],
+                    hint: None,
+                }],
+            }],
+        }
+    }
+
+    fn dynamic_scene_capability(instance: &str) -> DeviceCapability {
+        DeviceCapability {
+            kind: DeviceCapabilityKind::DynamicScene,
+            instance: instance.to_string(),
+            parameters: None,
+            alarm_type: None,
+            event_state: None,
+        }
+    }
+
+    fn http_device_info(id: &str, instance: &str) -> HttpDeviceInfo {
+        HttpDeviceInfo {
+            sku: "H6001".to_string(),
+            device: id.to_string(),
+            device_name: "Test Light".to_string(),
+            device_type: DeviceType::Light,
+            capabilities: vec![dynamic_scene_capability(instance)],
+        }
+    }
 
     #[test]
     fn test_scene_catalog_entry_hint_serde_round_trip() {
@@ -824,6 +1000,47 @@ mod tests {
         // Deserializing JSON without "hint" field should produce None (serde default)
         let deserialized: SceneCatalogEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.hint, None);
+    }
+
+    #[test]
+    fn test_enrich_scene_names_uses_platform_spine_with_undoc_media() {
+        // Platform is the authoritative controllable set; undoc supplies icons/hints.
+        let mut media = HashMap::new();
+        media.insert(
+            "aurora".to_string(),
+            (
+                vec!["https://example.com/aurora.png".to_string()],
+                Some("calm".to_string()),
+            ),
+        );
+        // Undoc has a scene the platform does NOT list — it must be dropped.
+        media.insert(
+            "undoc only".to_string(),
+            (vec!["https://example.com/x.png".to_string()], None),
+        );
+
+        // Platform lists "Aurora" (matches, case-insensitively via "AURORA") and
+        // "Music: Energic" (platform-only, no undoc media).
+        let names = vec!["AURORA".to_string(), "Music: Energic".to_string()];
+        let scenes = enrich_scene_names(names, &media);
+
+        // Exactly the platform set, in platform order. Undoc-only scene not present.
+        assert_eq!(scenes.len(), 2);
+        assert_eq!(scenes[0].name, "AURORA");
+        assert_eq!(
+            scenes[0].icon_urls,
+            vec!["https://example.com/aurora.png".to_string()]
+        );
+        assert_eq!(scenes[0].hint.as_deref(), Some("calm"));
+
+        // Platform-only scene survives (controllable) but carries no thumbnail.
+        assert_eq!(scenes[1].name, "Music: Energic");
+        assert!(scenes[1].icon_urls.is_empty());
+        assert_eq!(scenes[1].hint, None);
+
+        assert!(!scenes
+            .iter()
+            .any(|s| s.name.eq_ignore_ascii_case("undoc only")));
     }
 
     #[test]
@@ -949,5 +1166,76 @@ mod tests {
         let state = State::new();
         let devices = state.devices().await;
         assert!(devices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scene_catalog_reads_canonical_cache_for_stale_clone() {
+        let state = State::new();
+        let stale_clone = Device::new("H6001", "AA:BB:CC:DD:EE:FF");
+        {
+            let mut canonical = state.device_mut("H6001", "AA:BB:CC:DD:EE:FF").await;
+            canonical.set_scene_catalog(test_scene_catalog_cache(None, "Aurora"));
+        }
+
+        let catalog = state
+            .device_list_scenes_categorized(&stale_clone)
+            .await
+            .unwrap();
+
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].scenes[0].name, "Aurora");
+    }
+
+    #[tokio::test]
+    async fn test_clear_scene_catalogs_drops_cached_catalog() {
+        let state = State::new();
+        {
+            let mut canonical = state.device_mut("H6001", "AA:BB:CC:DD:EE:FF").await;
+            canonical.set_scene_catalog(test_scene_catalog_cache(None, "Aurora"));
+        }
+        assert!(state
+            .device_by_id("AA:BB:CC:DD:EE:FF")
+            .await
+            .unwrap()
+            .scene_catalog_cache()
+            .is_some());
+
+        state.clear_scene_catalogs().await;
+
+        assert!(state
+            .device_by_id("AA:BB:CC:DD:EE:FF")
+            .await
+            .unwrap()
+            .scene_catalog_cache()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_scene_catalog_refreshes_when_platform_metadata_arrives() {
+        let state = State::new();
+        state
+            .set_platform_client(GoveeApiClient::new("test-key"))
+            .await;
+
+        let mut device = Device::new("H6001", "AA:BB:CC:DD:EE:FF");
+        device.http_device_info = Some(http_device_info(&device.id, "lightScene"));
+        let stale_undoc_cache = test_scene_catalog_cache(None, "Fallback");
+
+        assert!(
+            state
+                .should_refresh_scene_catalog(&device, &stale_undoc_cache)
+                .await
+        );
+
+        let current_cache = SceneCatalogCache {
+            platform_signature: scene_platform_signature(&device),
+            ..stale_undoc_cache
+        };
+
+        assert!(
+            !state
+                .should_refresh_scene_catalog(&device, &current_cache)
+                .await
+        );
     }
 }

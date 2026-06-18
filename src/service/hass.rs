@@ -486,6 +486,7 @@ async fn mqtt_light_segment_command(
 async fn mqtt_purge_caches(State(state): State<StateHandle>) -> anyhow::Result<()> {
     log::info!("mqtt_purge_caches");
     crate::cache::purge_cache()?;
+    state.clear_scene_catalogs().await;
     state
         .get_hass_client()
         .await
@@ -501,10 +502,9 @@ async fn mqtt_oneclick(
 ) -> anyhow::Result<()> {
     log::info!("mqtt_oneclick: {name}");
 
-    let undoc = state
-        .get_undoc_client()
-        .await
-        .ok_or_else(|| anyhow::anyhow!("Undoc API client is not available"))?;
+    let undoc = state.get_undoc_client().await.ok_or_else(|| {
+        anyhow::anyhow!("Govee cloud API unavailable: is your email/password configured?")
+    })?;
     let items = undoc.parse_one_clicks().await?;
     let item = items
         .iter()
@@ -548,7 +548,7 @@ async fn mqtt_switch_command(
             anyhow::bail!("No platform state available to set {id} {instance} to {on}");
         }
     } else {
-        anyhow::bail!("Don't know how to {command} for {id} {instance}!");
+        anyhow::bail!("Unsupported command '{command}' for {id} {instance}");
     }
 
     Ok(())

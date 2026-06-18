@@ -1,0 +1,17 @@
+# Gate proof — PR1 scene-catalog-cache
+# branch: florianhorner/scene-catalog-cache  base: origin/main 7d993f8
+# generated: 2026-06-18T21:39:25Z
+
+## cargo build --all
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt/tel-aviv)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.08s
+
+## cargo clippy --all -- -D warnings
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt/tel-aviv)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.14s
+
+## cargo fmt --all -- --check
+fmt exit: 
+
+## cargo test --all
+test result: ok. 105 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
