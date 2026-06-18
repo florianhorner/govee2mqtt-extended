@@ -167,7 +167,7 @@ jobs:
       - name: Apply tag to version
         run: ./scripts/apply-tag.sh
       - name: Build and Publish Home Assistant Add On
-        uses: home-assistant/builder@2026.03.2
+        uses: home-assistant/builder@2026.06.0
         with:
           args: |
             --amd64 \
@@ -205,7 +205,7 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Test Build Home Assistant Add On
-        uses: home-assistant/builder@2026.03.2
+        uses: home-assistant/builder@2026.06.0
         with:
           args: |
             --test \
