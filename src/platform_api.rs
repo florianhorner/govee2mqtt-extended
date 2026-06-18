@@ -27,6 +27,10 @@ fn endpoint(url: &str) -> String {
     format!("{SERVER}{url}")
 }
 
+fn request_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 #[derive(clap::Parser, Debug)]
 pub struct GoveeApiArguments {
     /// The Govee API Key. If not passed here, it will be read from
@@ -106,7 +110,7 @@ impl GoveeApiClient {
     ) -> anyhow::Result<ControlDeviceResponseCapability> {
         let url = endpoint("/router/api/v1/device/control");
         let request = ControlDeviceRequest {
-            request_id: "uuid".to_string(),
+            request_id: request_id(),
             payload: ControlDevicePayload {
                 sku: device.sku.to_string(),
                 device: device.device.to_string(),
@@ -133,7 +137,7 @@ impl GoveeApiClient {
     ) -> anyhow::Result<HttpDeviceState> {
         let url = endpoint("/router/api/v1/device/state");
         let request = GetDeviceStateRequest {
-            request_id: "uuid".to_string(),
+            request_id: request_id(),
             payload: GetDeviceStateRequestPayload {
                 sku: device.sku.to_string(),
                 device: device.device.to_string(),
@@ -168,7 +172,7 @@ impl GoveeApiClient {
             async {
                 let url = endpoint("/router/api/v1/device/diy-scenes");
                 let request = GetDeviceScenesRequest {
-                    request_id: "uuid".to_string(),
+                    request_id: request_id(),
                     payload: GetDeviceScenesPayload {
                         sku: device.sku.to_string(),
                         device: device.device.to_string(),
@@ -206,7 +210,7 @@ impl GoveeApiClient {
             async {
                 let url = endpoint("/router/api/v1/device/scenes");
                 let request = GetDeviceScenesRequest {
-                    request_id: "uuid".to_string(),
+                    request_id: request_id(),
                     payload: GetDeviceScenesPayload {
                         sku: device.sku.to_string(),
                         device: device.device.to_string(),
@@ -1158,5 +1162,16 @@ mod test {
             serde_json::to_string(&DeviceType::Other("something".to_string())).unwrap(),
             "\"something\""
         );
+    }
+
+    #[test]
+    fn request_ids_are_unique_uuids() {
+        let first = request_id();
+        let second = request_id();
+
+        assert_ne!(first, "uuid");
+        assert_ne!(first, second);
+        uuid::Uuid::parse_str(&first).unwrap();
+        uuid::Uuid::parse_str(&second).unwrap();
     }
 }
