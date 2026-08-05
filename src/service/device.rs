@@ -82,6 +82,12 @@ pub struct DeviceState {
     /// The active effect mode, if known
     pub scene: Option<String>,
 
+    /// The active work mode number as reported by the device via
+    /// the AWS IoT status message, when known. SKU-specific meaning
+    /// (eg: H607C reports 5 for manual color and 4 for music mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<i64>,
+
     /// Where the information came from
     pub source: &'static str,
     pub updated: DateTime<Utc>,
@@ -250,6 +256,7 @@ impl Device {
             color: status.color,
             kelvin: status.color_temperature_kelvin,
             scene: self.active_scene.clone(),
+            mode: status.mode,
             source: "AWS IoT API",
             updated,
         })
@@ -267,6 +274,11 @@ impl Device {
             color: status.color,
             kelvin: status.color_temperature_kelvin,
             scene: self.active_scene.clone(),
+            // The LAN devStatus response doesn't carry a mode field;
+            // carry over the last mode learned via AWS IoT, if any.
+            mode: status.mode.or_else(|| {
+                self.iot_device_status.as_ref().and_then(|s| s.mode)
+            }),
             source: "LAN API",
             updated,
         })
@@ -337,6 +349,9 @@ impl Device {
             color,
             kelvin,
             scene: self.active_scene.clone(),
+            // The Platform API doesn't report a work mode for lights;
+            // carry over the last mode learned via AWS IoT, if any.
+            mode: self.iot_device_status.as_ref().and_then(|s| s.mode),
             source: "PLATFORM API",
             updated,
         })
