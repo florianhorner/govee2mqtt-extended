@@ -62,6 +62,16 @@ For those who want the full picture:
 - When a device responds, it sends to the **source IP** of the discovery
   packet but always uses **port 4002** (not the originating port).
   Your network must allow this return traffic.
+- Status queries go to **UDP port 4003** with a bounded retry schedule
+  (3 attempts, doubling backoff). Devices that repeatedly time out are
+  suspended from background polling by a per-device circuit breaker.
+  Any packet from a suspended device — for example a discovery
+  response, sent within about a minute of it coming back — triggers an
+  immediate status probe, and the first successful status reply lifts
+  the suspension. Commands and their confirmation polls are never
+  suspended. See
+  [Configuration → Polling behavior on congested networks](CONFIG.md#polling-behavior-on-congested-networks)
+  for tuning.
 
 See [Configuration → LAN API Control](CONFIG.md#lan-api-control) for all
 available settings.

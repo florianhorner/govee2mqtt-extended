@@ -87,6 +87,22 @@ if bashio::config.has_value scan ; then
   export GOVEE_LAN_SCAN="$(bashio::config scan)"
 fi
 
+if bashio::config.has_value lan_query_attempts ; then
+  export GOVEE_LAN_QUERY_ATTEMPTS="$(bashio::config lan_query_attempts)"
+fi
+
+if bashio::config.has_value lan_query_backoff_ms ; then
+  export GOVEE_LAN_QUERY_BACKOFF_MS="$(bashio::config lan_query_backoff_ms)"
+fi
+
+if bashio::config.has_value lan_breaker_threshold ; then
+  export GOVEE_LAN_BREAKER_THRESHOLD="$(bashio::config lan_breaker_threshold)"
+fi
+
+if bashio::config.has_value lan_breaker_cooldown ; then
+  export GOVEE_LAN_BREAKER_COOLDOWN="$(bashio::config lan_breaker_cooldown)"
+fi
+
 if bashio::config.has_value temperature_scale ; then
   export GOVEE_TEMPERATURE_SCALE="$(bashio::config temperature_scale)"
 fi

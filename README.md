@@ -70,6 +70,7 @@ adds device support, stability fixes, and features I needed for my setup:
 * **Panic hardening (in progress)** — critical `.expect()` panics replaced with graceful error handling
 * **Exit code fix** — silent `exit(0)` changed to `exit(1)` so Home Assistant properly restarts the app on failure
 * **Scene quick-cycle** — Next/Previous buttons and scene info sensor
+* **LAN congestion hardening** — bounded status-query retries (3 packets instead of ~29 per unresponsive device) plus a per-device poll circuit breaker, tunable via [config options](docs/CONFIG.md#polling-behavior-on-congested-networks)
 * **CI improvements** — clippy gate, pre-commit hooks, automated testing
 
 **Upstream status:**
