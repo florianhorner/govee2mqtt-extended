@@ -6,8 +6,10 @@ use anyhow::Context;
 use if_addrs::IfAddr;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -54,6 +56,29 @@ pub struct LanDiscoArguments {
     /// You may also set GOVEE_LAN_DISCO_TIMEOUT via the environment.
     #[arg(long, default_value_t = 3, global = true)]
     disco_timeout: u64,
+
+    /// How many times to send a status query before giving up.
+    /// You may also set GOVEE_LAN_QUERY_ATTEMPTS via the environment.
+    #[arg(long, default_value_t = 3, global = true)]
+    lan_query_attempts: u64,
+
+    /// Initial wait between status query attempts, in milliseconds.
+    /// Doubles on each retry, capped at 3000ms.
+    /// You may also set GOVEE_LAN_QUERY_BACKOFF_MS via the environment.
+    #[arg(long, default_value_t = 350, global = true)]
+    lan_query_backoff_ms: u64,
+
+    /// Number of consecutive status-query timeouts after which periodic
+    /// polling of a device is suspended. 0 disables the circuit breaker.
+    /// You may also set GOVEE_LAN_BREAKER_THRESHOLD via the environment.
+    #[arg(long, default_value_t = 3, global = true)]
+    lan_breaker_threshold: u64,
+
+    /// How long to suspend periodic polling of an unresponsive device,
+    /// in seconds. Doubles on repeated failure, capped at 900s.
+    /// You may also set GOVEE_LAN_BREAKER_COOLDOWN via the environment.
+    #[arg(long, default_value_t = 300, global = true)]
+    lan_breaker_cooldown: u64,
 }
 
 pub fn truthy(s: &str) -> anyhow::Result<bool> {
@@ -82,7 +107,33 @@ impl LanDiscoArguments {
             additional_addresses: vec![],
             broadcast_all_interfaces: self.broadcast_all,
             global_broadcast: self.global_broadcast,
+            query_policy: LanQueryPolicy {
+                attempts: self.lan_query_attempts.clamp(1, u32::MAX as u64) as u32,
+                initial_backoff: Duration::from_millis(self.lan_query_backoff_ms),
+            },
+            breaker: BreakerConfig {
+                // min before cast: a threshold beyond u32 must saturate,
+                // not truncate to 0 and silently disable the breaker
+                threshold: self.lan_breaker_threshold.min(u32::MAX as u64) as u32,
+                base_cooldown: Duration::from_secs(self.lan_breaker_cooldown),
+            },
         };
+
+        if let Some(v) = opt_env_var::<u64>("GOVEE_LAN_QUERY_ATTEMPTS")? {
+            options.query_policy.attempts = v.clamp(1, u32::MAX as u64) as u32;
+        }
+
+        if let Some(v) = opt_env_var::<u64>("GOVEE_LAN_QUERY_BACKOFF_MS")? {
+            options.query_policy.initial_backoff = Duration::from_millis(v);
+        }
+
+        if let Some(v) = opt_env_var::<u64>("GOVEE_LAN_BREAKER_THRESHOLD")? {
+            options.breaker.threshold = v.min(u32::MAX as u64) as u32;
+        }
+
+        if let Some(v) = opt_env_var::<u64>("GOVEE_LAN_BREAKER_COOLDOWN")? {
+            options.breaker.base_cooldown = Duration::from_secs(v);
+        }
 
         if let Some(v) = opt_env_var::<String>("GOVEE_LAN_NO_MULTICAST")? {
             options.enable_multicast = !truthy(&v)?;
@@ -146,6 +197,10 @@ pub struct DiscoOptions {
     pub broadcast_all_interfaces: bool,
     /// Broadcast to the global broadcast address
     pub global_broadcast: bool,
+    /// Retry schedule for device status queries
+    pub query_policy: LanQueryPolicy,
+    /// Circuit breaker configuration for periodic polling
+    pub breaker: BreakerConfig,
 }
 
 impl DiscoOptions {
@@ -164,6 +219,240 @@ impl Default for DiscoOptions {
             additional_addresses: vec![],
             broadcast_all_interfaces: false,
             global_broadcast: false,
+            query_policy: LanQueryPolicy::default(),
+            breaker: BreakerConfig::default(),
+        }
+    }
+}
+
+/// Each retry wait doubles, capped here. Not configurable: two knobs
+/// (attempts + initial backoff) describe the schedule fully.
+const QUERY_BACKOFF_CAP: Duration = Duration::from_millis(3000);
+/// Breaker cooldown doubling stops here.
+const BREAKER_COOLDOWN_CAP: Duration = Duration::from_secs(900);
+/// Below this a cooldown is churn: the breaker would flip
+/// open->probe on every poll tick, logging each time and
+/// suppressing nothing.
+const BREAKER_COOLDOWN_MIN: Duration = Duration::from_secs(30);
+/// A half-open probe whose outcome never arrives (task cancelled,
+/// send error) must not wedge the breaker; after this long a new
+/// probe is granted. Deliberately NOT equal to the 30s poll period,
+/// so scheduler jitter can't decide which tick self-heals.
+const HALF_OPEN_PROBE_EXPIRY: Duration = Duration::from_secs(45);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanQueryPolicy {
+    pub attempts: u32,
+    pub initial_backoff: Duration,
+}
+
+impl Default for LanQueryPolicy {
+    fn default() -> Self {
+        Self {
+            attempts: 3,
+            initial_backoff: Duration::from_millis(350),
+        }
+    }
+}
+
+impl LanQueryPolicy {
+    /// More attempts than this is config nonsense; the clamp also
+    /// bounds the schedule allocation against absurd env values.
+    const MAX_ATTEMPTS: u32 = 100;
+    /// A zero backoff would send the whole schedule back-to-back,
+    /// defeating the spacing this policy exists to provide.
+    const MIN_BACKOFF: Duration = Duration::from_millis(10);
+
+    /// The wait after each send. One entry per attempt, doubling
+    /// up to QUERY_BACKOFF_CAP. Always at least one attempt.
+    pub fn schedule(&self) -> Vec<Duration> {
+        let attempts = self.attempts.clamp(1, Self::MAX_ATTEMPTS);
+        let mut waits = Vec::with_capacity(attempts as usize);
+        let mut wait = self
+            .initial_backoff
+            .clamp(Self::MIN_BACKOFF, QUERY_BACKOFF_CAP);
+        for _ in 0..attempts {
+            waits.push(wait);
+            wait = (wait * 2).min(QUERY_BACKOFF_CAP);
+        }
+        waits
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BreakerConfig {
+    /// Consecutive failures before opening. 0 disables the breaker.
+    pub threshold: u32,
+    pub base_cooldown: Duration,
+}
+
+impl Default for BreakerConfig {
+    fn default() -> Self {
+        Self {
+            threshold: 3,
+            base_cooldown: Duration::from_secs(300),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BreakerState {
+    Closed,
+    Open { until: Instant, cooldown: Duration },
+    HalfOpen { since: Instant, cooldown: Duration },
+}
+
+#[derive(Debug)]
+struct BreakerEntry {
+    consecutive_failures: u32,
+    state: BreakerState,
+}
+
+/// Per-IP circuit breaker over an injected clock. Only the periodic
+/// poll path consults `check`; post-command confirm polls bypass it so
+/// a successful LAN command always produces a state echo for HA, but
+/// their outcomes still feed the failure counter — unreachability
+/// evidence is free signal regardless of caller.
+pub struct BreakerCore {
+    config: BreakerConfig,
+    by_ip: HashMap<IpAddr, BreakerEntry>,
+}
+
+impl BreakerCore {
+    pub fn new(mut config: BreakerConfig) -> Self {
+        // Clamp the configured base into [30s, 900s]: the cap keeps
+        // the documented 900s promise and prevents an absurd value
+        // from overflowing `now + cooldown`; the floor keeps a tiny
+        // cooldown from churning open->probe on every poll tick.
+        config.base_cooldown = config
+            .base_cooldown
+            .clamp(BREAKER_COOLDOWN_MIN, BREAKER_COOLDOWN_CAP);
+        Self {
+            config,
+            by_ip: HashMap::new(),
+        }
+    }
+
+    fn disabled(&self) -> bool {
+        self.config.threshold == 0
+    }
+
+    /// May the gated caller send to this device right now?
+    /// Granting from Open/HalfOpen consumes the single probe slot.
+    pub fn check(&mut self, ip: IpAddr, now: Instant) -> bool {
+        if self.disabled() {
+            return true;
+        }
+        let Some(entry) = self.by_ip.get_mut(&ip) else {
+            return true;
+        };
+        match entry.state {
+            BreakerState::Closed => true,
+            BreakerState::Open { until, cooldown } => {
+                if now < until {
+                    false
+                } else {
+                    log::info!("LAN breaker for {ip}: cooldown expired, allowing one probe");
+                    entry.state = BreakerState::HalfOpen {
+                        since: now,
+                        cooldown,
+                    };
+                    true
+                }
+            }
+            BreakerState::HalfOpen { since, cooldown } => {
+                if now.saturating_duration_since(since) > HALF_OPEN_PROBE_EXPIRY {
+                    log::info!(
+                        "LAN breaker for {ip}: prior probe never resolved, allowing another"
+                    );
+                    entry.state = BreakerState::HalfOpen {
+                        since: now,
+                        cooldown,
+                    };
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// A real devStatus reply: the device is fully back. Clears the
+    /// failure count and any open state.
+    pub fn on_success(&mut self, ip: IpAddr) {
+        if self.disabled() {
+            return;
+        }
+        if let Some(entry) = self.by_ip.remove(&ip) {
+            if !matches!(entry.state, BreakerState::Closed) {
+                log::info!("LAN breaker for {ip}: device responded, closing");
+            }
+        }
+    }
+
+    /// Any other parseable packet from the device (typically a
+    /// discovery-scan reply). Weaker evidence than a devStatus reply:
+    /// it shortcuts an open cooldown so the next gated caller probes
+    /// immediately, but it does NOT clear the failure count or close
+    /// the breaker. If it did, a device that answers broadcast scans
+    /// (every ~60s) while dropping unicast status queries would reset
+    /// the counter faster than the 30s poll can accrue it, and the
+    /// breaker could never open for exactly the devices it targets.
+    pub fn note_packet(&mut self, ip: IpAddr, now: Instant) {
+        if self.disabled() {
+            return;
+        }
+        if let Some(entry) = self.by_ip.get_mut(&ip) {
+            if let BreakerState::Open { until, cooldown } = entry.state {
+                if now < until {
+                    log::info!("LAN breaker for {ip}: device shows life, allowing early probe");
+                    entry.state = BreakerState::Open {
+                        until: now,
+                        cooldown,
+                    };
+                }
+            }
+        }
+    }
+
+    pub fn on_failure(&mut self, ip: IpAddr, now: Instant) {
+        if self.disabled() {
+            return;
+        }
+        let entry = self.by_ip.entry(ip).or_insert(BreakerEntry {
+            consecutive_failures: 0,
+            state: BreakerState::Closed,
+        });
+        entry.consecutive_failures += 1;
+        match entry.state {
+            BreakerState::Closed => {
+                if entry.consecutive_failures >= self.config.threshold {
+                    let cooldown = self.config.base_cooldown;
+                    log::info!(
+                        "LAN breaker for {ip}: {} consecutive timeouts, \
+                        suspending periodic polls for {cooldown:?}",
+                        entry.consecutive_failures
+                    );
+                    entry.state = BreakerState::Open {
+                        until: now + cooldown,
+                        cooldown,
+                    };
+                }
+            }
+            BreakerState::HalfOpen { cooldown, .. } => {
+                let cooldown = (cooldown * 2).min(BREAKER_COOLDOWN_CAP);
+                log::info!(
+                    "LAN breaker for {ip}: probe failed, \
+                    suspending periodic polls for {cooldown:?}"
+                );
+                entry.state = BreakerState::Open {
+                    until: now + cooldown,
+                    cooldown,
+                };
+            }
+            // Ungated confirm polls can fail while already open;
+            // the count was recorded above, nothing else to do.
+            BreakerState::Open { .. } => {}
         }
     }
 }
@@ -341,9 +630,47 @@ struct ClientListener {
     tx: Sender<Response>,
 }
 
-#[derive(Default)]
 struct ClientInner {
     mux: Mutex<Vec<ClientListener>>,
+    query_policy: LanQueryPolicy,
+    // std Mutex, never held across an await: lock scopes are a few
+    // HashMap operations.
+    breaker: StdMutex<BreakerCore>,
+}
+
+impl ClientInner {
+    fn new(options: &DiscoOptions) -> Self {
+        Self {
+            mux: Mutex::new(vec![]),
+            query_policy: options.query_policy.clone(),
+            breaker: StdMutex::new(BreakerCore::new(options.breaker.clone())),
+        }
+    }
+
+    /// Poison recovery instead of unwrap: this mutex is shared by the
+    /// disco task and every query; a poisoned lock must degrade to
+    /// slightly-stale breaker state, not take down the LAN subsystem.
+    fn breaker_lock(&self) -> std::sync::MutexGuard<'_, BreakerCore> {
+        self.breaker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn breaker_check(&self, ip: IpAddr, now: Instant) -> bool {
+        self.breaker_lock().check(ip, now)
+    }
+
+    fn breaker_success(&self, ip: IpAddr) {
+        self.breaker_lock().on_success(ip);
+    }
+
+    fn breaker_note_packet(&self, ip: IpAddr, now: Instant) {
+        self.breaker_lock().note_packet(ip, now);
+    }
+
+    fn breaker_failure(&self, ip: IpAddr, now: Instant) {
+        self.breaker_lock().on_failure(ip, now);
+    }
 }
 
 #[derive(Clone)]
@@ -479,6 +806,12 @@ async fn lan_disco(
         let mut response: ResponseWrapper = from_json(data)
             .with_context(|| format!("Parsing: {}", String::from_utf8_lossy(data)))?;
 
+        // Any parseable packet from this address is evidence of life;
+        // it shortcuts an open breaker's cooldown so the disco-triggered
+        // gated query below (or the next poll tick) probes immediately.
+        // Only a real devStatus reply fully resets the breaker.
+        inner.breaker_note_packet(addr.ip(), Instant::now());
+
         // This is frustrating; some newer devices don't emit the ip field
         // as defined in the spec.  What we do to deal with this is default
         // the ip to the v4 unspecified address during deserialization and
@@ -554,7 +887,7 @@ async fn lan_disco(
 
 impl Client {
     pub async fn new(options: DiscoOptions) -> anyhow::Result<(Self, Receiver<LanDevice>)> {
-        let inner = Arc::new(ClientInner::default());
+        let inner = Arc::new(ClientInner::new(&options));
         let rx = lan_disco(options, Arc::clone(&inner)).await?;
 
         Ok((Self { inner }, rx))
@@ -596,22 +929,588 @@ impl Client {
         }
     }
 
+    /// Query device status. This is the ungated path used by
+    /// post-command confirm polls: it always sends (bounded by the
+    /// retry schedule) so HA gets a state echo after a LAN command,
+    /// but its outcome still feeds the circuit breaker.
     pub async fn query_status(&self, device: &LanDevice) -> anyhow::Result<DeviceStatus> {
+        self.query_status_impl(device).await
+    }
+
+    /// Query device status, but refuse without sending a packet while
+    /// the device's circuit breaker is open. Used by the periodic
+    /// poll and discovery paths, where per-device volume lives.
+    pub async fn query_status_respecting_breaker(
+        &self,
+        device: &LanDevice,
+    ) -> anyhow::Result<DeviceStatus> {
+        if !self.inner.breaker_check(device.ip, Instant::now()) {
+            anyhow::bail!(
+                "circuit breaker open for {}: skipping LAN status query",
+                device.ip
+            );
+        }
+        self.query_status_impl(device).await
+    }
+
+    async fn query_status_impl(&self, device: &LanDevice) -> anyhow::Result<DeviceStatus> {
         let mut rx = self.add_listener(device.ip).await?;
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() <= deadline {
+        for wait in self.inner.query_policy.schedule() {
             log::trace!("query status of {}", device.ip);
-            device.send_request(Request::DevStatus {}).await?;
-            match tokio::time::timeout(Duration::from_millis(350), rx.recv()).await {
-                Ok(Some(Response::DevStatus(status))) => {
-                    return Ok(status);
+            if let Err(err) = device.send_request(Request::DevStatus {}).await {
+                // A send error (e.g. a queued ICMP host-unreachable
+                // surfacing on the next send) is unreachability
+                // evidence too; without this a hard-down device
+                // would never trip the breaker, and a lost half-open
+                // probe would wedge until the probe expiry.
+                self.inner.breaker_failure(device.ip, Instant::now());
+                return Err(err);
+            }
+            let deadline = Instant::now() + wait;
+            // Non-status packets from this device must not consume
+            // the attempt's wait budget.
+            loop {
+                match tokio::time::timeout_at(deadline, rx.recv()).await {
+                    Ok(Some(Response::DevStatus(status))) => {
+                        self.inner.breaker_success(device.ip);
+                        return Ok(status);
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => anyhow::bail!("listener thread terminated"),
+                    Err(_) => break,
                 }
-                Ok(Some(_)) => {}
-                Ok(None) => anyhow::bail!("listener thread terminated"),
-                Err(_) => {}
             }
         }
 
-        anyhow::bail!("timed out waiting for status");
+        self.inner.breaker_failure(device.ip, Instant::now());
+        anyhow::bail!("timed out waiting for status from {}", device.ip);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MS: Duration = Duration::from_millis(1);
+    const SEC: Duration = Duration::from_secs(1);
+
+    fn ip() -> IpAddr {
+        "192.168.1.50".parse().unwrap()
+    }
+
+    fn breaker(threshold: u32, base_cooldown: Duration) -> BreakerCore {
+        BreakerCore::new(BreakerConfig {
+            threshold,
+            base_cooldown,
+        })
+    }
+
+    // -- LanQueryPolicy --
+
+    #[test]
+    fn default_schedule_doubles_from_350ms() {
+        let waits = LanQueryPolicy::default().schedule();
+        assert_eq!(
+            waits,
+            vec![350 * MS, 700 * MS, 1400 * MS],
+            "3 attempts doubling from 350ms"
+        );
+    }
+
+    #[test]
+    fn schedule_budget_fits_under_confirm_poll_deadline() {
+        // poll_lan_api in state.rs loops on a 5s outer deadline;
+        // a full retry cycle must fit inside it.
+        let total: Duration = LanQueryPolicy::default().schedule().iter().sum();
+        assert!(total < Duration::from_secs(5), "total {total:?}");
+    }
+
+    #[test]
+    fn schedule_caps_backoff_growth() {
+        let waits = LanQueryPolicy {
+            attempts: 6,
+            initial_backoff: 350 * MS,
+        }
+        .schedule();
+        assert_eq!(waits.len(), 6);
+        assert!(waits.iter().all(|w| *w <= QUERY_BACKOFF_CAP));
+        assert_eq!(*waits.last().unwrap(), QUERY_BACKOFF_CAP);
+    }
+
+    #[test]
+    fn schedule_single_attempt() {
+        let waits = LanQueryPolicy {
+            attempts: 1,
+            initial_backoff: 350 * MS,
+        }
+        .schedule();
+        assert_eq!(waits, vec![350 * MS]);
+    }
+
+    #[test]
+    fn schedule_zero_attempts_clamps_to_one() {
+        // attempts=0 must not produce an empty schedule that would
+        // fail without ever sending a packet.
+        let waits = LanQueryPolicy {
+            attempts: 0,
+            initial_backoff: 350 * MS,
+        }
+        .schedule();
+        assert_eq!(waits.len(), 1);
+    }
+
+    #[test]
+    fn initial_backoff_above_cap_is_clamped() {
+        let waits = LanQueryPolicy {
+            attempts: 2,
+            initial_backoff: 10 * SEC,
+        }
+        .schedule();
+        assert_eq!(waits, vec![QUERY_BACKOFF_CAP, QUERY_BACKOFF_CAP]);
+    }
+
+    #[test]
+    fn absurd_attempts_value_cannot_exhaust_memory() {
+        // A typo'd GOVEE_LAN_QUERY_ATTEMPTS must not drive a
+        // multi-gigabyte Vec allocation.
+        let waits = LanQueryPolicy {
+            attempts: u32::MAX,
+            initial_backoff: 350 * MS,
+        }
+        .schedule();
+        assert_eq!(waits.len(), LanQueryPolicy::MAX_ATTEMPTS as usize);
+    }
+
+    #[test]
+    fn zero_backoff_is_floored() {
+        // backoff=0 would send the whole schedule back-to-back,
+        // defeating the retransmit spacing entirely.
+        let waits = LanQueryPolicy {
+            attempts: 3,
+            initial_backoff: Duration::ZERO,
+        }
+        .schedule();
+        assert!(waits.iter().all(|w| *w >= LanQueryPolicy::MIN_BACKOFF));
+    }
+
+    fn disco_args(
+        attempts: u64,
+        backoff_ms: u64,
+        threshold: u64,
+        cooldown: u64,
+    ) -> LanDiscoArguments {
+        LanDiscoArguments {
+            no_multicast: false,
+            broadcast_all: false,
+            global_broadcast: false,
+            scan: vec![],
+            disco_timeout: 3,
+            lan_query_attempts: attempts,
+            lan_query_backoff_ms: backoff_ms,
+            lan_breaker_threshold: threshold,
+            lan_breaker_cooldown: cooldown,
+        }
+    }
+
+    // CLI-path and env-path assertions share one test because both
+    // read the same process-global env vars; two parallel tests
+    // would race on them.
+    #[test]
+    fn config_plumbing_cli_and_env_precedence() {
+        // Phase 1 — no env set: CLI values flow through, and a value
+        // beyond u32 saturates instead of truncating to 0 (which
+        // would silently mean "1 attempt").
+        let options = disco_args(u64::from(u32::MAX) + 1, 350, 3, 300)
+            .to_disco_options()
+            .expect("options");
+        assert_eq!(options.query_policy.attempts, u32::MAX);
+        assert_eq!(
+            options.query_policy.schedule().len(),
+            LanQueryPolicy::MAX_ATTEMPTS as usize
+        );
+
+        // Phase 2 — env set: env beats CLI, absurd values clamp.
+        std::env::set_var("GOVEE_LAN_QUERY_ATTEMPTS", "0");
+        std::env::set_var("GOVEE_LAN_QUERY_BACKOFF_MS", "50");
+        std::env::set_var("GOVEE_LAN_BREAKER_THRESHOLD", "99999999999");
+        std::env::set_var("GOVEE_LAN_BREAKER_COOLDOWN", "120");
+        let options = disco_args(7, 700, 5, 500)
+            .to_disco_options()
+            .expect("options");
+        std::env::remove_var("GOVEE_LAN_QUERY_ATTEMPTS");
+        std::env::remove_var("GOVEE_LAN_QUERY_BACKOFF_MS");
+        std::env::remove_var("GOVEE_LAN_BREAKER_THRESHOLD");
+        std::env::remove_var("GOVEE_LAN_BREAKER_COOLDOWN");
+        assert_eq!(options.query_policy.attempts, 1, "0 clamps to 1");
+        assert_eq!(options.query_policy.initial_backoff, 50 * MS);
+        assert_eq!(
+            options.breaker.threshold,
+            u32::MAX,
+            "saturates, not truncates"
+        );
+        assert_eq!(options.breaker.base_cooldown, 120 * SEC);
+    }
+
+    #[test]
+    fn absurd_cooldown_is_clamped_to_cap() {
+        // An absurd GOVEE_LAN_BREAKER_COOLDOWN must not overflow
+        // `now + cooldown` when the breaker opens.
+        let mut b = breaker(3, Duration::from_secs(u64::MAX));
+        let now = Instant::now();
+        for _ in 0..3 {
+            b.on_failure(ip(), now);
+        }
+        assert!(!b.check(ip(), now + 899 * SEC));
+        assert!(b.check(ip(), now + 901 * SEC));
+    }
+
+    // -- BreakerCore transitions --
+
+    #[test]
+    fn below_threshold_stays_closed() {
+        let mut b = breaker(3, 300 * SEC);
+        let now = Instant::now();
+        b.on_failure(ip(), now);
+        b.on_failure(ip(), now);
+        assert!(b.check(ip(), now));
+    }
+
+    #[test]
+    fn nth_consecutive_failure_opens() {
+        let mut b = breaker(3, 300 * SEC);
+        let now = Instant::now();
+        for _ in 0..3 {
+            b.on_failure(ip(), now);
+        }
+        assert!(!b.check(ip(), now));
+    }
+
+    #[test]
+    fn open_refuses_before_cooldown_expiry() {
+        let mut b = breaker(3, 300 * SEC);
+        let now = Instant::now();
+        for _ in 0..3 {
+            b.on_failure(ip(), now);
+        }
+        assert!(!b.check(ip(), now + 299 * SEC));
+    }
+
+    #[test]
+    fn cooldown_expiry_grants_exactly_one_probe() {
+        let mut b = breaker(3, 300 * SEC);
+        let now = Instant::now();
+        for _ in 0..3 {
+            b.on_failure(ip(), now);
+        }
+        let later = now + 301 * SEC;
+        assert!(b.check(ip(), later), "first caller gets the probe");
+        assert!(!b.check(ip(), later), "second caller is refused");
+    }
+
+    #[test]
+    fn probe_success_closes_and_resets() {
+        let mut b = breaker(3, 300 * SEC);
+        let now = Instant::now();
+        for _ in 0..3 {
+            b.on_failure(ip(), now);
+        }
+        let later = now + 301 * SEC;
+        assert!(b.check(ip(), later));
+        b.on_success(ip());
+        assert!(b.check(ip(), later));
+        // failure count was reset: two failures don't re-open
+        b.on_failure(ip(), later);
+        b.on_failure(ip(), later);
+        assert!(b.check(ip(), later));
+    }
+
+    #[test]
+    fn probe_failure_reopens_with_doubled_cooldown() {
+        let mut b = breaker(3, 300 * SEC);
+        let now = Instant::now();
+        for _ in 0..3 {
+            b.on_failure(ip(), now);
+        }
+        let t1 = now + 301 * SEC;
+        assert!(b.check(ip(), t1));
+        b.on_failure(ip(), t1);
+        // doubled to 600s: still open at +599, probe at +601
+        assert!(!b.check(ip(), t1 + 599 * SEC));
+        assert!(b.check(ip(), t1 + 601 * SEC));
+    }
+
+    #[test]
+    fn cooldown_doubling_caps_at_900s() {
+        let mut b = breaker(3, 300 * SEC);
+        let mut now = Instant::now();
+        for _ in 0..3 {
+            b.on_failure(ip(), now);
+        }
+        // fail probes repeatedly: 300 -> 600 -> 900 -> 900
+        for _ in 0..3 {
+            now += 1000 * SEC;
+            assert!(b.check(ip(), now));
+            b.on_failure(ip(), now);
+        }
+        assert!(!b.check(ip(), now + 899 * SEC));
+        assert!(b.check(ip(), now + 901 * SEC));
+    }
+
+    #[test]
+    fn packet_from_open_device_grants_early_probe() {
+        // process_packet calls note_packet for every parseable packet,
+        // e.g. a discovery-scan reply from a recovering device: the
+        // cooldown is shortcut to "probe now", but only ONE probe.
+        let mut b = breaker(3, 300 * SEC);
+        let now = Instant::now();
+        for _ in 0..3 {
+            b.on_failure(ip(), now);
+        }
+        assert!(!b.check(ip(), now));
+        b.note_packet(ip(), now);
+        assert!(b.check(ip(), now), "scan reply unlocks an immediate probe");
+        assert!(!b.check(ip(), now), "but only one");
+    }
+
+    #[test]
+    fn scan_reply_does_not_reset_failure_counter() {
+        // Regression (squad P1): scans arrive every ~60s, polls every
+        // 30s. If a scan reply cleared the counter, a device that
+        // answers scans but drops status queries could never
+        // accumulate `threshold` failures and the breaker would never
+        // open for exactly the devices it targets.
+        let mut b = breaker(3, 300 * SEC);
+        let now = Instant::now();
+        b.on_failure(ip(), now);
+        b.on_failure(ip(), now);
+        b.note_packet(ip(), now);
+        b.on_failure(ip(), now);
+        assert!(!b.check(ip(), now), "third failure still opens");
+    }
+
+    #[test]
+    fn scan_reply_during_half_open_probe_is_ignored() {
+        // Regression (squad P1): a scan reply arriving while a probe
+        // is in flight must not destroy the entry, or the probe's
+        // failure would restart the ladder at base cooldown.
+        let mut b = breaker(3, 300 * SEC);
+        let now = Instant::now();
+        for _ in 0..3 {
+            b.on_failure(ip(), now);
+        }
+        let t1 = now + 301 * SEC;
+        assert!(b.check(ip(), t1), "probe granted");
+        b.note_packet(ip(), t1);
+        assert!(!b.check(ip(), t1), "probe slot still consumed");
+        b.on_failure(ip(), t1);
+        // ladder preserved: reopened with DOUBLED cooldown, not base
+        assert!(!b.check(ip(), t1 + 599 * SEC));
+        assert!(b.check(ip(), t1 + 601 * SEC));
+    }
+
+    #[test]
+    fn cooldown_below_floor_is_clamped() {
+        // cooldown ~0 would flip open->probe on every poll tick,
+        // logging each time and suppressing nothing.
+        let mut b = breaker(3, Duration::from_secs(1));
+        let now = Instant::now();
+        for _ in 0..3 {
+            b.on_failure(ip(), now);
+        }
+        assert!(!b.check(ip(), now + 29 * SEC));
+        assert!(b.check(ip(), now + 31 * SEC));
+    }
+
+    #[test]
+    fn threshold_zero_disables_breaker() {
+        let mut b = breaker(0, 300 * SEC);
+        let now = Instant::now();
+        for _ in 0..10 {
+            b.on_failure(ip(), now);
+        }
+        assert!(b.check(ip(), now));
+        assert!(b.by_ip.is_empty(), "disabled breaker tracks nothing");
+    }
+
+    #[test]
+    fn stale_probe_self_heals() {
+        // A probe whose task was cancelled must not wedge the breaker
+        // in HalfOpen forever.
+        let mut b = breaker(3, 300 * SEC);
+        let now = Instant::now();
+        for _ in 0..3 {
+            b.on_failure(ip(), now);
+        }
+        let t1 = now + 301 * SEC;
+        assert!(b.check(ip(), t1), "probe granted, then lost");
+        let t2 = t1 + HALF_OPEN_PROBE_EXPIRY + SEC;
+        assert!(b.check(ip(), t2), "expired probe grants another");
+    }
+
+    #[test]
+    fn ungated_failures_count_while_open() {
+        // Confirm polls bypass check() but still record outcomes; a
+        // failure while already open must not panic or reset state.
+        let mut b = breaker(3, 300 * SEC);
+        let now = Instant::now();
+        for _ in 0..4 {
+            b.on_failure(ip(), now);
+        }
+        assert!(!b.check(ip(), now));
+        assert!(b.check(ip(), now + 301 * SEC));
+    }
+
+    #[test]
+    fn distinct_ips_are_independent() {
+        let mut b = breaker(3, 300 * SEC);
+        let other: IpAddr = "192.168.1.51".parse().unwrap();
+        let now = Instant::now();
+        for _ in 0..3 {
+            b.on_failure(ip(), now);
+        }
+        assert!(!b.check(ip(), now));
+        assert!(b.check(other, now));
+    }
+
+    // -- Loopback integration: prove the on-wire retransmit bound --
+
+    async fn loopback_client(policy: LanQueryPolicy) -> (Client, LanDevice, UdpSocket) {
+        // Bind the device side first so client sends have a receiver.
+        let device_sock = UdpSocket::bind(("127.0.0.1", CMD_PORT))
+            .await
+            .expect("bind 127.0.0.1:4003 for test device");
+        let options = DiscoOptions {
+            enable_multicast: false,
+            additional_addresses: vec![],
+            broadcast_all_interfaces: false,
+            global_broadcast: false,
+            query_policy: policy,
+            breaker: BreakerConfig::default(),
+        };
+        let (client, _scan) = Client::new(options).await.expect("client");
+        let device = LanDevice {
+            ip: "127.0.0.1".parse().unwrap(),
+            device: "AA:BB:CC:DD:EE:FF:00:11".to_string(),
+            sku: "H6001".to_string(),
+            ble_version_hard: String::new(),
+            ble_version_soft: String::new(),
+            wifi_version_hard: String::new(),
+            wifi_version_soft: String::new(),
+        };
+        (client, device, device_sock)
+    }
+
+    /// Count datagrams arriving at the device socket until `idle`
+    /// elapses with none. A real recv error is its own failure, not
+    /// a low count — the assertion message must point at the cause.
+    async fn count_datagrams(device_sock: &UdpSocket, idle: Duration) -> u32 {
+        let mut buf = [0u8; 1024];
+        let mut count = 0u32;
+        loop {
+            match tokio::time::timeout(idle, device_sock.recv_from(&mut buf)).await {
+                Ok(Ok(_)) => count += 1,
+                Ok(Err(err)) => panic!("recv_from failed: {err}"),
+                Err(_) => break,
+            }
+        }
+        count
+    }
+
+    fn breaker_failures(client: &Client, ip: IpAddr) -> Option<u32> {
+        client
+            .inner
+            .breaker
+            .lock()
+            .unwrap()
+            .by_ip
+            .get(&ip)
+            .map(|e| e.consecutive_failures)
+    }
+
+    // All loopback scenarios share fixed ports 4002/4003, so they run
+    // inside ONE test to avoid a bind race under the parallel harness.
+    // 100ms backoff gives the scenario-B reply a ~200ms window instead
+    // of ~40ms — thin margins flake on loaded CI boxes.
+    #[tokio::test]
+    async fn loopback_retransmit_bound_and_reply() {
+        let policy = LanQueryPolicy {
+            attempts: 3,
+            initial_backoff: 100 * MS,
+        };
+        let (client, device, device_sock) = loopback_client(policy).await;
+
+        // Scenario A: device never answers. The client must send
+        // exactly `attempts` datagrams and then fail. This is the
+        // core claim of the change: 29 packets become 3.
+        let query = client.query_status(&device);
+        let counter = count_datagrams(&device_sock, 800 * MS);
+        let (result, datagrams) = tokio::join!(query, counter);
+        assert!(result.is_err(), "no reply must yield an error");
+        assert_eq!(datagrams, 3, "exactly `attempts` datagrams on the wire");
+        assert_eq!(
+            breaker_failures(&client, device.ip),
+            Some(1),
+            "the failure must be recorded against the breaker"
+        );
+
+        // Scenario B: device answers the second attempt; the client
+        // stops retransmitting after the reply.
+        let query = client.query_status(&device);
+        let responder = async {
+            let mut buf = [0u8; 1024];
+            let mut count = 0u32;
+            loop {
+                match tokio::time::timeout(800 * MS, device_sock.recv_from(&mut buf)).await {
+                    Ok(Ok(_)) => {
+                        count += 1;
+                        if count == 2 {
+                            let reply = serde_json::json!({
+                                "msg": {
+                                    "cmd": "devStatus",
+                                    "data": {
+                                        "onOff": 1,
+                                        "brightness": 42,
+                                        "color": {"r": 1, "g": 2, "b": 3},
+                                        "colorTemInKelvin": 0,
+                                    }
+                                }
+                            });
+                            device_sock
+                                .send_to(reply.to_string().as_bytes(), ("127.0.0.1", LISTEN_PORT))
+                                .await
+                                .expect("send reply");
+                        }
+                    }
+                    Ok(Err(err)) => panic!("recv_from failed: {err}"),
+                    Err(_) => break,
+                }
+            }
+            count
+        };
+        let (result, datagrams) = tokio::join!(query, responder);
+        let status = result.expect("reply must yield Ok");
+        assert_eq!(status.brightness, 42);
+        assert_eq!(datagrams, 2, "no retransmit after the reply");
+        assert_eq!(
+            breaker_failures(&client, device.ip),
+            None,
+            "success must clear the breaker entry"
+        );
+
+        // Scenario C: scenario B's success reset the counter, so
+        // three fresh failed queries reach the threshold of 3; the
+        // GATED path must then refuse without a single packet on
+        // the wire. This is the breaker's load-bearing claim.
+        for _ in 0..3 {
+            let query = client.query_status(&device);
+            let counter = count_datagrams(&device_sock, 800 * MS);
+            let (result, _) = tokio::join!(query, counter);
+            assert!(result.is_err());
+        }
+        let query = client.query_status_respecting_breaker(&device);
+        let counter = count_datagrams(&device_sock, 500 * MS);
+        let (result, datagrams) = tokio::join!(query, counter);
+        assert!(result.is_err(), "open breaker must refuse");
+        assert_eq!(datagrams, 0, "open breaker must send nothing");
     }
 }
