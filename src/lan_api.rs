@@ -315,11 +315,16 @@ struct BreakerEntry {
 /// evidence is free signal regardless of caller.
 pub struct BreakerCore {
     config: BreakerConfig,
+    /// At least HALF_OPEN_PROBE_EXPIRY, raised to cover the full
+    /// query schedule: a probe legitimately in flight for the whole
+    /// schedule must not have its slot reclaimed mid-probe, or two
+    /// probes run concurrently.
+    probe_expiry: Duration,
     by_ip: HashMap<IpAddr, BreakerEntry>,
 }
 
 impl BreakerCore {
-    pub fn new(mut config: BreakerConfig) -> Self {
+    pub fn with_policy(mut config: BreakerConfig, policy: &LanQueryPolicy) -> Self {
         // Clamp the configured base into [30s, 900s]: the cap keeps
         // the documented 900s promise and prevents an absurd value
         // from overflowing `now + cooldown`; the floor keeps a tiny
@@ -327,8 +332,13 @@ impl BreakerCore {
         config.base_cooldown = config
             .base_cooldown
             .clamp(BREAKER_COOLDOWN_MIN, BREAKER_COOLDOWN_CAP);
+        // A large attempts config makes a legitimate probe outlive
+        // the default expiry; give it the whole schedule plus margin.
+        let schedule_total: Duration = policy.schedule().iter().sum();
+        let probe_expiry = HALF_OPEN_PROBE_EXPIRY.max(schedule_total + Duration::from_secs(15));
         Self {
             config,
+            probe_expiry,
             by_ip: HashMap::new(),
         }
     }
@@ -361,7 +371,7 @@ impl BreakerCore {
                 }
             }
             BreakerState::HalfOpen { since, cooldown } => {
-                if now.saturating_duration_since(since) > HALF_OPEN_PROBE_EXPIRY {
+                if now.saturating_duration_since(since) > self.probe_expiry {
                     log::info!(
                         "LAN breaker for {ip}: prior probe never resolved, allowing another"
                     );
@@ -643,7 +653,10 @@ impl ClientInner {
         Self {
             mux: Mutex::new(vec![]),
             query_policy: options.query_policy.clone(),
-            breaker: StdMutex::new(BreakerCore::new(options.breaker.clone())),
+            breaker: StdMutex::new(BreakerCore::with_policy(
+                options.breaker.clone(),
+                &options.query_policy,
+            )),
         }
     }
 
@@ -999,10 +1012,13 @@ mod tests {
     }
 
     fn breaker(threshold: u32, base_cooldown: Duration) -> BreakerCore {
-        BreakerCore::new(BreakerConfig {
-            threshold,
-            base_cooldown,
-        })
+        BreakerCore::with_policy(
+            BreakerConfig {
+                threshold,
+                base_cooldown,
+            },
+            &LanQueryPolicy::default(),
+        )
     }
 
     // -- LanQueryPolicy --
@@ -1117,12 +1133,21 @@ mod tests {
     // would race on them.
     #[test]
     fn config_plumbing_cli_and_env_precedence() {
-        // Guarantee a clean slate: ambient GOVEE_LAN_* vars in the
-        // invoking environment would otherwise poison phase 1.
-        std::env::remove_var("GOVEE_LAN_QUERY_ATTEMPTS");
-        std::env::remove_var("GOVEE_LAN_QUERY_BACKOFF_MS");
-        std::env::remove_var("GOVEE_LAN_BREAKER_THRESHOLD");
-        std::env::remove_var("GOVEE_LAN_BREAKER_COOLDOWN");
+        // Guarantee a clean slate: to_disco_options reads all of
+        // these, so any ambient value would poison phase 1 (an
+        // ambient GOVEE_LAN_SCAN can even fail DNS parsing).
+        for var in [
+            "GOVEE_LAN_QUERY_ATTEMPTS",
+            "GOVEE_LAN_QUERY_BACKOFF_MS",
+            "GOVEE_LAN_BREAKER_THRESHOLD",
+            "GOVEE_LAN_BREAKER_COOLDOWN",
+            "GOVEE_LAN_NO_MULTICAST",
+            "GOVEE_LAN_BROADCAST_ALL",
+            "GOVEE_LAN_BROADCAST_GLOBAL",
+            "GOVEE_LAN_SCAN",
+        ] {
+            std::env::remove_var(var);
+        }
 
         // Phase 1 — no env set: CLI values flow through, and a value
         // beyond u32 saturates instead of truncating to 0 (which
@@ -1313,6 +1338,35 @@ mod tests {
         // ladder preserved: reopened with DOUBLED cooldown, not base
         assert!(!b.check(ip(), t1 + 599 * SEC));
         assert!(b.check(ip(), t1 + 601 * SEC));
+    }
+
+    #[test]
+    fn probe_expiry_covers_large_query_schedules() {
+        // Regression (CodeRabbit #40): with attempts=100 a probe
+        // legitimately runs ~293s; a fixed 45s expiry would reclaim
+        // the slot mid-probe and start a concurrent probe.
+        let policy = LanQueryPolicy {
+            attempts: 100,
+            initial_backoff: 350 * MS,
+        };
+        let schedule_total: Duration = policy.schedule().iter().sum();
+        let mut b = BreakerCore::with_policy(
+            BreakerConfig {
+                threshold: 3,
+                base_cooldown: 300 * SEC,
+            },
+            &policy,
+        );
+        let now = Instant::now();
+        for _ in 0..3 {
+            b.on_failure(ip(), now);
+        }
+        let t1 = now + 301 * SEC;
+        assert!(b.check(ip(), t1), "probe granted");
+        // mid-schedule: the slot must NOT be reclaimed
+        assert!(!b.check(ip(), t1 + schedule_total));
+        // past schedule + margin: self-heal still works
+        assert!(b.check(ip(), t1 + schedule_total + 16 * SEC));
     }
 
     #[test]
