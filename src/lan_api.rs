@@ -1117,6 +1117,13 @@ mod tests {
     // would race on them.
     #[test]
     fn config_plumbing_cli_and_env_precedence() {
+        // Guarantee a clean slate: ambient GOVEE_LAN_* vars in the
+        // invoking environment would otherwise poison phase 1.
+        std::env::remove_var("GOVEE_LAN_QUERY_ATTEMPTS");
+        std::env::remove_var("GOVEE_LAN_QUERY_BACKOFF_MS");
+        std::env::remove_var("GOVEE_LAN_BREAKER_THRESHOLD");
+        std::env::remove_var("GOVEE_LAN_BREAKER_COOLDOWN");
+
         // Phase 1 — no env set: CLI values flow through, and a value
         // beyond u32 saturates instead of truncating to 0 (which
         // would silently mean "1 attempt").
