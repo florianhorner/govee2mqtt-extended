@@ -276,9 +276,9 @@ impl Device {
             scene: self.active_scene.clone(),
             // The LAN devStatus response doesn't carry a mode field;
             // carry over the last mode learned via AWS IoT, if any.
-            mode: status.mode.or_else(|| {
-                self.iot_device_status.as_ref().and_then(|s| s.mode)
-            }),
+            mode: status
+                .mode
+                .or_else(|| self.iot_device_status.as_ref().and_then(|s| s.mode)),
             source: "LAN API",
             updated,
         })
@@ -650,6 +650,7 @@ mod test {
             brightness: 100,
             color: DeviceColor { r: 1, g: 2, b: 3 },
             color_temperature_kelvin: 0,
+            mode: None,
         };
 
         // LAN poll
@@ -674,6 +675,7 @@ mod test {
             brightness: 0,
             color: DeviceColor { r: 0, g: 0, b: 0 },
             color_temperature_kelvin: 0,
+            mode: None,
         };
 
         // LAN poll
@@ -696,12 +698,14 @@ mod test {
             brightness: 100,
             color: DeviceColor { r: 1, g: 2, b: 3 },
             color_temperature_kelvin: 0,
+            mode: None,
         };
         let off_frame = LanDeviceStatus {
             on: false,
             brightness: 0,
             color: DeviceColor { r: 0, g: 0, b: 0 },
             color_temperature_kelvin: 0,
+            mode: None,
         };
 
         let mut device = Device::new("H6000", "AA:BB:CC:DD:EE:FF:42:2A");
