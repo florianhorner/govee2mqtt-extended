@@ -7,3 +7,6 @@ package.json
 package-lock.json
 .DS_Store
 .gstack/
+
+# Keep machine-specific Conductor overrides out of version control.
+/.conductor/settings.local.toml
