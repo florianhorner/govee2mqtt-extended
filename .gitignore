@@ -10,3 +10,6 @@ package-lock.json
 
 # Keep machine-specific Conductor overrides out of version control.
 /.conductor/settings.local.toml
+
+# Agent/workspace scratch. PR proof artifacts belong in proof/ instead.
+.context/
