@@ -517,3 +517,52 @@ async fn run_iot_subscriber(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Trimmed from a live H607C `cmd:"status"` push (2026-08-04 capture,
+    /// proof/pr38-runtime-iot-trace.log): `mode` rides at the top level of
+    /// `state`, next to onOff/brightness/color. 5 = manual colour on this SKU.
+    const STATUS_WITH_MODE: &str = r#"{
+        "proType": 2,
+        "sku": "H607C",
+        "device": "30:F2:AA:BB:CC:DD:EE:FF",
+        "cmd": "status",
+        "type": 0,
+        "transaction": "o_1785886845822",
+        "pactType": 2,
+        "pactCode": 1,
+        "state": {
+            "onOff": 0,
+            "brightness": 100,
+            "color": {"r": 255, "g": 0, "b": 0},
+            "colorTemInKelvin": 0,
+            "mode": 5,
+            "sta": {"stc": "0_0_49_703425_-703_0_0_400004_38"},
+            "result": 1
+        },
+        "op": {"command": ["qgUVAAAAAAAAAAAAAAAAAAAAALo="]}
+    }"#;
+
+    #[test]
+    fn parses_top_level_mode_from_status_push() {
+        let packet: Packet = serde_json::from_str(STATUS_WITH_MODE).unwrap();
+        assert_eq!(packet.state.mode, Some(5));
+        assert_eq!(packet.state.on_off, Some(0));
+        assert_eq!(packet.state.brightness, Some(100));
+    }
+
+    /// Payloads without the field (e.g. relayed devStatus shapes) must not
+    /// invent one: `mode` stays `None` rather than defaulting to a number.
+    #[test]
+    fn missing_mode_parses_as_none() {
+        let packet: Packet = serde_json::from_str(
+            r#"{"sku":"H6000","device":"AA","cmd":"status",
+                "state":{"onOff":1,"brightness":50}}"#,
+        )
+        .unwrap();
+        assert_eq!(packet.state.mode, None);
+    }
+}

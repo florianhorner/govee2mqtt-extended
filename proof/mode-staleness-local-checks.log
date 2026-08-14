@@ -1,0 +1,10 @@
+== cargo test ==
+
+test result: ok. 140 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.86s
+
+
+== cargo fmt --check ==
+(clean)
+
+== cargo clippy --all-targets -- -D warnings ==
+10 pre-existing needless_borrows_for_generic_args errors on rustc 1.94 (present on clean upstream/main: platform_api.rs, work_mode.rs, rest_api.rs — none in this change; verified by running clippy on the clean main checkout)
