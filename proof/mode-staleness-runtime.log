@@ -1,0 +1,22 @@
+Runtime capture — feat/mode-staleness-tracking @88628f6 running in the
+production bridge (image govee2mqtt:mode-staleness, host with 5 Govee
+devices, AWS IoT + LAN + Platform all active).
+
+Setup: cloud power/effect command sent to an H6020 at 18:32:05Z, which
+triggers a full AWS IoT status push carrying "mode":5. The device is
+LAN-capable, so subsequent LAN polls win the source race and project the
+carried-over mode.
+
+Capture 1 — 90 seconds after the IoT push (sensor attributes, HA API):
+  iot      mode=5 mode_updated=2026-08-14T18:32:06.406016650Z updated=2026-08-14T18:32:06.406016650Z source=AWS IoT API
+  lan      mode=5 mode_updated=2026-08-14T18:32:06.406016650Z updated=2026-08-14T18:33:33.872013013Z source=LAN API
+  overall  mode=5 mode_updated=2026-08-14T18:32:06.406016650Z updated=2026-08-14T18:33:33.872013013Z source=LAN API
+
+Capture 2 — ~10 minutes after the IoT push, no further IoT traffic:
+  iot      mode=5 mode_updated=2026-08-14T18:32:06.406016650Z updated=2026-08-14T18:32:06.406016650Z source=AWS IoT API
+  lan      mode=5 mode_updated=2026-08-14T18:32:06.406016650Z updated=2026-08-14T18:41:45.263126318Z source=LAN API
+  overall  mode=5 mode_updated=2026-08-14T18:32:06.406016650Z updated=2026-08-14T18:41:45.263126318Z source=LAN API
+
+The LAN projection keeps re-stamping `updated` with each poll while
+`mode_updated` stays pinned to the original IoT observation time —
+before this change the projection offered no way to tell the two apart.
