@@ -76,6 +76,33 @@ configuration:
       if standard multicast already fails — try "Broadcast to
       Each Network Interface" or "Scan Specific IP Addresses"
       instead.
+  lan_query_attempts:
+    name: LAN Status Query Attempts
+    description: >-
+      How many times a device status query is sent before giving
+      up (default 3). Raising this tolerates slower devices at the
+      cost of more Wi-Fi traffic when devices don't respond.
+  lan_query_backoff_ms:
+    name: LAN Status Query Backoff (ms)
+    description: >-
+      Wait after the first status query attempt, in milliseconds
+      (default 350). Doubles on each retry, capped at 3000 ms.
+  lan_breaker_threshold:
+    name: LAN Poll Circuit Breaker Threshold
+    description: >-
+      After this many consecutive status-query timeouts, background
+      polling of that device is suspended for a cooldown period
+      (default 3). Set to 0 to disable the circuit breaker.
+      Commands you send and their confirmation polls are never
+      blocked by this.
+  lan_breaker_cooldown:
+    name: LAN Poll Circuit Breaker Cooldown (s)
+    description: >-
+      How long background polling of an unresponsive device stays
+      suspended, in seconds (default 300, clamped to 30-900).
+      Doubles on repeated failure, capped at 900 s. A device that
+      shows any sign of life gets an immediate probe, and the first
+      successful status reply lifts the suspension.
   disable_effects:
     name: Disable Effects
     description: >-

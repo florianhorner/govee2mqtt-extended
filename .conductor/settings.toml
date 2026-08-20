@@ -1,0 +1,27 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+[scripts]
+setup = "cargo build --workspace"
+archive = "cargo clean"
+run_mode = "concurrent"
+
+[scripts.run.test]
+command = "cargo test --workspace -- --show-output"
+default = true
+icon = "test-tube"
+
+[prompts]
+general = """
+govee2mqtt is a Rust bridge between Govee smart-home devices and MQTT/Home Assistant, with LAN API discovery, BLE fallback, and Home Assistant add-on packaging. Prefer explicit error handling over expect()/unwrap(), especially for network and I/O results. Keep addon/ configuration in sync with new CLI flags or environment variables. Test with real Govee devices when possible and say in the PR whether hardware was tested. Avoid unnecessary team-process overhead.
+
+Use concise Markdown: lead with a TL;DR, use headings and bullets, use bold for key terms and tables for comparisons, keep paragraphs to at most three sentences, and use language-tagged fenced code blocks. Cite repository paths inline and link external documentation. For material alternatives, present A/B/C options with explicit tradeoffs rather than burying them in prose.
+"""
+code_review = """
+Focus on memory safety; MQTT topic patterns and QoS; Govee LAN API protocol compliance against docs/; Arc/Mutex use around shared state; error propagation without silent failures; regression coverage for device or protocol changes; and add-on configuration consistency. Do not propose async-runtime changes without benchmarks. Do not report cargo fmt findings because CI covers formatting.
+"""
+create_pr = """
+Use an imperative Conventional Commit-formatted title of at most 60 characters. State what changed, why, and test evidence; say whether physical Govee hardware was tested when relevant. Keep the description concise, omit empty boilerplate, and call out newly supported Govee device models.
+"""
+rename_branch = """
+Use feat/, fix/, chore/, docs/, or refactor/ followed by a lowercase-hyphenated description of at most four words, for example feat/h615-device-support or fix/mqtt-reconnect-loop.
+"""

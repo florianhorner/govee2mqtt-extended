@@ -37,6 +37,13 @@ pub struct Device {
     pub iot_device_status: Option<LanDeviceStatus>,
     pub last_iot_device_status_update: Option<DateTime<Utc>>,
 
+    /// When an IoT packet last carried an explicit `state.mode`.
+    /// `last_iot_device_status_update` is re-stamped by every IoT packet,
+    /// including mode-less ones whose merge carries the cached mode
+    /// forward, so it cannot serve as the mode observation time.
+    /// Stamped by the IoT subscriber merge (see service/iot.rs).
+    pub last_iot_mode_update: Option<DateTime<Utc>>,
+
     pub nightlight_state: Option<NotifyHumidifierNightlightParams>,
     pub target_humidity_percent: Option<u8>,
     pub humidifier_work_mode: Option<u8>,
@@ -81,6 +88,19 @@ pub struct DeviceState {
 
     /// The active effect mode, if known
     pub scene: Option<String>,
+
+    /// The active work mode number as reported by the device via
+    /// the AWS IoT status message, when known. SKU-specific meaning
+    /// (eg: H607C reports 5 for manual color and 4 for music mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<i64>,
+
+    /// When `mode` was learned from the AWS IoT status message. The LAN and
+    /// Platform API projections carry the last IoT mode forward, so their
+    /// `updated` stamp says nothing about the mode's age; this field keeps
+    /// the original observation time so consumers can judge staleness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_updated: Option<DateTime<Utc>>,
 
     /// Where the information came from
     pub source: &'static str,
@@ -250,6 +270,8 @@ impl Device {
             color: status.color,
             kelvin: status.color_temperature_kelvin,
             scene: self.active_scene.clone(),
+            mode: status.mode,
+            mode_updated: status.mode.and(self.last_iot_mode_update),
             source: "AWS IoT API",
             updated,
         })
@@ -259,6 +281,18 @@ impl Device {
         let updated = self.last_lan_device_status_update?;
         let status = self.lan_device_status.as_ref()?;
 
+        // The LAN devStatus response doesn't carry a mode field; carry over
+        // the last mode learned via AWS IoT, if any. Keep the original IoT
+        // observation time in `mode_updated`: this projection's `updated` is
+        // the LAN poll time, which would present an hours-old mode as fresh.
+        let (mode, mode_updated) = match status.mode {
+            Some(mode) => (Some(mode), Some(updated)),
+            None => match self.iot_device_status.as_ref().and_then(|s| s.mode) {
+                Some(mode) => (Some(mode), self.last_iot_mode_update),
+                None => (None, None),
+            },
+        };
+
         Some(DeviceState {
             on: status.on,
             light_on: Some(status.on), // assumption: LAN API == light
@@ -267,6 +301,8 @@ impl Device {
             color: status.color,
             kelvin: status.color_temperature_kelvin,
             scene: self.active_scene.clone(),
+            mode,
+            mode_updated,
             source: "LAN API",
             updated,
         })
@@ -329,6 +365,12 @@ impl Device {
             }
         }
 
+        // The Platform API doesn't report a work mode for lights; carry over
+        // the last mode learned via AWS IoT, if any, keeping the original IoT
+        // observation time (see compute_lan_device_state).
+        let mode = self.iot_device_status.as_ref().and_then(|s| s.mode);
+        let mode_updated = mode.and(self.last_iot_mode_update);
+
         Some(DeviceState {
             on,
             light_on,
@@ -337,6 +379,8 @@ impl Device {
             color,
             kelvin,
             scene: self.active_scene.clone(),
+            mode,
+            mode_updated,
             source: "PLATFORM API",
             updated,
         })
@@ -635,6 +679,7 @@ mod test {
             brightness: 100,
             color: DeviceColor { r: 1, g: 2, b: 3 },
             color_temperature_kelvin: 0,
+            mode: None,
         };
 
         // LAN poll
@@ -659,6 +704,7 @@ mod test {
             brightness: 0,
             color: DeviceColor { r: 0, g: 0, b: 0 },
             color_temperature_kelvin: 0,
+            mode: None,
         };
 
         // LAN poll
@@ -681,12 +727,14 @@ mod test {
             brightness: 100,
             color: DeviceColor { r: 1, g: 2, b: 3 },
             color_temperature_kelvin: 0,
+            mode: None,
         };
         let off_frame = LanDeviceStatus {
             on: false,
             brightness: 0,
             color: DeviceColor { r: 0, g: 0, b: 0 },
             color_temperature_kelvin: 0,
+            mode: None,
         };
 
         let mut device = Device::new("H6000", "AA:BB:CC:DD:EE:FF:42:2A");
@@ -697,5 +745,99 @@ mod test {
         device.set_iot_device_status(off_frame);
 
         assert_eq!(device.active_scene_name(), None);
+    }
+
+    fn status_with_mode(mode: Option<i64>) -> LanDeviceStatus {
+        LanDeviceStatus {
+            on: true,
+            brightness: 100,
+            color: DeviceColor { r: 255, g: 0, b: 0 },
+            color_temperature_kelvin: 0,
+            mode,
+        }
+    }
+
+    /// Regression guard for the mode field itself: a `mode` learned from an
+    /// AWS IoT status must survive into the synthesized `DeviceState`,
+    /// stamped with the IoT observation time.
+    #[test]
+    fn iot_status_mode_reaches_device_state() {
+        let mut device = Device::new("H607C", "AA:BB:CC:DD:EE:FF:42:2A");
+        // Mirror the subscriber merge: the status cache and the mode
+        // observation are stamped together when the packet carries a mode.
+        device.set_iot_device_status(status_with_mode(Some(5)));
+        device.last_iot_mode_update = device.last_iot_device_status_update;
+
+        let state = device.device_state().expect("iot state");
+        assert_eq!(state.mode, Some(5));
+        assert!(state.mode_updated.is_some());
+        assert_eq!(state.mode_updated, device.last_iot_mode_update);
+    }
+
+    /// The LAN devStatus response has no mode field; the projection carries
+    /// the last IoT-learned mode forward even when the LAN state is newer
+    /// and wins the source race.
+    #[test]
+    fn iot_mode_carries_over_into_newer_lan_projection() {
+        let mut device = Device::new("H607C", "AA:BB:CC:DD:EE:FF:42:2A");
+        device.set_iot_device_status(status_with_mode(Some(4)));
+        device.set_lan_device_status(status_with_mode(None));
+        device.last_lan_device_status_update = Some(Utc::now() + chrono::Duration::seconds(5));
+
+        let state = device.device_state().expect("lan state");
+        assert_eq!(state.source, "LAN API");
+        assert_eq!(state.mode, Some(4));
+    }
+
+    /// The carry-over must not launder the mode's age. Observed live
+    /// (2026-08-13, H607C): a LAN projection re-stamped a 10-hour-old IoT
+    /// mode with a seconds-old `updated`. `mode_updated` has to keep the
+    /// original IoT observation time so consumers can judge staleness.
+    #[test]
+    fn lan_carry_over_preserves_iot_mode_observation_time() {
+        let mut device = Device::new("H607C", "AA:BB:CC:DD:EE:FF:42:2A");
+        device.set_iot_device_status(status_with_mode(Some(4)));
+        let aged = Utc::now() - chrono::Duration::hours(10);
+        device.last_iot_mode_update = Some(aged);
+
+        device.set_lan_device_status(status_with_mode(None));
+
+        let state = device.device_state().expect("lan state");
+        assert_eq!(state.source, "LAN API");
+        assert_eq!(state.mode, Some(4));
+        assert_eq!(state.mode_updated, Some(aged));
+        assert!(state.updated > aged + chrono::Duration::hours(9));
+    }
+
+    /// Same guarantee for the Platform API projection, which reports no work
+    /// mode for lights either.
+    #[test]
+    fn platform_projection_preserves_iot_mode_observation_time() {
+        let mut device = Device::new("H607C", "AA:BB:CC:DD:EE:FF:42:2A");
+        device.set_iot_device_status(status_with_mode(Some(4)));
+        let aged = Utc::now() - chrono::Duration::hours(10);
+        device.last_iot_mode_update = Some(aged);
+
+        device.set_http_device_state(HttpDeviceState {
+            sku: "H607C".to_string(),
+            device: "AA:BB:CC:DD:EE:FF:42:2A".to_string(),
+            capabilities: vec![],
+        });
+
+        let state = device.compute_http_device_state().expect("http state");
+        assert_eq!(state.mode, Some(4));
+        assert_eq!(state.mode_updated, Some(aged));
+    }
+
+    /// Without any IoT report the projections must not invent a mode or an
+    /// observation time.
+    #[test]
+    fn no_iot_report_means_no_mode_and_no_timestamp() {
+        let mut device = Device::new("H607C", "AA:BB:CC:DD:EE:FF:42:2A");
+        device.set_lan_device_status(status_with_mode(None));
+
+        let state = device.device_state().expect("lan state");
+        assert_eq!(state.mode, None);
+        assert_eq!(state.mode_updated, None);
     }
 }

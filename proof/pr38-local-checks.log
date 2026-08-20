@@ -1,0 +1,27 @@
+# Local verification log — PR #38 (feat/expose-iot-status-mode)
+# head: d2bfcb63d62dbac52841716246ee1041fd2ba5b0
+# date: 2026-08-11T14:07:47Z
+# host: macOS 14.6.1, rustc 1.94.0 (4a4ef493e 2026-03-02) (Homebrew)
+
+## cargo fmt --all -- --check
+Warning: can't set `imports_granularity = Module`, unstable features are only available in nightly channel.
+Warning: can't set `imports_granularity = Module`, unstable features are only available in nightly channel.
+FMT: OK
+
+## cargo build --all
+   Compiling hyper-rustls v0.27.7
+   Compiling reqwest v0.13.2
+   Compiling openssl v0.10.76
+   Compiling mosquitto-rs v0.11.2
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 19s
+
+## cargo clippy --all -- -D warnings
+    Checking hyper-rustls v0.27.7
+    Checking reqwest v0.13.2
+   Compiling openssl v0.10.76
+    Checking mosquitto-rs v0.11.2
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 38s
+
+## cargo test --all
+running 106 tests
+test result: ok. 106 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s

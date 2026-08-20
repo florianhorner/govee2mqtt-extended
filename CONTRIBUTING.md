@@ -106,3 +106,34 @@ The pre-push hook logs every `--no-verify` to `~/.commit-bypass.log` with the ov
 - **Canonical spec:** https://github.com/florianhorner/engineering-standards/blob/main/specs/commit-message-spec.md
 - **Vendored copy in this repo:** [`.config/commit-rules.json`](.config/commit-rules.json) — SHA-pinned snapshot consumed by the local hook, the commitlint config, and CI. Do not hand-edit.
 <!-- END: commit-message-standards -->
+
+## Proof blocks
+
+Every PR body must end with a `## Proof` section: one checklist line per claim,
+each pointing at an artifact someone else can open. CI enforces it via
+[`.github/workflows/verify-claims.yml`](.github/workflows/verify-claims.yml).
+
+```md
+## Proof
+- [x] tests: proof/my-change-checks.log — `cargo test --all`, 133 passed
+- [x] runtime: https://github.com/florianhorner/govee2mqtt-extended/actions/runs/<id>
+- [ ] schema: n/a — no wire-format change
+```
+
+**Where artifacts live.** Commit them to `proof/` at the repo root and reference
+them by repo-relative path. Not `.context/` — that is agent and workspace scratch
+space, and it is gitignored.
+
+**Accepted forms.** A repo-relative file path under `proof/`, a GitHub Actions run
+URL, a gist or release-asset URL, a screenshot URL, or a bare test name. A `— what
+it shows` note after the artifact is fine; the validator strips it.
+
+**`n/a` rules.** An unchecked line must read `n/a — <reason>`; a bare `n/a` fails.
+On a PR from a fork, `runtime: n/a` is rejected outright — give a real runtime
+artifact or drop the `runtime:` line entirely. Never invent a URL: an absent claim
+is honest, a fabricated artifact is not.
+
+**If you edit the PR body**, note that each `verify-claims` run validates the body
+as it was when that run was queued. A run queued before your edit will keep
+failing on the old body; the run triggered by the edit is the one that counts.
+

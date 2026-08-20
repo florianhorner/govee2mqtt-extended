@@ -42,7 +42,7 @@ async fn poll_single_device(state: &StateHandle, device: &Device) -> anyhow::Res
     // <https://github.com/wez/govee2mqtt/issues/250>
     if let Some(lan_device) = &device.lan_device {
         if let Some(client) = state.get_lan_client().await {
-            if let Ok(status) = client.query_status(lan_device).await {
+            if let Ok(status) = client.query_status_respecting_breaker(lan_device).await {
                 state
                     .device_mut(&lan_device.sku, &lan_device.device)
                     .await
@@ -255,7 +255,9 @@ impl ServeCommand {
                     let state = state.clone();
                     let client = client.clone();
                     tokio::spawn(async move {
-                        if let Ok(status) = client.query_status(&lan_device).await {
+                        if let Ok(status) =
+                            client.query_status_respecting_breaker(&lan_device).await
+                        {
                             state
                                 .device_mut(&lan_device.sku, &lan_device.device)
                                 .await
@@ -268,11 +270,11 @@ impl ServeCommand {
                 }
             });
 
-            // I don't love that this is 10 seconds but since our timeout
-            // for query_status is 10 seconds, and we show a warning for
-            // devices that didn't respond in the section below, in the
-            // interest of reducing false positives we need to wait long
-            // enough to provide high-signal warnings.
+            // A query_status retry cycle is ~2.45s with default policy;
+            // we show a warning for devices that didn't respond in the
+            // section below, so in the interest of reducing false
+            // positives we wait a few cycles' worth to provide
+            // high-signal warnings.
             log::info!("Waiting 10 seconds for LAN API discovery");
             sleep(Duration::from_secs(10)).await;
         }

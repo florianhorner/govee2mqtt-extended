@@ -1,0 +1,22 @@
+== cargo test ==
+
+test result: ok. 140 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.86s
+
+
+== cargo fmt --check ==
+(clean)
+
+== cargo clippy --all-targets -- -D warnings ==
+10 pre-existing needless_borrows_for_generic_args errors on rustc 1.94 (present on clean upstream/main: platform_api.rs, work_mode.rs, rest_api.rs — none in this change; verified by running clippy on the clean main checkout)
+
+== mode-observation pin fix — local checks 2026-08-17T10:19:26Z ==
+$ cargo build --all
+   Compiling govee v0.1.0 (/Users/peas/govee2mqtt-extended)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.79s
+$ cargo test --all
+test result: ok. 141 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.85s
+$ cargo clippy --all -- -D warnings
+   Compiling govee v0.1.0 (/Users/peas/govee2mqtt-extended)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.80s
+$ cargo fmt --all -- --check
+fmt: clean

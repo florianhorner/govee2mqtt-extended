@@ -16,6 +16,7 @@ voice assistants.
 - **Panic hardening (in progress)** — critical `.expect()` panics replaced with graceful error handling
 - **Exit code fix** — silent `exit(0)` → `exit(1)` so HA properly restarts on failure
 - **Scene quick-cycle** — Next/Previous buttons and scene info sensor
+- **LAN congestion hardening** — bounded status-query retries and a per-device poll circuit breaker for congested 2.4 GHz networks
 - **Undocumented API login** with 2FA support
 - **Security vulnerability patches**
 

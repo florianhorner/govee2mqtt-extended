@@ -1,11 +1,13 @@
 use crate::ble::{Base64HexBytes, GoveeBlePacket, HumidifierAutoMode, NotifyHumidifierMode};
 use crate::lan_api::{DeviceColor, DeviceStatus};
 use crate::platform_api::from_json;
+use crate::service::device::Device;
 use crate::service::state::StateHandle;
 use crate::undoc_api::{ms_timestamp, DeviceEntry, LoginAccountResponse, ParsedOneClick};
 use crate::UndocApiArguments;
 use anyhow::Context;
 use async_channel::Receiver;
+use chrono::Utc;
 use mosquitto_rs::{Event, QoS};
 use serde::Deserialize;
 use std::time::Duration;
@@ -326,6 +328,10 @@ struct StateUpdate {
     pub color: Option<DeviceColor>,
     #[serde(rename = "colorTemInKelvin")]
     pub color_temperature_kelvin: Option<u32>,
+    /// Active work mode number, present in `cmd:"status"` messages
+    /// from (at least) light devices. SKU-specific meaning.
+    #[serde(default)]
+    pub mode: Option<i64>,
     pub sku: Option<String>,
     pub device: Option<String>,
 }
@@ -370,6 +376,93 @@ impl Packet {
     }
 }
 
+/// Merge one IoT packet into the device's cached IoT status.
+///
+/// Extracted from the subscriber loop so tests can drive it with real
+/// payloads. One subtlety lives here rather than in `set_iot_device_status`:
+/// that setter re-stamps `last_iot_device_status_update` for every packet,
+/// including mode-less ones whose merge merely carries the cached `mode`
+/// forward. The mode observation time is therefore stamped at this merge,
+/// and only when the packet explicitly carries `state.mode`.
+fn merge_iot_packet(device: &mut Device, sku: &str, packet: &Packet) {
+    let mut state = match device.iot_device_status.clone() {
+        Some(state) => state,
+        None => match device.device_state() {
+            Some(state) => DeviceStatus {
+                on: state.on,
+                brightness: state.brightness,
+                color: state.color,
+                color_temperature_kelvin: state.kelvin,
+                mode: state.mode,
+            },
+            None => DeviceStatus::default(),
+        },
+    };
+
+    if let Some(v) = packet.state.brightness {
+        state.brightness = v;
+        state.on = v != 0;
+    }
+    if let Some(v) = packet.state.color {
+        state.color = v;
+        state.on = true;
+    }
+    if let Some(v) = packet.state.color_temperature_kelvin {
+        state.color_temperature_kelvin = v;
+        state.on = true;
+    }
+    if let Some(v) = packet.state.mode {
+        state.mode = Some(v);
+        device.last_iot_mode_update = Some(Utc::now());
+    }
+
+    if let Some(op) = &packet.op {
+        for cmd in &op.command {
+            let decoded = cmd.decode_for_sku(sku);
+            log::debug!("Decoded: {decoded:?} for {sku}");
+            match decoded {
+                GoveeBlePacket::NotifyHumidifierNightlight(nl) => {
+                    state.brightness = nl.brightness;
+                    state.color = DeviceColor {
+                        r: nl.r,
+                        g: nl.g,
+                        b: nl.b,
+                    };
+                    device.set_nightlight_state(nl);
+                }
+                GoveeBlePacket::NotifyHumidifierAutoMode(HumidifierAutoMode {
+                    target_humidity,
+                }) => {
+                    device.set_target_humidity(target_humidity.as_percent());
+                }
+                GoveeBlePacket::NotifyHumidifierMode(NotifyHumidifierMode { mode, param }) => {
+                    device.set_humidifier_work_mode_and_param(mode, param);
+                }
+                GoveeBlePacket::Generic(_) => {
+                    // Ignore packets that we can't decode
+                }
+                GoveeBlePacket::SetHumidifierMode(_)
+                | GoveeBlePacket::SetHumidifierNightlight(_) => {
+                    // Ignore packets that are essentially echoing
+                    // commands sent to the device
+                }
+                _ => {
+                    // But warn about the ones we could decode and
+                    // aren't handling here
+                    log::warn!("Taking no action for {decoded:?} for {sku}");
+                }
+            }
+        }
+    }
+
+    // Check on/off last, as we can synthesize "on"
+    // if the other fields are present
+    if let Some(on_off) = packet.state.on_off {
+        state.on = on_off != 0;
+    }
+    device.set_iot_device_status(state);
+}
+
 async fn run_iot_subscriber(
     subscriptions: Receiver<Event>,
     state: StateHandle,
@@ -388,85 +481,7 @@ async fn run_iot_subscriber(
                         if let Some((sku, device_id)) = packet.sku_and_device() {
                             {
                                 let mut device = state.device_mut(sku, device_id).await;
-                                let mut state = match device.iot_device_status.clone() {
-                                    Some(state) => state,
-                                    None => match device.device_state() {
-                                        Some(state) => DeviceStatus {
-                                            on: state.on,
-                                            brightness: state.brightness,
-                                            color: state.color,
-                                            color_temperature_kelvin: state.kelvin,
-                                        },
-                                        None => DeviceStatus::default(),
-                                    },
-                                };
-
-                                if let Some(v) = packet.state.brightness {
-                                    state.brightness = v;
-                                    state.on = v != 0;
-                                }
-                                if let Some(v) = packet.state.color {
-                                    state.color = v;
-                                    state.on = true;
-                                }
-                                if let Some(v) = packet.state.color_temperature_kelvin {
-                                    state.color_temperature_kelvin = v;
-                                    state.on = true;
-                                }
-
-                                if let Some(op) = &packet.op {
-                                    for cmd in &op.command {
-                                        let decoded = cmd.decode_for_sku(sku);
-                                        log::debug!("Decoded: {decoded:?} for {sku}");
-                                        match decoded {
-                                            GoveeBlePacket::NotifyHumidifierNightlight(nl) => {
-                                                state.brightness = nl.brightness;
-                                                state.color = DeviceColor {
-                                                    r: nl.r,
-                                                    g: nl.g,
-                                                    b: nl.b,
-                                                };
-                                                device.set_nightlight_state(nl);
-                                            }
-                                            GoveeBlePacket::NotifyHumidifierAutoMode(
-                                                HumidifierAutoMode { target_humidity },
-                                            ) => {
-                                                device.set_target_humidity(
-                                                    target_humidity.as_percent(),
-                                                );
-                                            }
-                                            GoveeBlePacket::NotifyHumidifierMode(
-                                                NotifyHumidifierMode { mode, param },
-                                            ) => {
-                                                device.set_humidifier_work_mode_and_param(
-                                                    mode, param,
-                                                );
-                                            }
-                                            GoveeBlePacket::Generic(_) => {
-                                                // Ignore packets that we can't decode
-                                            }
-                                            GoveeBlePacket::SetHumidifierMode(_)
-                                            | GoveeBlePacket::SetHumidifierNightlight(_) => {
-                                                // Ignore packets that are essentially echoing
-                                                // commands sent to the device
-                                            }
-                                            _ => {
-                                                // But warn about the ones we could decode and
-                                                // aren't handling here
-                                                log::warn!(
-                                                    "Taking no action for {decoded:?} for {sku}"
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Check on/off last, as we can synthesize "on"
-                                // if the other fields are present
-                                if let Some(on_off) = packet.state.on_off {
-                                    state.on = on_off != 0;
-                                }
-                                device.set_iot_device_status(state);
+                                merge_iot_packet(&mut device, sku, &packet);
                             }
                             state.notify_of_state_change(device_id).await?;
                         }
@@ -508,4 +523,91 @@ async fn run_iot_subscriber(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Trimmed from a live H607C `cmd:"status"` push (2026-08-04 capture,
+    /// proof/pr38-runtime-iot-trace.log): `mode` rides at the top level of
+    /// `state`, next to onOff/brightness/color. 5 = manual colour on this SKU.
+    const STATUS_WITH_MODE: &str = r#"{
+        "proType": 2,
+        "sku": "H607C",
+        "device": "30:F2:AA:BB:CC:DD:EE:FF",
+        "cmd": "status",
+        "type": 0,
+        "transaction": "o_1785886845822",
+        "pactType": 2,
+        "pactCode": 1,
+        "state": {
+            "onOff": 0,
+            "brightness": 100,
+            "color": {"r": 255, "g": 0, "b": 0},
+            "colorTemInKelvin": 0,
+            "mode": 5,
+            "sta": {"stc": "0_0_49_703425_-703_0_0_400004_38"},
+            "result": 1
+        },
+        "op": {"command": ["qgUVAAAAAAAAAAAAAAAAAAAAALo="]}
+    }"#;
+
+    #[test]
+    fn parses_top_level_mode_from_status_push() {
+        let packet: Packet = serde_json::from_str(STATUS_WITH_MODE).unwrap();
+        assert_eq!(packet.state.mode, Some(5));
+        assert_eq!(packet.state.on_off, Some(0));
+        assert_eq!(packet.state.brightness, Some(100));
+    }
+
+    /// Payloads without the field (e.g. relayed devStatus shapes) must not
+    /// invent one: `mode` stays `None` rather than defaulting to a number.
+    #[test]
+    fn missing_mode_parses_as_none() {
+        let packet: Packet = serde_json::from_str(
+            r#"{"sku":"H6000","device":"AA","cmd":"status",
+                "state":{"onOff":1,"brightness":50}}"#,
+        )
+        .unwrap();
+        assert_eq!(packet.state.mode, None);
+    }
+
+    /// A mode-bearing packet followed by a mode-less one: the merge carries
+    /// the cached mode forward and re-stamps the status time, but the mode
+    /// observation time must stay pinned to the packet that actually
+    /// carried `state.mode` — otherwise every projection would present an
+    /// hours-old mode as freshly observed.
+    #[test]
+    fn mode_less_packet_keeps_mode_observation_time_pinned() {
+        let mut device = Device::new("H607C", "30:F2:AA:BB:CC:DD:EE:FF");
+
+        let with_mode: Packet = serde_json::from_str(STATUS_WITH_MODE).unwrap();
+        merge_iot_packet(&mut device, "H607C", &with_mode);
+        let observed = device
+            .last_iot_mode_update
+            .expect("mode observation stamped");
+
+        let mode_less: Packet = serde_json::from_str(
+            r#"{"sku":"H607C","device":"30:F2:AA:BB:CC:DD:EE:FF","cmd":"status",
+                "state":{"onOff":1,"brightness":42}}"#,
+        )
+        .unwrap();
+        merge_iot_packet(&mut device, "H607C", &mode_less);
+
+        let status = device.iot_device_status.as_ref().expect("cached status");
+        assert_eq!(status.mode, Some(5), "cached mode carries forward");
+        assert_eq!(device.last_iot_mode_update, Some(observed), "stamp pinned");
+        assert!(
+            device
+                .last_iot_device_status_update
+                .expect("status stamped")
+                >= observed,
+            "the mode-less packet still refreshes the status time"
+        );
+
+        let state = device.device_state().expect("device state");
+        assert_eq!(state.mode, Some(5));
+        assert_eq!(state.mode_updated, Some(observed));
+    }
 }

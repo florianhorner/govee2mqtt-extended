@@ -169,10 +169,18 @@ jobs:
       - name: Build and Publish Home Assistant Add On
         uses: home-assistant/builder@2026.03.2
         with:
+          # --no-cosign-verify: home-assistant/docker-base re-signed all base
+          # images with a newer cosign on 2026-06-16; the cosign inside every
+          # published builder image (newest: 2026.03.2) predates that format
+          # and fails with "no signatures found". The 2026.06.0 action tag has
+          # no matching builder image at all (manifest unknown). Skip BASE
+          # image verification until upstream ships a builder image with a
+          # current cosign; --cosign still signs OUR images.
           args: |
             --amd64 \
             --aarch64 \
             --cosign \
+            --no-cosign-verify \
             --target /data/addon
 
   test-addon:
@@ -207,9 +215,11 @@ jobs:
       - name: Test Build Home Assistant Add On
         uses: home-assistant/builder@2026.03.2
         with:
+          # same --no-cosign-verify rationale as the addon job above
           args: |
             --test \
             --amd64 \
             --aarch64 \
             --cosign \
+            --no-cosign-verify \
             --target /data/addon
