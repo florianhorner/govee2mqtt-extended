@@ -23,6 +23,18 @@ on:
 
 env:
   IMAGE: ghcr.io/florianhorner/govee2mqtt
+  # The composable HA build actions do NOT read addon/build.yaml, so the labels
+  # and the base-image cosign identity that lived there have to be passed
+  # explicitly. Kept here so the addon and test-addon jobs cannot drift apart.
+  ADDON_LABELS: |
+    io.hass.type=addon
+    io.hass.name=Govee2MQTT Bridge (Fork)
+    io.hass.description=Fork of wez/govee2mqtt with device fixes, crash hardening, and scene cycling.
+    io.hass.url=https://github.com/florianhorner/govee2mqtt-extended
+    org.opencontainers.image.title=Home Assistant App: Govee2MQTT Bridge
+    org.opencontainers.image.description=Bridges Govee smart home devices to Home Assistant via MQTT.
+    org.opencontainers.image.licenses=MIT
+  ADDON_BASE_IDENTITY: https://github.com/home-assistant/docker-base/.*
 
 jobs:
   build:
@@ -149,43 +161,81 @@ jobs:
           docker buildx imagetools inspect ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
   addon:
     if: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     needs:
       - merge
     permissions:
       contents: read
       id-token: write
       packages: write
+    strategy:
+      fail-fast: false
+      # Hard-coded rather than derived from
+      # home-assistant/builder/actions/prepare-multi-arch-matrix: that action
+      # emits {arch}-{name} (amd64-govee2mqtt), the inverse of the
+      # govee2mqtt-{arch} names addon/config.yaml points installed Supervisors
+      # at. The arch -> runner mapping mirrors that action, so aarch64 builds
+      # natively instead of under QEMU.
+      matrix:
+        include:
+          - arch: amd64
+            os: ubuntu-24.04
+            image: ghcr.io/florianhorner/govee2mqtt-amd64
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+            image: ghcr.io/florianhorner/govee2mqtt-aarch64
     steps:
       - uses: actions/checkout@v6
-      - name: Login to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: https://ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      # The published image tag is the addon/config.yaml version, NOT the git
+      # tag name: Supervisor pulls ghcr.io/florianhorner/govee2mqtt-{arch} at
+      # whatever version addon/config.yaml declares. apply-tag.sh derives that
+      # from the HEAD commit, so it stays the source of truth here. Publishing
+      # github.ref_name instead would 404 for every install whenever the two
+      # differ (e.g. the bare 2026.03.22 tag published 2026.03.22-ba238f5e).
+      # Body kept byte-identical to the "Rehearse the release version step" in
+      # test-addon, which is the only pre-release coverage this job gets.
+      # GitHub has no step reuse without a composite action, so the duplication
+      # is deliberate — change both or neither.
       - name: Apply tag to version
-        run: ./scripts/apply-tag.sh
+        id: version
+        run: |
+          ./scripts/apply-tag.sh
+          version="$(sed -n 's/^version: *"\([^"]*\)".*/\1/p' addon/config.yaml)"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{7,}$'; then
+            echo "::error::addon/config.yaml version is missing or malformed: '$version'"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Replaces home-assistant/builder@2026.03.2. The monolithic action is
+      # deprecated and no builder image was ever published for 2026.06.0, so
+      # no version of it has both an image and a cosign new enough to read the
+      # signatures home-assistant/docker-base applied on 2026-06-16. The
+      # composable actions install current cosign themselves, which restores
+      # base-image verification instead of skipping it (--no-cosign-verify).
       - name: Build and Publish Home Assistant Add On
-        uses: home-assistant/builder@2026.03.2
+        uses: home-assistant/builder/actions/build-image@2026.06.0
         with:
-          # --no-cosign-verify: home-assistant/docker-base re-signed all base
-          # images with a newer cosign on 2026-06-16; the cosign inside every
-          # published builder image (newest: 2026.03.2) predates that format
-          # and fails with "no signatures found". The 2026.06.0 action tag has
-          # no matching builder image at all (manifest unknown). Skip BASE
-          # image verification until upstream ships a builder image with a
-          # current cosign; --cosign still signs OUR images.
-          args: |
-            --amd64 \
-            --aarch64 \
-            --cosign \
-            --no-cosign-verify \
-            --target /data/addon
+          arch: ${{ matrix.arch }}
+          context: addon
+          image: ${{ matrix.image }}
+          image-tags: |
+            ${{ steps.version.outputs.version }}
+            latest
+          version: ${{ steps.version.outputs.version }}
+          push: "true"
+          cosign: "true"
+          cosign-base-verify: ghcr.io/home-assistant/${{ matrix.arch }}-base-debian:bookworm
+          cosign-base-identity: ${{ env.ADDON_BASE_IDENTITY }}
+          container-registry-password: ${{ secrets.GITHUB_TOKEN }}
+          # build-image does not read addon/build.yaml; BUILD_FROM must match
+          # the build_from: entry there so CI and Supervisor local builds agree.
+          build-args: |
+            BUILD_FROM=ghcr.io/home-assistant/${{ matrix.arch }}-base-debian:bookworm
+          labels: ${{ env.ADDON_LABELS }}
 
   test-addon:
     if: ${{ ! ( github.event_name == 'push' && github.ref_type == 'tag' ) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     needs:
       # Note! Despite the dependency edge here to the build steps above,
       # this test-addon build flow will build the addon from the latest
@@ -202,24 +252,72 @@ jobs:
       - build
     permissions:
       contents: read
-      id-token: write
+      # No id-token: keyless `cosign verify` needs no OIDC token, and with
+      # push: false build-image never reaches its signing step.
       packages: read
+    strategy:
+      fail-fast: false
+      # Same hard-coded matrix as the addon job above; see the rationale there.
+      matrix:
+        include:
+          - arch: amd64
+            os: ubuntu-24.04
+            image: ghcr.io/florianhorner/govee2mqtt-amd64
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+            image: ghcr.io/florianhorner/govee2mqtt-aarch64
     steps:
       - uses: actions/checkout@v6
+      # build-image only logs in when push is true, and addon/Dockerfile pulls
+      # ghcr.io/florianhorner/govee2mqtt:latest, so log in explicitly here.
       - name: Login to GHCR
         uses: docker/login-action@v4
         with:
           registry: https://ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Test Build Home Assistant Add On
-        uses: home-assistant/builder@2026.03.2
+      # build-image gates its own base-image verify on push == true, so a
+      # push: false job would silently skip the very check that is failing
+      # today. Verify the base explicitly instead.
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.1.2
+      - name: Verify base image
+        uses: home-assistant/builder/actions/cosign-verify@2026.06.0
         with:
-          # same --no-cosign-verify rationale as the addon job above
-          args: |
-            --test \
-            --amd64 \
-            --aarch64 \
-            --cosign \
-            --no-cosign-verify \
-            --target /data/addon
+          image: ghcr.io/home-assistant/${{ matrix.arch }}-base-debian:bookworm
+          cosign-identity: ${{ env.ADDON_BASE_IDENTITY }}
+      # cosign stays "true" even though nothing is published: signing is gated
+      # on push == true, while cosign: "false" would make build-image pull the
+      # ghcr registry cache WITHOUT verifying its signature. Cache verification
+      # is allow-failure, so a warning here never reddens the job.
+      - name: Test Build Home Assistant Add On
+        uses: home-assistant/builder/actions/build-image@2026.06.0
+        with:
+          arch: ${{ matrix.arch }}
+          context: addon
+          image: ${{ matrix.image }}
+          image-tags: test
+          version: test
+          push: "false"
+          cosign: "true"
+          container-registry-password: ${{ secrets.GITHUB_TOKEN }}
+          build-args: |
+            BUILD_FROM=ghcr.io/home-assistant/${{ matrix.arch }}-base-debian:bookworm
+          labels: ${{ env.ADDON_LABELS }}
+      # The addon job runs on tag pushes only, so the one piece of hand-written
+      # logic in the release path -- reading the version back out of
+      # addon/config.yaml after apply-tag.sh rewrites it -- would otherwise first
+      # execute during a live release. Rehearse it here so a broken parse fails a
+      # PR instead. Runs last because apply-tag.sh mutates addon/config.yaml,
+      # which sits inside the build context used above.
+      - name: Rehearse the release version step
+        env:
+          IMAGE_NAME: ${{ matrix.image }}
+        run: |
+          ./scripts/apply-tag.sh
+          version="$(sed -n 's/^version: *"\([^"]*\)".*/\1/p' addon/config.yaml)"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{7,}$'; then
+            echo "::error::addon/config.yaml version is missing or malformed: '$version'"
+            exit 1
+          fi
+          echo "Release would publish ${IMAGE_NAME}:${version}"
