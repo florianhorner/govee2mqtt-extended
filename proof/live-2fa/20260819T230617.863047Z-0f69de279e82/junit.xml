@@ -1,0 +1,2 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuite name="govee-live-2fa" tests="1" failures="0" timestamp="2026-08-19T23:06:20Z"><testcase name="account-login-2fa-sequence" /></testsuite>

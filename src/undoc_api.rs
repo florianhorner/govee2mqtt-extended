@@ -151,7 +151,10 @@ fn truncate_body_for_diagnostics(body_bytes: &[u8]) -> String {
 /// whether a code was configured, never the message or any credential. The
 /// user-facing error stays wrapped in `NoCacheError`, preserving the login
 /// cache-bypass contract.
-#[cfg(test)]
+///
+/// Also compiled under `live-2fa-test`, where the `undoc live2fa-login` probe
+/// uses it to emit a redacted outcome. See `docs/LIVE_2FA_TEST.md`.
+#[cfg(any(test, feature = "live-2fa-test"))]
 pub(crate) fn classify_2fa_login_error(err: &anyhow::Error) -> Option<(u64, bool)> {
     let no_cache = err.downcast_ref::<NoCacheError>()?;
     let two_factor = no_cache.0.downcast_ref::<TwoFactorLoginError>()?;

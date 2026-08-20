@@ -12,7 +12,12 @@ pub struct UndocCommand {
 enum SubCommand {
     DumpOneClick {},
     ShowOneClick {},
-    OneClick { name: String },
+    OneClick {
+        name: String,
+    },
+    /// Test-only login probe. Emits only a redacted, machine-readable outcome.
+    #[cfg(feature = "live-2fa-test")]
+    Live2faLogin {},
 }
 
 impl UndocCommand {
@@ -43,6 +48,33 @@ impl UndocCommand {
                 let iot = state.get_iot_client().await.expect("just started iot");
 
                 iot.activate_one_click(item).await?;
+            }
+            #[cfg(feature = "live-2fa-test")]
+            SubCommand::Live2faLogin {} => {
+                let client = args.undoc_args.api_client()?;
+                match client.login_account().await {
+                    Ok(_) => println!(r#"{{"schema":1,"outcome":"login_ok"}}"#),
+                    Err(err) => {
+                        if let Some((status, code_configured)) =
+                            crate::undoc_api::classify_2fa_login_error(&err)
+                        {
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "schema": 1,
+                                    "outcome": "two_factor",
+                                    "status": status,
+                                    "code_configured": code_configured,
+                                })
+                            );
+                        } else {
+                            println!(r#"{{"schema":1,"outcome":"unexpected_error"}}"#);
+                            anyhow::bail!(
+                                "live 2FA probe failed; upstream details were intentionally redacted"
+                            );
+                        }
+                    }
+                }
             }
         }
         Ok(())

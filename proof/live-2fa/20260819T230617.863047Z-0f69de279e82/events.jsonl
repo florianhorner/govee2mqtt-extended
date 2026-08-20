@@ -1,0 +1,4 @@
+{"elapsed_ms":7,"event":"configuration_validated","schema":1,"sequence":1,"time_utc":"2026-08-19T23:06:17Z"}
+{"elapsed_ms":2823,"event":"probe_build_completed","schema":1,"sequence":2,"time_utc":"2026-08-19T23:06:20Z"}
+{"elapsed_ms":2823,"event":"preflight_completed","schema":1,"sequence":3,"time_utc":"2026-08-19T23:06:20Z"}
+{"elapsed_ms":2823,"email_count":0,"event":"run_finished","outcome":"pass","probe_number":0,"reason":"preflight_completed_without_network","schema":1,"sequence":4,"time_utc":"2026-08-19T23:06:20Z"}

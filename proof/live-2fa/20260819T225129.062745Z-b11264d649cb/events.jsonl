@@ -1,0 +1,8 @@
+{"elapsed_ms":11,"event":"configuration_validated","schema":1,"sequence":1,"time_utc":"2026-08-19T22:51:29Z"}
+{"elapsed_ms":2793,"event":"probe_build_completed","schema":1,"sequence":2,"time_utc":"2026-08-19T22:51:31Z"}
+{"elapsed_ms":2793,"event":"preflight_completed","schema":1,"sequence":3,"time_utc":"2026-08-19T22:51:31Z"}
+{"elapsed_ms":2794,"email_count":0,"event":"mailbox_connect_started","schema":1,"sequence":4,"time_utc":"2026-08-19T22:51:31Z"}
+{"elapsed_ms":4997,"email_count":0,"event":"mailbox_baseline","schema":1,"sequence":5,"time_utc":"2026-08-19T22:51:34Z"}
+{"code_configured":false,"elapsed_ms":4997,"event":"probe_started","probe_number":1,"schema":1,"sequence":6,"time_utc":"2026-08-19T22:51:34Z"}
+{"code_configured":false,"elapsed_ms":6629,"event":"probe_completed","outcome":"two_factor","probe_number":1,"schema":1,"sequence":7,"status":454,"time_utc":"2026-08-19T22:51:35Z"}
+{"elapsed_ms":187004,"email_count":0,"event":"run_finished","outcome":"fail","probe_number":1,"reason":"email_wait_timed_out","schema":1,"sequence":8,"time_utc":"2026-08-19T22:54:36Z"}

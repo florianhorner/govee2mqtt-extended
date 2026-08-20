@@ -1,0 +1,2 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuite name="govee-live-2fa" tests="1" failures="1" timestamp="2026-08-19T23:03:30Z"><testcase name="account-login-2fa-sequence"><failure message="unexpected_email_during_quiet_window">unexpected_email_during_quiet_window</failure></testcase></testsuite>

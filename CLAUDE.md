@@ -6,10 +6,16 @@ Rust project that bridges Govee smart home devices to MQTT / Home Assistant.
 
 ```bash
 cargo build --all
-cargo test --all -- --show-output
-cargo clippy --all -- -D warnings
+cargo test --all --all-features -- --show-output
+cargo clippy --all -- -D warnings              # shipped configuration
+cargo clippy --all --all-features -- -D warnings
 cargo fmt --all -- --check
+python3 -m unittest scripts/test_live_2fa.py   # live-2FA harness unit tests
 ```
+
+`--all-features` enables `live-2fa-test`, which gates the `undoc live2fa-login`
+probe used by `scripts/live_2fa.py`. It is never enabled in a release build — see
+[`docs/LIVE_2FA_TEST.md`](docs/LIVE_2FA_TEST.md).
 
 ## Project Structure
 
