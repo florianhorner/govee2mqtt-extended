@@ -1,5 +1,7 @@
 #![allow(unused)]
-use crate::cache::{cache_get, CacheComputeResult, CacheGetOptions, NoCacheError};
+use crate::cache::{
+    cache_get, cache_get_inner, CacheComputeResult, CacheGetOptions, NoCacheError, CACHE,
+};
 use crate::lan_api::{boolean_int, truthy};
 use crate::opt_env_var;
 use crate::platform_api::{
@@ -11,6 +13,7 @@ use reqwest::Method;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
+use std::future::Future;
 use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
@@ -22,6 +25,13 @@ const HALF_DAY: Duration = Duration::from_secs(3600 * 12);
 const ONE_DAY: Duration = Duration::from_secs(86400);
 const ONE_WEEK: Duration = Duration::from_secs(86400 * 7);
 const FIFTEEN_MINS: Duration = Duration::from_secs(60 * 15);
+
+/// Cap on the 2FA verification response we will buffer or quote back in an
+/// error. Govee's real response is a few dozen bytes; anything larger is a
+/// proxy error page or a captive portal, and there is no reason to hold it in
+/// memory or copy it into the addon log. Only enforced when the response
+/// declares a Content-Length; a chunked response is still read in full.
+const MAX_VERIFICATION_BODY_BYTES: usize = 64 * 1024;
 
 /// Some data is not meant for human eyes except in very unusual circumstances.
 #[derive(Deserialize, Serialize, Clone)]
@@ -65,13 +75,7 @@ fn classify_login_status(body_bytes: &[u8]) -> Option<u64> {
         .and_then(|v| v.get("status").and_then(|s| s.as_u64()))
 }
 
-/// Normalize a user-supplied 2FA code: strip surrounding whitespace and treat
-/// an empty result as "no code provided." Govee codes are 6 digits with no
-/// padding, but users routinely paste from email with trailing newlines or
-/// surrounding spaces; sending those verbatim trips status 455 with a
-/// misleading "code expired" message, which is a bad UX. Handling here keeps
-/// the trim policy in one place (vs scattered across CLI/env/HA-config code
-/// paths).
+/// Trim whitespace from a pasted 2FA code and treat an empty value as unset.
 fn normalize_2fa_code(raw: Option<String>) -> Option<String> {
     raw.and_then(|s| {
         let trimmed = s.trim();
@@ -98,6 +102,62 @@ fn classify_login_http_error(status_code: u16, message: String) -> anyhow::Error
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+struct TwoFactorLoginError {
+    status: u64,
+    code_was_set: bool,
+    message: &'static str,
+}
+
+/// A verification request that failed *without* proving the email was not sent:
+/// the request timed out, or the response could not be read after Govee had
+/// already accepted it. Govee may well have delivered the code anyway, so the
+/// caller applies the 15-minute suppression window regardless. Sending a second
+/// email on every retry is a worse failure than making the user wait.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct VerificationDeliveryUnknown(String);
+
+/// Decide whether a transport failure leaves the delivery outcome unknown.
+///
+/// `sending` a request that never completed means Govee never saw it, *unless*
+/// it timed out — a timeout only tells us we stopped waiting. Once a status
+/// line has arrived Govee has processed the request, so any later failure
+/// (truncated body, decode error) is also unknown rather than a proven no-send.
+fn classify_verification_transport_error(
+    err: reqwest::Error,
+    delivery_unknown: bool,
+    context: &str,
+) -> anyhow::Error {
+    let message = format!("{context}: {err}");
+    if delivery_unknown || err.is_timeout() {
+        return VerificationDeliveryUnknown(message).into();
+    }
+    anyhow::anyhow!(message)
+}
+
+/// Truncate a response body before it reaches a log line or an error message.
+fn truncate_body_for_diagnostics(body_bytes: &[u8]) -> String {
+    const MAX_QUOTED: usize = 512;
+    let text = String::from_utf8_lossy(body_bytes);
+    match text.char_indices().nth(MAX_QUOTED) {
+        Some((cut, _)) => format!("{}… ({} bytes total)", &text[..cut], body_bytes.len()),
+        None => text.into_owned(),
+    }
+}
+
+/// Extract only the non-secret 2FA state from a login error: the status and
+/// whether a code was configured, never the message or any credential. The
+/// user-facing error stays wrapped in `NoCacheError`, preserving the login
+/// cache-bypass contract.
+#[cfg(test)]
+pub(crate) fn classify_2fa_login_error(err: &anyhow::Error) -> Option<(u64, bool)> {
+    let no_cache = err.downcast_ref::<NoCacheError>()?;
+    let two_factor = no_cache.0.downcast_ref::<TwoFactorLoginError>()?;
+    Some((two_factor.status, two_factor.code_was_set))
+}
+
 /// Build the right NoCacheError for a Govee login response status, or None if
 /// the status is not a 2FA condition. Pulled out of `login_account_impl` so
 /// the user-facing messaging can be unit-tested without an HTTP mock.
@@ -105,26 +165,56 @@ fn build_2fa_error(status: u64, code_was_set: bool) -> Option<NoCacheError> {
     match status {
         454 => {
             let msg = if code_was_set {
-                "Govee 2FA verification failed (status 454 returned despite \
-                 a code being supplied). The code may have expired (~15 min \
-                 validity) or be incorrect. Generate a fresh code by signing \
-                 in to the Govee mobile app, update govee_2fa_code, and \
-                 restart the addon."
+                "Govee rejected the configured 2FA code with status 454. The \
+                 code may be incorrect, expired, or from another login. Clear \
+                 govee_2fa_code (or GOVEE_2FA_CODE), then restart without a \
+                 code to request another email."
             } else {
-                "Govee account requires 2FA verification. Sign in to the \
-                 Govee mobile app to trigger a verification email, then set \
-                 govee_2fa_code in the addon configuration (or the \
-                 GOVEE_2FA_CODE environment variable) and restart. The code \
-                 is valid for approximately 15 minutes."
+                "Govee requires 2FA verification. Govee2MQTT requested a code \
+                 by email. Set govee_2fa_code in the add-on configuration (or \
+                 GOVEE_2FA_CODE) and restart within about 15 minutes."
             };
-            Some(NoCacheError(anyhow::anyhow!("{msg}")))
+            Some(NoCacheError(
+                TwoFactorLoginError {
+                    status,
+                    code_was_set,
+                    message: msg,
+                }
+                .into(),
+            ))
         }
-        455 => Some(NoCacheError(anyhow::anyhow!(
-            "Govee 2FA verification code was rejected as invalid or expired \
-             (status 455). Generate a fresh code via the Govee mobile app, \
-             update govee_2fa_code, and restart."
-        ))),
+        455 => {
+            let msg = if code_was_set {
+                "Govee rejected the configured 2FA code as invalid or expired \
+                 (status 455). It may be from another login. Clear \
+                 govee_2fa_code (or GOVEE_2FA_CODE), then restart without a \
+                 code to request another email."
+            } else {
+                "Govee returned status 455 with no configured 2FA code. \
+                 Restart without a code to retry login. If this continues, \
+                 check the Govee account credentials."
+            };
+            Some(NoCacheError(
+                TwoFactorLoginError {
+                    status,
+                    code_was_set,
+                    message: msg,
+                }
+                .into(),
+            ))
+        }
         _ => None,
+    }
+}
+
+/// Validate the body because Govee may return HTTP 200 for a failed request.
+fn validate_2fa_verification_response(body_bytes: &[u8]) -> anyhow::Result<()> {
+    match classify_login_status(body_bytes) {
+        Some(200) => Ok(()),
+        Some(status) => {
+            anyhow::bail!("Govee 2FA verification request failed with status {status}")
+        }
+        None => anyhow::bail!("Govee 2FA verification response has no numeric status"),
     }
 }
 
@@ -156,10 +246,10 @@ pub struct UndocApiArguments {
     #[arg(long, global = true)]
     pub govee_password: Option<String>,
 
-    /// One-time verification code from Govee. Required when the account has 2FA
-    /// enabled and login returns status 454. Trigger a fresh code by signing in
-    /// to the Govee mobile app, paste it here, and restart the addon. The code
-    /// is valid for ~15 minutes. If not passed, read from GOVEE_2FA_CODE.
+    /// Verification code emailed by Govee. Leave unset on first start.
+    /// On status 454, Govee2MQTT requests a code. Set it and restart within
+    /// about 15 minutes. If Govee rejects it, clear it and restart without a
+    /// code to request another. Defaults to GOVEE_2FA_CODE.
     #[arg(long, global = true)]
     pub govee_2fa_code: Option<String>,
 
@@ -233,8 +323,7 @@ pub struct GoveeUndocumentedApi {
     /// the login request body when the account has two-factor enabled. The code
     /// is config-driven: the addon reads it from `govee_2fa_code` / GOVEE_2FA_CODE
     /// at startup. After a successful login it is cleared so it is not replayed on
-    /// subsequent token refreshes; if Govee later requires 2FA again the addon
-    /// exits with status 455 and the user restarts with a fresh code.
+    /// subsequent token refreshes. A later 2FA challenge requires another code.
     code: std::sync::Mutex<Option<String>>,
     client_id: String,
 }
@@ -267,8 +356,8 @@ impl GoveeUndocumentedApi {
     }
 
     /// Builder-style setter for the 2FA verification code. Pass `None` if 2FA is
-    /// not enabled on the account; pass `Some(code)` after an earlier login
-    /// returned status 454 and the user has retrieved the code from email.
+    /// not enabled on the account; pass `Some(code)` after status 454 triggers an
+    /// email request.
     ///
     /// The code is normalized: surrounding whitespace is stripped and an empty
     /// result is treated as `None`. This means `with_code(Some(""))` and
@@ -347,6 +436,201 @@ impl GoveeUndocumentedApi {
         body
     }
 
+    /// Build the request separately so tests can inspect it without sending it.
+    fn build_2fa_request(&self, client: &reqwest::Client) -> reqwest::RequestBuilder {
+        client
+            .request(
+                Method::POST,
+                "https://app2.govee.com/account/rest/account/v1/verification",
+            )
+            .header("appVersion", APP_VERSION)
+            .header("clientId", &self.client_id)
+            .header("clientType", "1")
+            .header("iotVersion", "0")
+            .header("timestamp", ms_timestamp())
+            .header("User-Agent", user_agent())
+            .json(&json!({
+                "type": 8,
+                "email": self.email,
+            }))
+    }
+
+    async fn request_2fa_code_impl(&self) -> anyhow::Result<()> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .context("building the Govee 2FA verification HTTP client")?;
+        let response = self
+            .build_2fa_request(&client)
+            .send()
+            .await
+            .map_err(|err| {
+                classify_verification_transport_error(
+                    err,
+                    false,
+                    "requesting a Govee 2FA verification code",
+                )
+            })?;
+
+        let url = response.url().clone();
+        let status = response.status();
+
+        if let Some(length) = response.content_length() {
+            if length > MAX_VERIFICATION_BODY_BYTES as u64 {
+                // Govee accepted the request, so we cannot claim nothing was
+                // sent -- but we will not buffer the body to find out.
+                return Err(VerificationDeliveryUnknown(format!(
+                    "request {url} status {} returned {length} bytes, over the \
+                     {MAX_VERIFICATION_BODY_BYTES} byte limit",
+                    status.as_u16()
+                ))
+                .into());
+            }
+        }
+
+        // Past this point Govee has already processed the request, so every
+        // remaining failure leaves delivery unknown rather than disproven.
+        let body_bytes = response.bytes().await.map_err(|err| {
+            classify_verification_transport_error(
+                err,
+                true,
+                &format!(
+                    "reading the response body of request {url} status {}",
+                    status.as_u16()
+                ),
+            )
+        })?;
+
+        if !status.is_success() {
+            anyhow::bail!(
+                "request {url} status {}: {}. Response body: {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or(""),
+                truncate_body_for_diagnostics(&body_bytes)
+            );
+        }
+
+        validate_2fa_verification_response(&body_bytes)
+    }
+
+    /// Derived from the *lowercased* email, unlike `client_id`, which hashes the
+    /// address exactly as typed -- so `User@x.com` and `user@x.com` produce two
+    /// different ids and would each get their own suppression window.
+    ///
+    /// Lowercasing `client_id` itself is not an option: Govee treats it as the
+    /// device identity, so changing how it is derived would hand every existing
+    /// installation a new device on upgrade and could re-trigger 2FA for people
+    /// who have no problem today.
+    ///
+    /// Hashed rather than holding the address in plain text, because this key is
+    /// stored in the on-disk cache and appears in error messages.
+    fn verification_request_cache_key(&self) -> String {
+        let id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, self.email.to_lowercase().as_bytes());
+        format!("2fa-verification-request-{}", id.simple())
+    }
+
+    fn invalidate_2fa_request_cache(&self, cache: &sqlite_cache::Cache) -> anyhow::Result<()> {
+        let cache_key = self.verification_request_cache_key();
+        cache
+            .topic("undoc-api")
+            .context("opening the undocumented API cache for 2FA request invalidation")?
+            .delete(&cache_key)
+            .with_context(|| {
+                // Key, not the raw account address: this string reaches the log.
+                format!("invalidating the cached Govee 2FA verification request {cache_key}")
+            })?;
+        Ok(())
+    }
+
+    /// Suppress duplicate emails for one account for 15 minutes.
+    ///
+    /// Best-effort, not a lock: `cache_get_inner` builds a fresh `Topic` (and so
+    /// a fresh per-key listener map) on every call, so two concurrent logins
+    /// could both miss the marker. Not reachable today -- initial discovery in
+    /// `serve` is sequential and bails before the periodic task is spawned.
+    async fn request_2fa_code_cached<Fut>(
+        &self,
+        cache: &sqlite_cache::Cache,
+        request: Fut,
+    ) -> anyhow::Result<()>
+    where
+        Fut: Future<Output = anyhow::Result<()>>,
+    {
+        let cache_key = self.verification_request_cache_key();
+        let _: String = cache_get_inner(
+            cache,
+            CacheGetOptions {
+                topic: "undoc-api",
+                key: &cache_key,
+                soft_ttl: FIFTEEN_MINS,
+                hard_ttl: FIFTEEN_MINS,
+                negative_ttl: Duration::from_secs(10),
+                allow_stale: false,
+            },
+            async {
+                log::info!("Requesting a Govee 2FA verification code");
+                match request.await {
+                    Ok(()) => Ok(CacheComputeResult::Value(ms_timestamp())),
+                    // Outcome unknown: Govee may have sent the mail even though
+                    // we never saw a clean response. Claim the window anyway.
+                    // Retrying would put a second code in the user's inbox on
+                    // every restart, and only the newest one works.
+                    Err(err) if err.downcast_ref::<VerificationDeliveryUnknown>().is_some() => {
+                        log::warn!(
+                            "Govee 2FA verification request outcome unknown, \
+                             assuming the code was sent: {err:#}"
+                        );
+                        Ok(CacheComputeResult::Value(ms_timestamp()))
+                    }
+                    // Proven failure: nothing was sent. Let this land in the
+                    // negative cache so an outage is retried on a bounded
+                    // schedule rather than on every single login.
+                    Err(err) => Err(err),
+                }
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Request email on status 454 with no code. A rejected configured code
+    /// clears the marker so the next no-code attempt can send another email.
+    async fn handle_2fa_status<Fut>(
+        &self,
+        cache: &sqlite_cache::Cache,
+        status: u64,
+        request_code: Fut,
+    ) -> anyhow::Result<Option<NoCacheError>>
+    where
+        Fut: Future<Output = anyhow::Result<()>>,
+    {
+        let code_was_set = self
+            .code
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        if matches!(status, 454 | 455) && code_was_set {
+            self.invalidate_2fa_request_cache(cache)
+                .map_err(|err| anyhow::Error::from(NoCacheError(err)))?;
+        }
+        if status == 454 && !code_was_set {
+            // A failed request must never replace the 454 guidance. serve.rs
+            // appends ISSUE_76_EXPLANATION to whatever surfaces here, and that
+            // text tells the user to remove their Govee credentials and drop to
+            // LAN-only -- ruinous advice for someone who only needed to paste a
+            // code. Log the transport failure and fall through, so the message
+            // the user actually reads always names govee_2fa_code.
+            if let Err(err) = request_code.await {
+                log::warn!(
+                    "Could not request a Govee 2FA verification code: {err:#}. \
+                     Reporting the 2FA requirement anyway so the configuration \
+                     steps stay visible."
+                );
+            }
+        }
+        Ok(build_2fa_error(status, code_was_set))
+    }
+
     async fn login_account_impl(&self) -> anyhow::Result<CacheComputeResult<LoginAccountResponse>> {
         let body = self.build_login_body();
 
@@ -377,13 +661,12 @@ impl GoveeUndocumentedApi {
         let body_bytes = response.bytes().await?;
 
         if let Some(api_status) = classify_login_status(&body_bytes) {
-            if let Some(err) = build_2fa_error(
-                api_status,
-                self.code
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .is_some(),
-            ) {
+            let cache = CACHE.load();
+            let request_code = self.request_2fa_code_cached(&cache, self.request_2fa_code_impl());
+            if let Some(err) = self
+                .handle_2fa_status(&cache, api_status, request_code)
+                .await?
+            {
                 // Defense-in-depth: clear any pre-existing entry under this key
                 // before bailing. The caller's `cache_get` already skips the
                 // negative-cache write because the error wraps NoCacheError, but
@@ -1124,6 +1407,21 @@ pub fn embedded_json<'de, T: DeserializeOwned, D: serde::de::Deserializer<'de>>(
 mod test {
     use super::*;
     use crate::platform_api::from_json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn fresh_cache() -> sqlite_cache::Cache {
+        let connection = sqlite_cache::rusqlite::Connection::open_in_memory()
+            .expect("open in-memory SQLite connection");
+        sqlite_cache::Cache::new(
+            sqlite_cache::CacheConfig {
+                flush_gc_ratio: 1024,
+                flush_interval: Duration::from_secs(900),
+                max_ttl: None,
+            },
+            connection,
+        )
+        .expect("create in-memory cache")
+    }
 
     #[test]
     fn get_device_scenes() {
@@ -1199,6 +1497,38 @@ mod test {
     }
 
     #[test]
+    fn verification_request_has_expected_endpoint_client_id_and_body() {
+        let api = GoveeUndocumentedApi::new("a@b.com", "pw");
+        let request = api
+            .build_2fa_request(&reqwest::Client::new())
+            .build()
+            .expect("build verification request");
+
+        assert_eq!(request.method(), Method::POST);
+        assert_eq!(
+            request.url().as_str(),
+            "https://app2.govee.com/account/rest/account/v1/verification"
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("clientId")
+                .expect("clientId header")
+                .to_str()
+                .expect("clientId is valid header text"),
+            api.client_id
+        );
+
+        let body_bytes = request
+            .body()
+            .and_then(|body| body.as_bytes())
+            .expect("JSON request body");
+        let body: JsonValue =
+            serde_json::from_slice(body_bytes).expect("parse verification request body");
+        assert_eq!(body, json!({"type": 8, "email": "a@b.com"}));
+    }
+
+    #[test]
     fn classify_454() {
         assert_eq!(
             classify_login_status(br#"{"status":454,"message":"need 2FA"}"#),
@@ -1227,6 +1557,290 @@ mod test {
     #[test]
     fn classify_missing_status_returns_none() {
         assert_eq!(classify_login_status(br#"{"message":"hi"}"#), None);
+    }
+
+    #[test]
+    fn verification_response_accepts_api_status_200() {
+        validate_2fa_verification_response(br#"{"status":200}"#)
+            .expect("status 200 must be accepted");
+    }
+
+    #[test]
+    fn verification_response_rejects_non_200_api_status() {
+        let err = validate_2fa_verification_response(br#"{"status":500,"message":"no"}"#)
+            .expect_err("non-200 API status must fail");
+        assert!(format!("{err:#}").contains("status 500"));
+    }
+
+    #[test]
+    fn verification_response_rejects_missing_or_non_numeric_api_status() {
+        for body in [
+            br#"{"message":"ok"}"#.as_slice(),
+            br#"{"status":"200"}"#.as_slice(),
+            b"<html>unexpected response</html>".as_slice(),
+        ] {
+            let err = validate_2fa_verification_response(body)
+                .expect_err("invalid verification response must fail");
+            assert!(format!("{err:#}").contains("no numeric status"));
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_454_retries_request_one_code_per_account() {
+        let cache = fresh_cache();
+        let requests = AtomicUsize::new(0);
+        let api = GoveeUndocumentedApi::new("a@b.com", "pw");
+
+        for _ in 0..2 {
+            let request = api.request_2fa_code_cached(&cache, async {
+                requests.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), anyhow::Error>(())
+            });
+            let err = api
+                .handle_2fa_status(&cache, 454, request)
+                .await
+                .expect("verification request succeeds")
+                .expect("454 produces a user-facing error");
+            assert!(format!("{}", err.0).contains("requested a code by email"));
+        }
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "repeated 454 retries must not send duplicate emails"
+        );
+
+        let other_api = GoveeUndocumentedApi::new("other@example.com", "pw");
+        let request = other_api.request_2fa_code_cached(&cache, async {
+            requests.fetch_add(1, Ordering::SeqCst);
+            Ok::<(), anyhow::Error>(())
+        });
+        other_api
+            .handle_2fa_status(&cache, 454, request)
+            .await
+            .expect("second account verification request succeeds")
+            .expect("454 produces a user-facing error");
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            2,
+            "a different account must use a different request cache entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_code_paths_do_not_request_another_code() {
+        let cache = fresh_cache();
+        let requests = AtomicUsize::new(0);
+        let api = GoveeUndocumentedApi::new("a@b.com", "pw").with_code(Some("1234".to_string()));
+
+        for status in [454, 455] {
+            let err = api
+                .handle_2fa_status(&cache, status, async {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    Ok::<(), anyhow::Error>(())
+                })
+                .await
+                .expect("configured-code status handling succeeds")
+                .expect("2FA status produces a user-facing error");
+            assert!(format!("{}", err.0).contains("Clear govee_2fa_code"));
+        }
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            0,
+            "a rejected configured code must not trigger a replacement email"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_configured_code_allows_one_fresh_request_for_454_and_455() {
+        for rejected_status in [454, 455] {
+            let cache = fresh_cache();
+            let requests = AtomicUsize::new(0);
+            let unexpected_requests = AtomicUsize::new(0);
+            let no_code_api = GoveeUndocumentedApi::new("a@b.com", "pw");
+
+            let initial_request = no_code_api.request_2fa_code_cached(&cache, async {
+                requests.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), anyhow::Error>(())
+            });
+            no_code_api
+                .handle_2fa_status(&cache, 454, initial_request)
+                .await
+                .expect("initial verification request succeeds")
+                .expect("454 produces a user-facing error");
+            assert_eq!(requests.load(Ordering::SeqCst), 1);
+
+            let configured_api =
+                GoveeUndocumentedApi::new("a@b.com", "pw").with_code(Some("1234".to_string()));
+            configured_api
+                .handle_2fa_status(&cache, rejected_status, async {
+                    unexpected_requests.fetch_add(1, Ordering::SeqCst);
+                    Ok::<(), anyhow::Error>(())
+                })
+                .await
+                .expect("rejected configured-code handling succeeds")
+                .expect("rejected 2FA status produces a user-facing error");
+            assert_eq!(
+                unexpected_requests.load(Ordering::SeqCst),
+                0,
+                "a rejected login must not send a replacement email"
+            );
+
+            for _ in 0..2 {
+                let fresh_request = no_code_api.request_2fa_code_cached(&cache, async {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    Ok::<(), anyhow::Error>(())
+                });
+                no_code_api
+                    .handle_2fa_status(&cache, 454, fresh_request)
+                    .await
+                    .expect("fresh verification request succeeds")
+                    .expect("454 produces a user-facing error");
+                assert_eq!(
+                    requests.load(Ordering::SeqCst),
+                    2,
+                    "first no-code retry must send once; second must use the cache"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn statuses_other_than_454_do_not_request_a_code() {
+        let cache = fresh_cache();
+        let requests = AtomicUsize::new(0);
+        let api = GoveeUndocumentedApi::new("a@b.com", "pw");
+
+        for status in [200, 455, 500] {
+            api.handle_2fa_status(&cache, status, async {
+                requests.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), anyhow::Error>(())
+            })
+            .await
+            .expect("status handling succeeds");
+        }
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            0,
+            "only status 454 without a configured code may request an email"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_verification_request_still_reports_actionable_2fa_guidance() {
+        let cache = fresh_cache();
+        let requests = AtomicUsize::new(0);
+        let api = GoveeUndocumentedApi::new("a@b.com", "pw");
+
+        let request = api.request_2fa_code_cached(&cache, async {
+            requests.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(anyhow::anyhow!("simulated verification request failure"))
+        });
+        let err = api
+            .handle_2fa_status(&cache, 454, request)
+            .await
+            .expect("a failed code request must not abort 2FA reporting")
+            .expect("454 produces a user-facing error");
+        let msg = format!("{}", err.0);
+        assert!(
+            msg.contains("govee_2fa_code"),
+            "the user must still be told which setting to fill in: {msg}"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+
+        // A proven failure lands in the negative cache, so an outage is not
+        // re-hammered on every login.
+        let retry = api.request_2fa_code_cached(&cache, async {
+            requests.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(anyhow::anyhow!("simulated verification request failure"))
+        });
+        api.handle_2fa_status(&cache, 454, retry)
+            .await
+            .expect("a failed code request must not abort 2FA reporting")
+            .expect("454 produces a user-facing error");
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "a proven request failure must be negatively cached, not retried at once"
+        );
+    }
+
+    /// A request whose outcome we never learned (timeout, unreadable response)
+    /// must claim the suppression window anyway. Retrying would put a second
+    /// code in the user's inbox on every restart, and only the newest works.
+    #[tokio::test]
+    async fn unknown_delivery_outcome_claims_the_suppression_window() {
+        let cache = fresh_cache();
+        let requests = AtomicUsize::new(0);
+        let api = GoveeUndocumentedApi::new("a@b.com", "pw");
+
+        for _ in 0..2 {
+            let request = api.request_2fa_code_cached(&cache, async {
+                requests.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(VerificationDeliveryUnknown("simulated timeout".to_string()).into())
+            });
+            api.handle_2fa_status(&cache, 454, request)
+                .await
+                .expect("an unknown outcome must not abort 2FA reporting")
+                .expect("454 produces a user-facing error");
+        }
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "an unknown outcome must suppress the next request like a success"
+        );
+    }
+
+    /// F13: the defensive wrap in handle_2fa_status is only reachable when a
+    /// caller passes a future that did not already go through
+    /// request_2fa_code_cached. Exercise it directly so a future caller cannot
+    /// silently lose the guidance.
+    #[tokio::test]
+    async fn raw_request_error_still_yields_the_2fa_message() {
+        let cache = fresh_cache();
+        let api = GoveeUndocumentedApi::new("a@b.com", "pw");
+
+        let err = api
+            .handle_2fa_status(&cache, 454, async {
+                Err::<(), _>(anyhow::anyhow!("unwrapped transport failure"))
+            })
+            .await
+            .expect("a raw request error must not abort 2FA reporting")
+            .expect("454 produces a user-facing error");
+        assert!(format!("{}", err.0).contains("govee_2fa_code"));
+    }
+
+    #[test]
+    fn oversized_response_bodies_are_truncated_before_logging() {
+        let body = vec![b'x'; 4096];
+        let quoted = truncate_body_for_diagnostics(&body);
+        assert!(
+            quoted.len() < 700,
+            "body must be truncated: {} chars",
+            quoted.len()
+        );
+        assert!(quoted.contains("4096 bytes total"));
+        assert_eq!(truncate_body_for_diagnostics(b"short"), "short");
+    }
+
+    #[test]
+    fn verification_cache_key_ignores_email_case() {
+        let lower = GoveeUndocumentedApi::new("user@example.com", "pw");
+        let upper = GoveeUndocumentedApi::new("User@Example.com", "pw");
+        assert_eq!(
+            lower.verification_request_cache_key(),
+            upper.verification_request_cache_key(),
+            "case variants of one account must share a suppression window"
+        );
+        assert_ne!(
+            lower.client_id, upper.client_id,
+            "client_id derivation must stay untouched -- it is Govee's device identity"
+        );
+        // The key lands in the on-disk cache and in error messages.
+        let key = lower.verification_request_cache_key();
+        assert!(
+            !key.contains("user@") && !key.contains("example.com"),
+            "the cache key must not carry the account address in plain text: {key}"
+        );
     }
 
     /// Load-bearing test for the cache-bypass contract: a NoCacheError wrapped
@@ -1331,12 +1945,16 @@ mod test {
     }
 
     #[test]
-    fn build_2fa_error_454_no_code_mentions_mobile_app() {
+    fn build_2fa_error_454_no_code_confirms_email_request() {
         let err = build_2fa_error(454, false).expect("454 with no code must produce error");
         let msg = format!("{}", err.0);
         assert!(
-            msg.contains("Govee mobile app"),
-            "user must be told to use mobile app: {msg}"
+            msg.contains("requested a code by email"),
+            "message must confirm the email request: {msg}"
+        );
+        assert!(
+            !msg.contains("mobile app"),
+            "trusted mobile-app login does not request an email: {msg}"
         );
         assert!(
             msg.contains("govee_2fa_code"),
@@ -1357,8 +1975,8 @@ mod test {
             "user must understand the code itself was rejected: {msg}"
         );
         assert!(
-            msg.contains("Generate a fresh code"),
-            "user must be told to refresh: {msg}"
+            msg.contains("Clear govee_2fa_code") && msg.contains("restart without a code"),
+            "user must be told how to trigger a fresh request: {msg}"
         );
     }
 
@@ -1390,14 +2008,30 @@ mod test {
     /// This is the contract that lets users retry inside the 15-min window.
     #[test]
     fn build_2fa_error_results_downcast_to_no_cache_error_via_anyhow() {
-        for status in [454_u64, 455_u64] {
-            let err = build_2fa_error(status, false).expect("must produce error");
+        for (status, code_was_set) in [
+            (454_u64, false),
+            (454_u64, true),
+            (455_u64, false),
+            (455_u64, true),
+        ] {
+            let err = build_2fa_error(status, code_was_set).expect("must produce error");
             let any_err: anyhow::Error = err.into();
             assert!(
                 any_err.downcast_ref::<NoCacheError>().is_some(),
                 "status {status} error must round-trip as NoCacheError so cache_get bypasses negative cache"
             );
+            assert_eq!(
+                classify_2fa_login_error(&any_err),
+                Some((status, code_was_set)),
+                "the live-test probe must see only status and code state"
+            );
         }
+    }
+
+    #[test]
+    fn unrelated_no_cache_error_is_not_classified_as_two_factor() {
+        let err: anyhow::Error = NoCacheError(anyhow::anyhow!("transient transport error")).into();
+        assert_eq!(classify_2fa_login_error(&err), None);
     }
 
     // --- HTTP error classification (P2.1: 5xx must bypass negative cache) ---
