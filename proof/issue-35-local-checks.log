@@ -1,0 +1,54 @@
+# Local verification log — issue #35 (issue-35, addon CI migration)
+# head: defddf7e010eab36c0a9dd176d6102733f88f35b
+# date: 2026-08-20T23:10:11Z
+# host: macOS 26.5.1, rustc 1.94.1 (e408947bf 2026-03-25), 1.7.12
+#
+# This change touches no Rust source (build.yml / CLAUDE.md / TODOS.md only).
+# The Rust gates are recorded to show the suite is green at this head, not
+# because they exercise the change. The workflow itself can only be
+# exercised by GitHub Actions; see the runtime line in the PR body.
+
+## git diff --stat origin/main
+ .github/workflows/build.yml | 164 +++++++++++++++++++++++++++++++++++---------
+ CLAUDE.md                   |  30 ++++++++
+ TODOS.md                    |  91 ++++++++++++++++++++++++
+ 3 files changed, 252 insertions(+), 33 deletions(-)
+
+## cargo fmt --all -- --check
+Warning: can't set `imports_granularity = Module`, unstable features are only available in nightly channel.
+Warning: can't set `imports_granularity = Module`, unstable features are only available in nightly channel.
+FMT: exit 0
+
+## cargo clippy --all -- -D warnings
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/edinburgh)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.11s
+
+## cargo test --all -- --show-output
+test result: ok. 141 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.84s
+
+## actionlint .github/workflows/build.yml (this branch)
+  .github/workflows/build.yml:104:9: shellcheck reported issue in this script: SC2086:info:4:70: Double quote to prevent globbing and word splitting [shellcheck]
+  .github/workflows/build.yml:154:9: shellcheck reported issue in this script: SC2046:warning:3:3: Quote this to prevent word splitting [shellcheck]
+  .github/workflows/build.yml:154:9: shellcheck reported issue in this script: SC2046:warning:4:3: Quote this to prevent word splitting [shellcheck]
+  findings: 3
+
+## actionlint on the same file at origin/main (baseline)
+  findings: 3
+  => zero new findings introduced by this change; all 3 are pre-existing
+     shellcheck hits in the untouched build/merge jobs.
+
+## release version read-back, simulated against real values
+   (the addon job runs on tag pushes only; test-addon now rehearses this)
+   parsed from committed addon/config.yaml: '2026.08.06-bf75797f'
+   shape check: PASS
+   value scripts/apply-tag.sh derives for HEAD: '2026.08.21-defddf7e'
+   shape check: PASS
+
+## rehearsal block is byte-identical to the release block
+   shared body identical: True
+      ./scripts/apply-tag.sh
+      version="$(sed -n 's/^version: *"\([^"]*\)".*/\1/p' addon/config.yaml)"
+      if ! printf '%s' "$version" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{7,}$'; then
+      echo "::error::addon/config.yaml version is missing or malformed: '$version'"
+      exit 1
+      fi
