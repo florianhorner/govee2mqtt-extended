@@ -75,6 +75,23 @@ has been failing silently. `build-image`'s default identity fixes it by accident
 should still be corrected and the file commented to say CI no longer reads it.
 **Effort:** Small.
 
+## Remaining checkouts still persist git credentials
+**What:** `persist-credentials: false` was added to the `addon` and `test-addon` checkouts
+on PR #49, but the `build` job in `.github/workflows/build.yml` and the job in
+`.github/workflows/pr.yml` still use the `actions/checkout` default (`true`).
+**Why:** zizmor flags it as `artipacked` — the token is written to a file under
+`$RUNNER_TEMP` and stays available to every later step in the job. Those jobs run
+repository-controlled code (`scripts/build-cross.sh`, `cargo build`) and need no
+authenticated git after checkout.
+**Pros:** Consistent posture across the repo; stops CodeRabbit/zizmor re-raising it on
+every PR that touches these files.
+**Cons:** The `build` job is load-bearing (cross-compiles and publishes the standalone
+image). Low risk, but it is a working job being changed for a lint finding, so it wants its
+own PR and its own green run rather than a ride-along.
+**Context:** Raised by CodeRabbit on PR #49 (2026-08-21). Fixed there only for the two jobs
+that PR rewrote; deliberately not extended to jobs the PR did not touch.
+**Effort:** Small.
+
 ## No workflow linting in CI or pre-commit
 **What:** `.pre-commit-config.yaml` runs `cargo fmt`, `cargo clippy`, and a docs-only check. Nothing
 lints `.github/workflows/*.yml`.

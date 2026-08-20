@@ -185,7 +185,12 @@ jobs:
             os: ubuntu-24.04-arm
             image: ghcr.io/florianhorner/govee2mqtt-aarch64
     steps:
+      # persist-credentials: false — nothing here runs an authenticated git
+      # command. apply-tag.sh only reads local history (git show -s), and the
+      # registry login is a separate docker/login-action inside build-image.
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       # The published image tag is the addon/config.yaml version, NOT the git
       # tag name: Supervisor pulls ghcr.io/florianhorner/govee2mqtt-{arch} at
       # whatever version addon/config.yaml declares. apply-tag.sh derives that
@@ -267,7 +272,10 @@ jobs:
             os: ubuntu-24.04-arm
             image: ghcr.io/florianhorner/govee2mqtt-aarch64
     steps:
+      # persist-credentials: false — same rationale as the addon job above.
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       # build-image only logs in when push is true, and addon/Dockerfile pulls
       # ghcr.io/florianhorner/govee2mqtt:latest, so log in explicitly here.
       - name: Login to GHCR
