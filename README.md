@@ -66,7 +66,7 @@ Choose the installation method that matches your Home Assistant setup:
 This fork of [wez/govee2mqtt](https://github.com/wez/govee2mqtt)
 adds device support, stability fixes, and features I needed for my setup:
 
-* **H60B0 (Neon Rope Light 2)** — added as LAN-capable device
+* **H60B0 (Uplighter)** — added as LAN-capable device
 * **Panic hardening (in progress)** — critical `.expect()` panics replaced with graceful error handling
 * **Exit code fix** — silent `exit(0)` changed to `exit(1)` so Home Assistant properly restarts the app on failure
 * **Scene quick-cycle** — Next/Previous buttons and scene info sensor
@@ -75,7 +75,7 @@ adds device support, stability fixes, and features I needed for my setup:
 
 **Upstream status:**
 - ✅ UTF-8 fix — [merged via #606](https://github.com/wez/govee2mqtt/pull/606) on 2026-03-25
-- ⏳ H60B0 device support — [PR #629](https://github.com/wez/govee2mqtt/pull/629) pending
+- ❌ H60B0 (Uplighter) LAN support — [PR #629](https://github.com/wez/govee2mqtt/pull/629) closed unmerged
 - ⏳ Panic hardening + exit code fix — [#617](https://github.com/wez/govee2mqtt/issues/617), [#618](https://github.com/wez/govee2mqtt/issues/618) filed, PRs planned
 - 🆕 Scene quick-cycle buttons + catalog — fork-only feature, not submitted upstream
 
