@@ -1,0 +1,47 @@
+Runtime capture — 5-colour palette write (non-empty a3 ff spill fragment),
+requested in PR #45 review. Same production bridge as the first capture
+(image govee2mqtt:music-palette, GOVEE_MUSIC_PALETTE=true), same H607C
+target (antena, 30:F2:EA:56:E7:59:FB:1D, soft 1.00.09, LAN 192.168.1.244).
+
+Why this capture: the first runtime log was a 2-colour write, whose 12
+palette bytes fit entirely in the first a3 fragment — the a3 ff spill
+carried no colour bytes. Five colours = 15 palette bytes: 12 in the first
+fragment, the 5th colour's 3 bytes in the spill. This exercises the one
+frame the goldens alone had covered.
+
+Command published (mosquitto_pub, same broker the bridge uses):
+  topic:   gv2mqtt/30F2EA56E759FB1D/set-music-palette
+  payload: {"style":"Splash","colors":["#ff0000","#00ff00","#0000ff","#ffff00","#ff00ff"],"sensitivity":80}
+
+Device state before: powered off; flash held profile 0x72 (Rhythm) at
+sensitivity 0x50 from the previous capture.
+
+1. The handler took the LAN path:
+  20:30:39 INFO  govee::service::state] Using LAN API to set antena (30:F2:EA:56:E7:59:FB:1D H607C) music palette
+
+2. The device ACKed both UDP bursts with an AWS IoT ptReal echo carrying
+   the activated profile — a3 41 84, 0x84 being exactly "Splash" in the
+   H607C table (account topic redacted):
+  20:30:40 TRACE govee::service::iot] GA/<account> -> {..."sku":"H607C","device":"30:F2:EA:56:E7:59:FB:1D","cmd":"ptReal",..."op":{"command":["o0GEAAAAAAAAAAAAAAAAAAAAAGY=","MwUAAAAAAAAAAAAAAAAAAAAAADY="]}}
+  20:30:40 DEBUG govee::service::iot] Decoded: Generic([A3, 41, 84, 00, ...]) for H607C
+  20:30:40 DEBUG govee::service::iot] Decoded: Generic([A3, 41, 84, 00, ...]) for H607C   (second burst)
+
+3. The write also provoked a full status push. The aa 05 13 read-back
+   frame moved from the pre-existing 0x72 to profile 0x84 at sensitivity
+   0x50 = 80 — both values from the command under test. A device that
+   rejected the burst over a malformed spill fragment would not have
+   committed the new profile:
+  "state":{"onOff":1,"brightness":55, ... "mode":4, ...}
+  Decoded: Generic([AA, 05, 13, 84, 50, 00, ...]) for H607C
+
+4. Power-off afterwards restored the device to its prior state; the
+   follow-up status push confirms off with the palette state retained:
+  20:30:46 "state":{"onOff":0, ... "mode":4, ...}
+  Decoded: Generic([AA, 05, 13, 84, 50, 00, ...]) for H607C
+
+Honest scope: the echo and read-back prove the device accepted the
+two-fragment burst and committed the profile/sensitivity written by it.
+The five palette colours themselves have no read-back frame and were not
+visually confirmed in this run (nobody was in the room); colour cycling
+for multi-colour palettes was verified visually in earlier at-home tests
+driven by the Python reference this encoder is golden-tested against.

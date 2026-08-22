@@ -11,6 +11,7 @@ mod cache;
 mod commands;
 mod hass_mqtt;
 mod lan_api;
+mod music;
 #[macro_use]
 mod platform_api;
 mod rest_api;

@@ -1,0 +1,17 @@
+== lan music palette — local checks 2026-08-17T10:32:33Z ==
+$ cargo build --all
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 20.10s
+$ cargo test --all
+test result: ok. 148 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.85s
+$ cargo clippy --all -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.88s
+$ cargo fmt --all -- --check
+fmt: clean
+
+== lan music palette — local checks after rebase onto main@1962321 (#44 merged) 2026-08-18 ==
+$ cargo clippy --all -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.06s
+$ cargo test --all
+test result: ok. 148 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.85s
+$ cargo fmt --all -- --check
+fmt: clean

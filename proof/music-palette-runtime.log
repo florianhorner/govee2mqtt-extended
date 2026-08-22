@@ -1,0 +1,34 @@
+Runtime capture — feat/lan-music-palette running in the production
+bridge (image govee2mqtt:music-palette, host with 9 Govee devices,
+AWS IoT + LAN + Platform all active, GOVEE_MUSIC_PALETTE=true).
+
+Target: an H607C floor lamp, LAN-discovered at startup:
+  07:35:59 INFO  govee::commands::serve] antena (30:F2:EA:56:E7:59:FB:1D H607C)
+  07:35:59 INFO  govee::commands::serve]   LAN API: ip=192.168.1.244
+
+Command published (mosquitto_pub, same broker the bridge uses):
+  topic:   gv2mqtt/30F2EA56E759FB1D/set-music-palette
+  payload: {"style":"Rhythm","colors":["#ff0000","#0000ff"],"sensitivity":80}
+
+1. The handler resolved the device and took the LAN path:
+  07:37:16 INFO  govee::service::state] Using LAN API to set antena (30:F2:EA:56:E7:59:FB:1D H607C) music palette
+
+2. The device acknowledged both UDP bursts with an AWS IoT ptReal echo
+   carrying the activated profile — a3 41 <profile>, profile 0x72 being
+   exactly the "Rhythm" id in the H607C table (two pushes, one per burst,
+   ~300ms apart):
+  07:37:16 TRACE govee::service::iot] ... "cmd":"ptReal" ... "op":{"command":["o0FyAAAAAAAAAAAAAAAAAAAAAJA=", ...]}
+  07:37:16 DEBUG govee::service::iot] Decoded: Generic([A3, 41, 72, 00, ...]) for H607C
+  07:37:17 DEBUG govee::service::iot] Decoded: Generic([A3, 41, 72, 00, ...]) for H607C
+
+3. A power-off via the Platform API then provoked a full status push.
+   It reported the device had been in music mode ("mode":4 on this SKU)
+   and its aa 05 13 read-back frame carried profile 0x72 at sensitivity
+   0x50 = 80 — both values written by the command under test:
+  "state":{"onOff":0, ... "mode":4, ...}
+  Decoded: Generic([AA, 05, 13, 72, 50, 00, ...]) for H607C
+
+Cross-check: earlier the same morning, before this image was deployed,
+the same frame read aa 05 13 74 63 (a leftover LAN-configured state),
+and two Platform-API music_setting calls did not move it. The command
+under test did — the read-back tracks the LAN palette path.
