@@ -27,26 +27,6 @@ freshness (more work).
 **Files:** `src/service/http.rs`, `assets/components/devices.js`. Ships with PR2 (cosmetic bundle).
 **Effort:** Small (rename) to medium (real freshness).
 
-## Release add-on may package a binary from the wrong commit — BLOCKS THE NEXT TAG
-**What:** `addon/Dockerfile:2` is `FROM ghcr.io/florianhorner/govee2mqtt:latest`, but the `merge`
-job only applies the `latest` tag when `github.ref == 'refs/heads/main'`
-(`.github/workflows/build.yml`). On a tag push `latest` is not refreshed, so the release add-on
-copies `/app/govee` from whatever main last published — not from the tagged commit.
-**Why:** Silent. The build is green, the image is signed, and the add-on runs; it just may contain
-different code than the tag claims. Everything else in the release path is loud (a bad tag 404s),
-this one is not.
-**Pros:** Removes the whole failure class. Also removes the "copy from a mutable image" property
-that makes the release non-reproducible.
-**Cons:** Touches `addon/Dockerfile`, which the CI migration deliberately left alone. Needs a test
-build on both arches because the `FROM` line changes for the PR path too.
-**Context:** Pre-existing, found during `/plan-eng-review` of the builder migration (2026-08-20) and
-independently by the Codex outside voice, which ranked it P0. Fix shape: `ARG GOVEE_IMAGE` in
-`addon/Dockerfile`, then pass `GOVEE_IMAGE=ghcr.io/florianhorner/govee2mqtt:${{ github.ref_name }}`
-from the `addon` job and `:latest` from `test-addon`. Roughly four lines.
-**Depends on / blocked by:** Nothing. Independent of the builder migration, but **do not cut a
-release tag until this lands** — the migration does not fix it and does not make it worse.
-**Effort:** Small.
-
 ## Nothing validates `addon/config.yaml` after the builder migration
 **What:** The legacy `home-assistant/builder` parsed `addon/config.yaml` (it needed `version` and
 `image`), so a malformed file failed CI. `build-image` never reads it. The release job now only
@@ -106,17 +86,40 @@ either fixing or baselining those first.
 migrated `build.yml` and added no new findings.
 **Effort:** Small, plus the pre-existing findings.
 
+## Pin the add-on source image by digest, not by tag
+**What:** The `addon` job passes `GOVEE_IMAGE=ghcr.io/florianhorner/govee2mqtt:${{ github.ref_name }}`.
+A tag is a mutable pointer, so the pin narrows the window rather than closing it.
+**Why:** If the workflow is re-run, or the tag is force-moved, `merge` can republish
+`govee2mqtt:<tag>` between the two architecture legs of the `addon` matrix. The amd64 and
+aarch64 add-on images could then package different commits, both signed. A digest cannot
+move.
+**Pros:** Closes the remaining window completely and makes the release reproducible from
+the tag. Also lets the add-on verify the source image signature by digest.
+**Cons:** The `merge` job exposes no digest output today, so this means adding a job output
+to the publish job that ships the standalone image. That job is load-bearing and was kept
+out of scope for the pin itself, so it wants its own PR and its own green run.
+**Context:** Raised by the Codex adversarial pass during `/ship` of the `GOVEE_IMAGE` pin
+(2026-08-22), ranked P1 there. Downgraded to P2 here because the tag pin is already a strict
+improvement on the `:latest` it replaced, and the residual needs a re-run or a force-moved
+tag to bite. Two neighbouring findings from the same pass were checked and do not hold:
+branch pushes cannot reach `merge` (`on.push.branches` is `[main]` only), and a tag
+containing `/` cannot match the `20*` trigger glob.
+**Related:** CI never exercises the override path at all, since the `addon` job is tag-only.
+A second `test-addon` build passing a known-existing tag would cover argument forwarding and
+the source-image lookup without waiting for a release.
+**Effort:** Small-medium.
+
 ## Add-on packaging still copies from a separate mutable image
 **What:** The add-on image is assembled by copying `/app/govee` out of a second image
 (`ghcr.io/florianhorner/govee2mqtt`) rather than building from the tagged source.
-**Why:** It makes releases non-reproducible and is the root of the stale-`latest` bug above. Pinning
-the ref treats the symptom; building the add-on from source treats the cause.
+**Why:** The `ARG GOVEE_IMAGE` pin stops a tag build from packaging the wrong commit, but the
+add-on still depends on an image produced by a separate job, so a release cannot be rebuilt from
+the tag alone.
 **Pros:** Reproducible releases, one build path instead of two, no cross-image coupling.
 **Cons:** Real redesign. The Rust binary is cross-compiled by `scripts/build-cross.sh` in the `build`
 job, so the add-on Dockerfile would need the artifact plumbed in — which the existing comment in
 `build.yml` explicitly calls out as unsolved ("if you know how to get the bits above funnelled into
 the hass build below, and it isn't eye-bleedingly-gnarly, please submit a PR").
-**Depends on / blocked by:** Do the `ARG GOVEE_IMAGE` pin first; it is the cheap 80%.
 **Context:** Raised as the strategic finding by the Codex outside voice during `/plan-eng-review`
 (2026-08-20).
 **Effort:** Large.
