@@ -49,11 +49,22 @@ reads it back out of the file. Supervisor pulls
 `ghcr.io/florianhorner/govee2mqtt-{arch}:<that version>`, so publishing anything else
 404s every install and update.
 
-**Before cutting a release tag, check the open `addon/Dockerfile` item in `TODOS.md`.**
-Stage 1 is `FROM ghcr.io/florianhorner/govee2mqtt:latest`, and the `merge` job only
-refreshes `latest` on `main` — so a tag build can package a binary from a different
-commit than the tag. The build is green and the image is signed either way; nothing
-surfaces it. A green `test-addon` is not coverage of the publish path.
+**The add-on copies its binary out of the standalone `govee2mqtt` image, and the release
+job pins which one.** `addon/Dockerfile` takes `ARG GOVEE_IMAGE`, defaulting to
+`:latest`; the `addon` job overrides it with `ghcr.io/florianhorner/govee2mqtt:${{ github.ref_name }}`.
+That pin matters because the `merge` job only refreshes `latest` on `main`, so a tag build
+reading `:latest` would package whatever `main` last published rather than the tagged
+commit. The job passes and the image is signed either way, so nothing flags the mismatch.
+
+The two image families take their tags from different places: the standalone
+`govee2mqtt` image is tagged by `merge` with the **git tag name**, while the add-on
+`govee2mqtt-{arch}` images are tagged with `addon/config.yaml`'s `version:`. They have
+diverged before (git tag `2026.03.22` published `govee2mqtt-amd64:2026.03.22-ba238f5e`), so
+`GOVEE_IMAGE` must use `github.ref_name` and the add-on tag must not.
+
+`test-addon` deliberately does not pass `GOVEE_IMAGE`, so CI still exercises the Dockerfile
+default, which is the path a Supervisor local build takes. A green `test-addon` does not
+cover the publish path, which runs only on a tag.
 
 ## Pre-commit Hooks
 
