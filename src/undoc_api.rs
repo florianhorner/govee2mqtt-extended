@@ -610,8 +610,13 @@ impl GoveeUndocumentedApi {
             .unwrap_or_else(|e| e.into_inner())
             .is_some();
         if matches!(status, 454 | 455) && code_was_set {
-            self.invalidate_2fa_request_cache(cache)
-                .map_err(|err| anyhow::Error::from(NoCacheError(err)))?;
+            if let Err(err) = self.invalidate_2fa_request_cache(cache) {
+                log::warn!(
+                    "Could not invalidate the Govee 2FA request cache: {err:#}. \
+                     Reporting the 2FA requirement anyway so the configuration \
+                     steps stay visible."
+                );
+            }
         }
         if status == 454 && !code_was_set {
             // A failed request must never replace the 454 guidance. serve.rs
