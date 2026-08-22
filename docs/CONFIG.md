@@ -50,13 +50,21 @@ restart without one. This clears the cached email request, so the next no-code
 `clientId` and may fail here with status 455. Use the code requested by
 Govee2MQTT.
 
-**If no email arrives.** The logs will carry a warning starting
-`Could not request a Govee 2FA verification code` — the request itself failed, so
-no code was sent. The 2FA instructions above still apply and `govee_2fa_code` is
-still the setting to fill in; you just need a code from somewhere else. Restart
-to retry the request. Do **not** follow the "remove your Govee API credentials"
-suggestion that appears further down that log message — that disables cloud
-control entirely and is not the fix for a 2FA prompt.
+**If no email arrives.** Two warnings can appear and they mean different things.
+
+`Could not request a Govee 2FA verification code` means the request never
+reached Govee, so no code was sent. Restart to retry it right away.
+
+`Govee 2FA verification request outcome unknown, assuming the code was sent`
+means Govee answered but the reply was unreadable or reported a failure. A code
+may well be sitting in your inbox already. Govee2MQTT will not request another
+one for 15 minutes, because a second code invalidates the first — so restarting
+inside that window will not send a new email.
+
+In both cases the 2FA instructions above still apply and `govee_2fa_code` is
+still the setting to fill in. Do **not** follow the "remove your Govee API
+credentials" suggestion that appears further down that log message — that
+disables cloud control entirely and is not the fix for a 2FA prompt.
 
 > **Note on token refresh:** Govee's session tokens last days, sometimes weeks.
 > When a later login requires 2FA, repeat the steps above. If Home Assistant
