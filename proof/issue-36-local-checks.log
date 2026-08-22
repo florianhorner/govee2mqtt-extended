@@ -84,3 +84,54 @@ Per change, whether the live run exercised it:
   upgrade time may receive one extra email.
 
 LIVE ACCOUNT TEST: OK (with the coverage caveat above)
+
+================================================================
+## Round 3 gates — post-review-bot fixes (commit 9198e9b)
+Run: 2026-08-22T16:25:32Z on merged state (origin/main merged in)
+Scope: delivery-unknown classification for post-status failures,
+       plus cap enforcement during the body read.
+================================================================
+
+$ cargo build --all
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/seville)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.84s
+
+$ cargo fmt --all -- --check
+clean (no output)
+
+$ cargo clippy --all -- -D warnings
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/seville)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.75s
+
+$ cargo test --all
+test result: ok. 157 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.83s
+
+New tests this round:
+test undoc_api::test::verification_body_cap_counts_accumulated_bytes ... ok
+test undoc_api::test::verification_response_rejects_non_200_api_status ... ok
+test undoc_api::test::verification_response_rejects_missing_or_non_numeric_api_status ... ok
+
+### Regression proof
+
+Reverting only the classification change (VerificationDeliveryUnknown ->
+anyhow::bail!) and re-running made both assertions fail:
+  verification_response_rejects_non_200_api_status ... FAILED
+  verification_response_rejects_missing_or_non_numeric_api_status ... FAILED
+Restored: 157 passed, 0 failed.
+
+### Coverage caveat, round 3
+
+NOT exercised against a live Govee account. The live sequence in
+proof/live-2fa/ ran at 0f69de27 and every request there succeeded, so it
+never hit a non-200 API status, an unreadable body, or a chunked reply.
+These paths are covered by unit tests only:
+  - non-200 API status  -> verification_response_rejects_non_200_api_status
+  - no numeric status   -> verification_response_rejects_missing_or_non_numeric_api_status
+  - accumulated-byte cap -> verification_body_cap_counts_accumulated_bytes
+
+The HTTP-non-success path (status.is_success() == false) has NO direct
+test: constructing a reqwest::Response needs an HTTP mock, and this repo
+has no mock server in dev-dependencies. It shares its classification with
+the two tested paths above. Stated here rather than implied as covered.
+
+ROUND 3 GATES: OK
