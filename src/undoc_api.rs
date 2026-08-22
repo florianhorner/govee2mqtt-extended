@@ -235,6 +235,43 @@ fn validate_2fa_verification_response(body_bytes: &[u8]) -> anyhow::Result<()> {
     }
 }
 
+/// Describe a verification response body for an error that will be logged.
+///
+/// The body itself is withheld by default. This string reaches `log::warn!`
+/// verbatim via `request_2fa_code_cached`, the request that produced it carried
+/// the account email (`build_2fa_request`), and an undocumented API may echo
+/// submitted fields back in an error. Truncation bounds the length, not the
+/// content. `GOVEE_LOG_SENSITIVE_DATA` opts in, the same escape hatch
+/// `Redacted<T>` uses.
+fn describe_verification_body(body_bytes: &[u8]) -> String {
+    if should_log_sensitive_data() {
+        format!(
+            "Response body: {}",
+            truncate_body_for_diagnostics(body_bytes)
+        )
+    } else {
+        format!(
+            "Response body withheld ({} bytes); set GOVEE_LOG_SENSITIVE_DATA=1 to log it",
+            body_bytes.len()
+        )
+    }
+}
+
+/// Compose the non-success message as one unit so a test can assert on exactly
+/// what `request_2fa_code_impl` hands to the logger.
+fn verification_http_failure_message(
+    url: &reqwest::Url,
+    status: reqwest::StatusCode,
+    body_bytes: &[u8],
+) -> String {
+    format!(
+        "request {url} status {}: {}. {}",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or(""),
+        describe_verification_body(body_bytes)
+    )
+}
+
 fn user_agent() -> String {
     format!(
         "GoveeHome/{APP_VERSION} (com.ihoment.GoVeeSensor; build:8; iOS 26.5.0) Alamofire/5.11.0"
@@ -535,13 +572,14 @@ impl GoveeUndocumentedApi {
         if !status.is_success() {
             // Govee answered, so this is a reported failure, not a proven
             // non-delivery. Same reasoning as validate_2fa_verification_response.
-            return Err(VerificationDeliveryUnknown(format!(
-                "request {url} status {}: {}. Response body: {}",
-                status.as_u16(),
-                status.canonical_reason().unwrap_or(""),
-                truncate_body_for_diagnostics(&body_bytes)
-            ))
-            .into());
+            return Err(
+                VerificationDeliveryUnknown(verification_http_failure_message(
+                    &url,
+                    status,
+                    &body_bytes,
+                ))
+                .into(),
+            );
         }
 
         validate_2fa_verification_response(&body_bytes)
@@ -1630,6 +1668,47 @@ mod test {
                 "an unreadable response must claim the suppression window: {err:#}"
             );
         }
+    }
+
+    /// The rendered error reaches log::warn! verbatim, and the request that
+    /// produced the body carried the account email. Truncation bounds length,
+    /// not content, so it is not a redaction.
+    #[test]
+    fn verification_body_is_withheld_from_logged_errors_by_default() {
+        let body = br#"{"status":500,"message":"no account for user@example.com"}"#;
+        let described = describe_verification_body(body);
+        assert!(
+            !described.contains("user@example.com"),
+            "the account email must not reach a log line: {described}"
+        );
+        assert!(
+            described.contains(&format!("{} bytes", body.len())),
+            "the byte count must survive for diagnostics: {described}"
+        );
+        assert!(
+            described.contains("GOVEE_LOG_SENSITIVE_DATA"),
+            "the opt-in must be discoverable from the log line: {described}"
+        );
+    }
+
+    /// Asserts on the composed message, not just the leaf helper, so reverting
+    /// the call site to interpolate the body directly fails here.
+    #[test]
+    fn http_failure_message_withholds_the_response_body() {
+        let url =
+            reqwest::Url::parse("https://app2.govee.com/account/rest/account/v1/verification")
+                .expect("static url must parse");
+        let body = br#"{"status":500,"message":"no account for user@example.com"}"#;
+        let msg = verification_http_failure_message(&url, reqwest::StatusCode::BAD_GATEWAY, body);
+        assert!(
+            !msg.contains("user@example.com"),
+            "the account email must not reach the logged error: {msg}"
+        );
+        assert!(msg.contains("502"), "the status must survive: {msg}");
+        assert!(
+            msg.contains(&format!("{} bytes", body.len())),
+            "the byte count must survive: {msg}"
+        );
     }
 
     #[test]

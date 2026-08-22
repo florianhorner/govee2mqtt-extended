@@ -135,3 +135,58 @@ has no mock server in dev-dependencies. It shares its classification with
 the two tested paths above. Stated here rather than implied as covered.
 
 ROUND 3 GATES: OK
+
+================================================================
+## Round 4 — privacy fix (CodeRabbit: do not log the raw body)
+Run: 2026-08-22T17:10:49Z
+================================================================
+
+The leak, traced end to end at e5454ce:
+  src/undoc_api.rs:538-544  non-2xx branch interpolated the response
+                            body into VerificationDeliveryUnknown
+  src/undoc_api.rs:124-126  #[error("{0}")] renders it verbatim
+  src/undoc_api.rs:612-618  log::warn!("...: {err:#}") emits it
+  src/main.rs:141           default filter is Info, so WARN is on
+  addon/run.sh:54-55        RUST_LOG set only when debug_level is set;
+                            addon/config.yaml ships no such option
+  src/undoc_api.rs:457-473  the request posts {"type":8,"email":...},
+                            so an echoed field is the leak shape
+
+Truncation bounds length, not content. It is not redaction.
+
+Provenance: introduced by THIS PR, not inherited.
+  $ git log -S 'truncate_body_for_diagnostics' --oneline -- src/undoc_api.rs
+92165e2 fix(auth): request Govee 2FA verification emails on status 454
+  $ git show origin/main:src/undoc_api.rs | grep -c request_2fa_code_impl
+  0
+0  (origin/main has no verification path at all)
+
+Fix: the body is withheld unless GOVEE_LOG_SENSITIVE_DATA is set, the
+same escape hatch Redacted<T> uses (src/undoc_api.rs:47-53). Status,
+canonical reason and byte count still reach the log.
+
+$ cargo test --all
+test result: ok. 159 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.83s
+
+test undoc_api::test::http_failure_message_withholds_the_response_body ... ok
+test undoc_api::test::verification_body_is_withheld_from_logged_errors_by_default ... ok
+
+### Regression proof
+
+Reverting ONLY the call site (back to inline truncate_body_for_diagnostics)
+and re-running:
+  http_failure_message_withholds_the_response_body ... FAILED
+  test result: FAILED. 158 passed; 1 failed
+Restored: 159 passed, 0 failed.
+
+The test asserts on the COMPOSED message (verification_http_failure_message),
+not only the leaf helper, so a call-site revert cannot stay green.
+
+### Known gap, stated not implied
+
+src/undoc_api.rs:723-726 (login endpoint) logs an UNTRUNCATED
+String::from_utf8_lossy of its response body, and that request carries
+both email and password. It predates this branch (ee0cfb4, 1a0cab2) and
+is NOT fixed here. Filed as separate follow-up scope.
+
+ROUND 4 GATES: OK
