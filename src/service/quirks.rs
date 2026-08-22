@@ -300,7 +300,7 @@ fn load_quirks() -> HashMap<String, Quirk> {
         Quirk::lan_api_capable_light("H6076", FLOOR_LAMP),
         Quirk::lan_api_capable_light("H6078", FLOOR_LAMP),
         Quirk::lan_api_capable_light("H6087", WALL_SCONCE),
-        Quirk::lan_api_capable_light("H60B0", STRIP),
+        Quirk::lan_api_capable_light("H60B0", FLOOR_LAMP),
         Quirk::lan_api_capable_light("H610A", STRIP),
         Quirk::lan_api_capable_light("H610B", STRIP),
         Quirk::lan_api_capable_light("H6117", STRIP),
@@ -349,4 +349,20 @@ fn load_quirks() -> HashMap<String, Quirk> {
 
 pub fn resolve_quirk(sku: &str) -> Option<&'static Quirk> {
     QUIRKS.get(sku)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn h60b0_is_a_lan_capable_floor_lamp() {
+        let Some(quirk) = resolve_quirk("H60B0") else {
+            panic!("H60B0 quirk must be registered");
+        };
+
+        assert_eq!(quirk.device_type, DeviceType::Light);
+        assert_eq!(quirk.icon.as_ref(), FLOOR_LAMP);
+        assert!(quirk.lan_api_capable);
+    }
 }
