@@ -15,6 +15,13 @@ configuration:
     description: >-
       Your Govee account password. Used only to authenticate with
       Govee's servers — never sent anywhere else.
+  govee_2fa_code:
+    name: Govee 2FA Code
+    description: >-
+      Leave blank on first start. If Govee requires 2FA, the add-on
+      requests a code by email. Paste it here and restart within about
+      15 minutes. If Govee rejects it, clear the field and restart
+      without a code to request another.
   govee_api_key:
     name: Govee API Key
     description: >-
@@ -114,7 +121,6 @@ configuration:
       A comma-separated list of effect names to allow (e.g. "Aurora,Rainbow").
       If set, only effects matching these names will be published to MQTT discovery.
       This helps reduce the payload size while still allowing some effects.
-
 
 
 

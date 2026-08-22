@@ -1,0 +1,6 @@
+{
+  "binary": "target/debug/govee",
+  "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+  "schema": 1,
+  "sha256": "81ddac66c5336cfe9e20cc72687e65f2e10cd2622cb0a68015a610cd04b727df"
+}

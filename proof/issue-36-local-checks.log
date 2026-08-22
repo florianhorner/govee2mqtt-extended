@@ -1,0 +1,192 @@
+# Local verification log: issue #36 (2FA email request)
+# base: origin/main
+# date: 2026-08-20
+# host: macOS 26.5.1, rustc 1.94.1 (e408947bf 2026-03-25)
+# live Govee/IMAP account: TESTED (see "Live account test" below)
+# Govee device hardware: NOT TESTED
+
+## cargo build --all
+Finished `dev` profile successfully.
+BUILD: OK
+
+## cargo test --all -- --show-output
+test result: ok. 147 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+TESTS: OK
+
+Issue #36 regression coverage:
+- undoc_api::test::verification_request_has_expected_endpoint_client_id_and_body
+- undoc_api::test::verification_response_rejects_missing_or_non_numeric_api_status
+- undoc_api::test::repeated_454_retries_request_one_code_per_account
+- undoc_api::test::configured_code_paths_do_not_request_another_code
+- undoc_api::test::rejected_configured_code_allows_one_fresh_request_for_454_and_455
+- undoc_api::test::statuses_other_than_454_do_not_request_a_code
+- undoc_api::test::failed_verification_request_still_reports_actionable_2fa_guidance
+- undoc_api::test::unknown_delivery_outcome_claims_the_suppression_window
+- undoc_api::test::raw_request_error_still_yields_the_2fa_message
+- undoc_api::test::verification_cache_key_ignores_email_case
+- undoc_api::test::oversized_response_bodies_are_truncated_before_logging
+- undoc_api::test::build_2fa_error_454_no_code_confirms_email_request
+- undoc_api::test::unrelated_no_cache_error_is_not_classified_as_two_factor
+
+## cargo clippy --all -- -D warnings
+Finished `dev` profile successfully.
+CLIPPY: OK
+
+## cargo fmt --all -- --check
+FMT: OK
+
+## cargo run --quiet -- --help
+Rendered `--govee-2fa-code` help describes the status-454 email request,
+the 15-minute window, and the clear/restart steps. No digit count is
+asserted anywhere in user-facing text (issue #36 reported 4-digit codes).
+CLI HELP: OK
+
+## Live account test
+
+Bundle: `proof/live-2fa/20260819T230631.865433Z-0f69de279e82/`
+
+- Result: PASS (`live_sequence_completed`)
+- Login results: 454, 454, 455, 454, 454, login success
+- Matching emails: 2; all four 30-second no-email windows passed
+- Messages marked read: 0
+- Credential or verification-code occurrences in the bundle: 0
+- Bundle checksums: OK
+- Govee device hardware: NOT TESTED
+
+Two provider facts were established by that run and are encoded in this
+branch: current mail arrives from `no-reply@govee.com` with a four-digit
+code in the HTML body, and this IMAP server returns its highest UID for an
+empty `baseline+1:*` range.
+
+The generator that produced this bundle (`scripts/live_2fa.py`) is NOT part
+of this PR. It lands separately so this change stays reviewable; the bundle
+is retained here because it is the runtime evidence for this PR's claims.
+
+### Coverage caveat
+
+The live sequence ran at commit `0f69de27`. Review fixes landed afterwards.
+Per change, whether the live run exercised it:
+
+- Failed verification request now falls through to the 454 guidance rather
+  than replacing it. NOT exercised live: all four requests succeeded.
+  Covered by failed_verification_request_still_reports_actionable_2fa_guidance.
+- Unknown delivery outcome (timeout, unreadable body) claims the suppression
+  window; proven failures fall to the negative cache. NOT exercised live: no
+  timeouts occurred. Covered by
+  unknown_delivery_outcome_claims_the_suppression_window.
+- Verification response bounded by Content-Length and truncated in
+  diagnostics. NOT exercised live: real responses are a few dozen bytes.
+- Suppression key derived from the lowercased email rather than client_id.
+  This IS the mechanism the live sequence validated. Behaviour is unchanged
+  (one deterministic key per account, still 15 minutes); only the key string
+  differs. One-time upgrade effect: the entry under the old key is orphaned
+  and expires on its own within 15 minutes, so a user who is mid-window at
+  upgrade time may receive one extra email.
+
+LIVE ACCOUNT TEST: OK (with the coverage caveat above)
+
+================================================================
+## Round 3 gates — post-review-bot fixes (commit 9198e9b)
+Run: 2026-08-22T16:25:32Z on merged state (origin/main merged in)
+Scope: delivery-unknown classification for post-status failures,
+       plus cap enforcement during the body read.
+================================================================
+
+$ cargo build --all
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/seville)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.84s
+
+$ cargo fmt --all -- --check
+clean (no output)
+
+$ cargo clippy --all -- -D warnings
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/seville)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.75s
+
+$ cargo test --all
+test result: ok. 157 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.83s
+
+New tests this round:
+test undoc_api::test::verification_body_cap_counts_accumulated_bytes ... ok
+test undoc_api::test::verification_response_rejects_non_200_api_status ... ok
+test undoc_api::test::verification_response_rejects_missing_or_non_numeric_api_status ... ok
+
+### Regression proof
+
+Reverting only the classification change (VerificationDeliveryUnknown ->
+anyhow::bail!) and re-running made both assertions fail:
+  verification_response_rejects_non_200_api_status ... FAILED
+  verification_response_rejects_missing_or_non_numeric_api_status ... FAILED
+Restored: 157 passed, 0 failed.
+
+### Coverage caveat, round 3
+
+NOT exercised against a live Govee account. The live sequence in
+proof/live-2fa/ ran at 0f69de27 and every request there succeeded, so it
+never hit a non-200 API status, an unreadable body, or a chunked reply.
+These paths are covered by unit tests only:
+  - non-200 API status  -> verification_response_rejects_non_200_api_status
+  - no numeric status   -> verification_response_rejects_missing_or_non_numeric_api_status
+  - accumulated-byte cap -> verification_body_cap_counts_accumulated_bytes
+
+The HTTP-non-success path (status.is_success() == false) has NO direct
+test: constructing a reqwest::Response needs an HTTP mock, and this repo
+has no mock server in dev-dependencies. It shares its classification with
+the two tested paths above. Stated here rather than implied as covered.
+
+ROUND 3 GATES: OK
+
+================================================================
+## Round 4 — privacy fix (CodeRabbit: do not log the raw body)
+Run: 2026-08-22T17:10:49Z
+================================================================
+
+The leak, traced end to end at e5454ce:
+  src/undoc_api.rs:538-544  non-2xx branch interpolated the response
+                            body into VerificationDeliveryUnknown
+  src/undoc_api.rs:124-126  #[error("{0}")] renders it verbatim
+  src/undoc_api.rs:612-618  log::warn!("...: {err:#}") emits it
+  src/main.rs:141           default filter is Info, so WARN is on
+  addon/run.sh:54-55        RUST_LOG set only when debug_level is set;
+                            addon/config.yaml ships no such option
+  src/undoc_api.rs:457-473  the request posts {"type":8,"email":...},
+                            so an echoed field is the leak shape
+
+Truncation bounds length, not content. It is not redaction.
+
+Provenance: introduced by THIS PR, not inherited.
+  $ git log -S 'truncate_body_for_diagnostics' --oneline -- src/undoc_api.rs
+92165e2 fix(auth): request Govee 2FA verification emails on status 454
+  $ git show origin/main:src/undoc_api.rs | grep -c request_2fa_code_impl
+  0
+0  (origin/main has no verification path at all)
+
+Fix: the body is withheld unless GOVEE_LOG_SENSITIVE_DATA is set, the
+same escape hatch Redacted<T> uses (src/undoc_api.rs:47-53). Status,
+canonical reason and byte count still reach the log.
+
+$ cargo test --all
+test result: ok. 159 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.83s
+
+test undoc_api::test::http_failure_message_withholds_the_response_body ... ok
+test undoc_api::test::verification_body_is_withheld_from_logged_errors_by_default ... ok
+
+### Regression proof
+
+Reverting ONLY the call site (back to inline truncate_body_for_diagnostics)
+and re-running:
+  http_failure_message_withholds_the_response_body ... FAILED
+  test result: FAILED. 158 passed; 1 failed
+Restored: 159 passed, 0 failed.
+
+The test asserts on the COMPOSED message (verification_http_failure_message),
+not only the leaf helper, so a call-site revert cannot stay green.
+
+### Known gap, stated not implied
+
+src/undoc_api.rs:723-726 (login endpoint) logs an UNTRUNCATED
+String::from_utf8_lossy of its response body, and that request carries
+both email and password. It predates this branch (ee0cfb4, 1a0cab2) and
+is NOT fixed here. Filed as separate follow-up scope.
+
+ROUND 4 GATES: OK
