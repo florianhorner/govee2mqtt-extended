@@ -1,0 +1,12 @@
+{"elapsed_ms":10,"event":"configuration_validated","schema":1,"sequence":1,"time_utc":"2026-08-19T23:03:16Z"}
+{"elapsed_ms":2052,"event":"probe_build_completed","schema":1,"sequence":2,"time_utc":"2026-08-19T23:03:18Z"}
+{"elapsed_ms":2052,"event":"preflight_completed","schema":1,"sequence":3,"time_utc":"2026-08-19T23:03:18Z"}
+{"elapsed_ms":2053,"email_count":0,"event":"mailbox_connect_started","schema":1,"sequence":4,"time_utc":"2026-08-19T23:03:18Z"}
+{"elapsed_ms":4012,"email_count":0,"event":"mailbox_baseline","schema":1,"sequence":5,"time_utc":"2026-08-19T23:03:20Z"}
+{"code_configured":false,"elapsed_ms":4012,"event":"probe_started","probe_number":1,"schema":1,"sequence":6,"time_utc":"2026-08-19T23:03:20Z"}
+{"code_configured":false,"elapsed_ms":5630,"event":"probe_completed","outcome":"two_factor","probe_number":1,"schema":1,"sequence":7,"status":454,"time_utc":"2026-08-19T23:03:21Z"}
+{"elapsed_ms":6297,"email_count":1,"event":"email_observed","message_hash":"5487eaa9810c64c1d42192f9cfa29b08d4252ab75df8a54d614b6149595af16d","schema":1,"sequence":8,"time_utc":"2026-08-19T23:03:22Z"}
+{"code_configured":false,"elapsed_ms":6298,"event":"probe_started","probe_number":2,"schema":1,"sequence":9,"time_utc":"2026-08-19T23:03:22Z"}
+{"code_configured":false,"elapsed_ms":6866,"event":"probe_completed","outcome":"two_factor","probe_number":2,"schema":1,"sequence":10,"status":454,"time_utc":"2026-08-19T23:03:22Z"}
+{"elapsed_ms":13890,"email_count":2,"event":"email_observed","message_hash":"c421b2f4a1f14834585ecac962d977e8eb7c34e3e0189e07c3ffa9ced2048a80","schema":1,"sequence":11,"time_utc":"2026-08-19T23:03:29Z"}
+{"elapsed_ms":14563,"email_count":2,"event":"run_finished","outcome":"fail","probe_number":2,"reason":"unexpected_email_during_quiet_window","schema":1,"sequence":12,"time_utc":"2026-08-19T23:03:30Z"}
