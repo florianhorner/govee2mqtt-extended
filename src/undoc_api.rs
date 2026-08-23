@@ -29,9 +29,15 @@ const FIFTEEN_MINS: Duration = Duration::from_secs(60 * 15);
 /// Cap on the 2FA verification response we will buffer or quote back in an
 /// error. Govee's real response is a few dozen bytes; anything larger is a
 /// proxy error page or a captive portal, and there is no reason to hold it in
-/// memory or copy it into the addon log. Only enforced when the response
-/// declares a Content-Length; a chunked response is still read in full.
+/// memory or copy it into the addon log. Enforced against the declared
+/// Content-Length when there is one, and again as the bytes arrive, so a
+/// chunked response cannot bypass it.
 const MAX_VERIFICATION_BODY_BYTES: usize = 64 * 1024;
+
+/// Split out so the cap is testable without standing up an HTTP server.
+fn exceeds_verification_body_cap(so_far: usize, chunk_len: usize) -> bool {
+    so_far.saturating_add(chunk_len) > MAX_VERIFICATION_BODY_BYTES
+}
 
 /// Some data is not meant for human eyes except in very unusual circumstances.
 #[derive(Deserialize, Serialize, Clone)]
@@ -211,14 +217,62 @@ fn build_2fa_error(status: u64, code_was_set: bool) -> Option<NoCacheError> {
 }
 
 /// Validate the body because Govee may return HTTP 200 for a failed request.
+///
+/// Both failure paths are `VerificationDeliveryUnknown`, not plain errors:
+/// Govee answered, so it received the request, and this undocumented API
+/// publishes no contract for which statuses mean "no email left the building".
+/// Treating a reported failure as proof of non-delivery would send a second
+/// code and invalidate the one the user is currently typing -- a worse outcome
+/// than making them wait out the suppression window.
 fn validate_2fa_verification_response(body_bytes: &[u8]) -> anyhow::Result<()> {
     match classify_login_status(body_bytes) {
         Some(200) => Ok(()),
-        Some(status) => {
-            anyhow::bail!("Govee 2FA verification request failed with status {status}")
-        }
-        None => anyhow::bail!("Govee 2FA verification response has no numeric status"),
+        Some(status) => Err(VerificationDeliveryUnknown(format!(
+            "Govee 2FA verification request failed with status {status}"
+        ))
+        .into()),
+        None => Err(VerificationDeliveryUnknown(
+            "Govee 2FA verification response has no numeric status".to_string(),
+        )
+        .into()),
     }
+}
+
+/// Describe a verification response body for an error that will be logged.
+///
+/// The body itself is withheld by default. This string reaches `log::warn!`
+/// verbatim via `request_2fa_code_cached`, the request that produced it carried
+/// the account email (`build_2fa_request`), and an undocumented API may echo
+/// submitted fields back in an error. Truncation bounds the length, not the
+/// content. `GOVEE_LOG_SENSITIVE_DATA` opts in, the same escape hatch
+/// `Redacted<T>` uses.
+fn describe_verification_body(body_bytes: &[u8]) -> String {
+    if should_log_sensitive_data() {
+        format!(
+            "Response body: {}",
+            truncate_body_for_diagnostics(body_bytes)
+        )
+    } else {
+        format!(
+            "Response body withheld ({} bytes); set GOVEE_LOG_SENSITIVE_DATA=1 to log it",
+            body_bytes.len()
+        )
+    }
+}
+
+/// Compose the non-success message as one unit so a test can assert on exactly
+/// what `request_2fa_code_impl` hands to the logger.
+fn verification_http_failure_message(
+    url: &reqwest::Url,
+    status: reqwest::StatusCode,
+    body_bytes: &[u8],
+) -> String {
+    format!(
+        "request {url} status {}: {}. {}",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or(""),
+        describe_verification_body(body_bytes)
+    )
 }
 
 fn user_agent() -> String {
@@ -463,7 +517,7 @@ impl GoveeUndocumentedApi {
             .timeout(Duration::from_secs(30))
             .build()
             .context("building the Govee 2FA verification HTTP client")?;
-        let response = self
+        let mut response = self
             .build_2fa_request(&client)
             .send()
             .await
@@ -493,7 +547,10 @@ impl GoveeUndocumentedApi {
 
         // Past this point Govee has already processed the request, so every
         // remaining failure leaves delivery unknown rather than disproven.
-        let body_bytes = response.bytes().await.map_err(|err| {
+        let mut body_bytes: Vec<u8> = Vec::new();
+        // Read incrementally: a chunked response declares no Content-Length, so
+        // the check above never sees it and `bytes()` would buffer the lot.
+        while let Some(chunk) = response.chunk().await.map_err(|err| {
             classify_verification_transport_error(
                 err,
                 true,
@@ -502,14 +559,29 @@ impl GoveeUndocumentedApi {
                     status.as_u16()
                 ),
             )
-        })?;
+        })? {
+            if exceeds_verification_body_cap(body_bytes.len(), chunk.len()) {
+                return Err(VerificationDeliveryUnknown(format!(
+                    "request {url} status {} exceeded the \
+                     {MAX_VERIFICATION_BODY_BYTES} byte limit while reading the \
+                     response body",
+                    status.as_u16()
+                ))
+                .into());
+            }
+            body_bytes.extend_from_slice(&chunk);
+        }
 
         if !status.is_success() {
-            anyhow::bail!(
-                "request {url} status {}: {}. Response body: {}",
-                status.as_u16(),
-                status.canonical_reason().unwrap_or(""),
-                truncate_body_for_diagnostics(&body_bytes)
+            // Govee answered, so this is a reported failure, not a proven
+            // non-delivery. Same reasoning as validate_2fa_verification_response.
+            return Err(
+                VerificationDeliveryUnknown(verification_http_failure_message(
+                    &url,
+                    status,
+                    &body_bytes,
+                ))
+                .into(),
             );
         }
 
@@ -613,8 +685,13 @@ impl GoveeUndocumentedApi {
             .unwrap_or_else(|e| e.into_inner())
             .is_some();
         if matches!(status, 454 | 455) && code_was_set {
-            self.invalidate_2fa_request_cache(cache)
-                .map_err(|err| anyhow::Error::from(NoCacheError(err)))?;
+            if let Err(err) = self.invalidate_2fa_request_cache(cache) {
+                log::warn!(
+                    "Could not invalidate the Govee 2FA request cache: {err:#}. \
+                     Reporting the 2FA requirement anyway so the configuration \
+                     steps stay visible."
+                );
+            }
         }
         if status == 454 && !code_was_set {
             // A failed request must never replace the 454 guidance. serve.rs
@@ -1573,6 +1650,10 @@ mod test {
         let err = validate_2fa_verification_response(br#"{"status":500,"message":"no"}"#)
             .expect_err("non-200 API status must fail");
         assert!(format!("{err:#}").contains("status 500"));
+        assert!(
+            err.downcast_ref::<VerificationDeliveryUnknown>().is_some(),
+            "Govee answered, so delivery is unproven, not disproven: {err:#}"
+        );
     }
 
     #[test]
@@ -1585,7 +1666,78 @@ mod test {
             let err = validate_2fa_verification_response(body)
                 .expect_err("invalid verification response must fail");
             assert!(format!("{err:#}").contains("no numeric status"));
+            assert!(
+                err.downcast_ref::<VerificationDeliveryUnknown>().is_some(),
+                "an unreadable response must claim the suppression window: {err:#}"
+            );
         }
+    }
+
+    /// The rendered error reaches log::warn! verbatim, and the request that
+    /// produced the body carried the account email. Truncation bounds length,
+    /// not content, so it is not a redaction.
+    #[test]
+    fn verification_body_is_withheld_from_logged_errors_by_default() {
+        let body = br#"{"status":500,"message":"no account for user@example.com"}"#;
+        let described = describe_verification_body(body);
+        assert!(
+            !described.contains("user@example.com"),
+            "the account email must not reach a log line: {described}"
+        );
+        assert!(
+            described.contains(&format!("{} bytes", body.len())),
+            "the byte count must survive for diagnostics: {described}"
+        );
+        assert!(
+            described.contains("GOVEE_LOG_SENSITIVE_DATA"),
+            "the opt-in must be discoverable from the log line: {described}"
+        );
+    }
+
+    /// Asserts on the composed message, not just the leaf helper, so reverting
+    /// the call site to interpolate the body directly fails here.
+    #[test]
+    fn http_failure_message_withholds_the_response_body() {
+        let url =
+            reqwest::Url::parse("https://app2.govee.com/account/rest/account/v1/verification")
+                .expect("static url must parse");
+        let body = br#"{"status":500,"message":"no account for user@example.com"}"#;
+        let msg = verification_http_failure_message(&url, reqwest::StatusCode::BAD_GATEWAY, body);
+        assert!(
+            !msg.contains("user@example.com"),
+            "the account email must not reach the logged error: {msg}"
+        );
+        assert!(msg.contains("502"), "the status must survive: {msg}");
+        assert!(
+            msg.contains(&format!("{} bytes", body.len())),
+            "the byte count must survive: {msg}"
+        );
+    }
+
+    #[test]
+    fn verification_body_cap_counts_accumulated_bytes() {
+        assert!(!exceeds_verification_body_cap(
+            0,
+            MAX_VERIFICATION_BODY_BYTES
+        ));
+        assert!(exceeds_verification_body_cap(
+            0,
+            MAX_VERIFICATION_BODY_BYTES + 1
+        ));
+        // The chunked case the Content-Length check cannot see: many small
+        // chunks, each far under the cap, that only overflow in aggregate.
+        assert!(!exceeds_verification_body_cap(
+            MAX_VERIFICATION_BODY_BYTES - 1,
+            1
+        ));
+        assert!(exceeds_verification_body_cap(
+            MAX_VERIFICATION_BODY_BYTES,
+            1
+        ));
+        assert!(
+            exceeds_verification_body_cap(usize::MAX, 1),
+            "must not wrap"
+        );
     }
 
     #[tokio::test]

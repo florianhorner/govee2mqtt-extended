@@ -26,7 +26,7 @@ Fixes and features submitted back to [wez/govee2mqtt](https://github.com/wez/gov
 | What | Upstream status | Fork status |
 |------|----------------|-------------|
 | UTF-8 crash fix | [Merged via #606](https://github.com/wez/govee2mqtt/pull/606) | Included since 2026.03.16 |
-| H60B0 device support | [PR #629](https://github.com/wez/govee2mqtt/pull/629) pending | Included since 2026.03.22 |
+| H60B0 (Uplighter) LAN support | [PR #629](https://github.com/wez/govee2mqtt/pull/629) closed unmerged | Included since 2026.03.22 |
 | Panic hardening | [#617](https://github.com/wez/govee2mqtt/issues/617) filed | Included since 2026.03.22 |
 | Exit code fix | [#618](https://github.com/wez/govee2mqtt/issues/618) filed | Included since 2026.03.22 |
 | Scene quick-cycle | Fork-only (not submitted) | Included since 2026.03.26 |
