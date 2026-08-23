@@ -16,7 +16,13 @@ enum SubCommand {
         name: String,
     },
     /// Test-only login probe. Emits only a redacted, machine-readable outcome.
+    ///
+    /// The name is pinned rather than derived. scripts/live_2fa.py invokes it
+    /// as a literal string, so the two are a cross-language contract; leaving
+    /// it to heck's word-splitting would make that contract depend on a
+    /// transitive dependency's casing rules. Asserted by the test below.
     #[cfg(feature = "live-2fa-test")]
+    #[command(name = "live2fa-login")]
     Live2faLogin {},
 }
 
@@ -78,5 +84,35 @@ impl UndocCommand {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "live-2fa-test"))]
+mod test {
+    use clap::CommandFactory;
+
+    /// The probe's subcommand name is a contract between two languages:
+    /// `scripts/live_2fa.py` spawns `undoc live2fa-login` as a literal string.
+    /// Read the harness source rather than restating the name, so the two can
+    /// never drift apart silently -- a rename on either side fails here.
+    #[test]
+    fn probe_subcommand_name_matches_the_harness_invocation() {
+        let rendered: Vec<String> = super::UndocCommand::command()
+            .get_subcommands()
+            .map(|sub| sub.get_name().to_string())
+            .collect();
+
+        let harness =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/live_2fa.py"))
+                .expect("read the live 2FA harness");
+        let invoked = harness
+            .split_once(r#""undoc", ""#)
+            .map(|(_, rest)| rest.split('"').next().expect("closing quote"))
+            .expect("harness invokes a subcommand of `undoc`");
+
+        assert!(
+            rendered.iter().any(|name| name == invoked),
+            "harness runs `undoc {invoked}` but clap renders {rendered:?}"
+        );
     }
 }

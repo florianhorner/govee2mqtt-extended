@@ -6,6 +6,7 @@ Rust project that bridges Govee smart home devices to MQTT / Home Assistant.
 
 ```bash
 cargo build --all
+cargo test --all -- --show-output              # shipped configuration
 cargo test --all --all-features -- --show-output
 cargo clippy --all -- -D warnings              # shipped configuration
 cargo clippy --all --all-features -- -D warnings

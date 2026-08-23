@@ -24,9 +24,19 @@ SHIPPED-CONFIG CLIPPY: OK
 Finished `dev` profile successfully.
 LIVE PROBE CLIPPY: OK
 
+## cargo test --all -- --show-output
+test result: ok. 159 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+SHIPPED-CONFIG TESTS: OK
+
 ## cargo test --all --all-features -- --show-output
-test result: ok. 155 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 160 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 TESTS: OK
+
+The two runs differ by one test on purpose:
+commands::undoc::test::probe_subcommand_name_matches_the_harness_invocation is
+feature-gated. A single --all-features run would never compile the
+#[cfg(not(feature = "live-2fa-test"))] arms, which are the ones that ship, so
+CI runs both.
 
 ## cargo fmt --all -- --check
 FMT: OK
@@ -38,7 +48,11 @@ LIVE HARNESS TESTS: OK
 
 ## cargo run --quiet --features live-2fa-test -- undoc --help
 Subcommand renders as `live2fa-login`, matching the name scripts/live_2fa.py
-invokes.
+invokes. The name is pinned with #[command(name = ...)] rather than derived,
+and probe_subcommand_name_matches_the_harness_invocation reads the invocation
+back out of the harness source so the two cannot drift. Mutation-checked:
+renaming the pin to `live-2fa-login` fails that test with
+"harness runs `undoc live2fa-login` but clap renders [...]".
 PROBE CLI: OK
 
 ## Live account runs
