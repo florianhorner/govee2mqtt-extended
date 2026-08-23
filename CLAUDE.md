@@ -13,11 +13,11 @@ cargo fmt --all -- --check
 
 ### Toolchain
 
-Requires **Rust ≥ 1.85**. The crate itself is `edition = "2021"`, but transitive
-dependencies are not: `clap`, `getrandom` and `uuid` are `edition2024`. On an older
-default toolchain the build fails with `feature 'edition2024' is required` — fix it with
-`rustup default stable`. There is deliberately no `rust-toolchain.toml`; CI installs
-`dtolnay/rust-toolchain@stable`.
+Requires **Rust ≥ 1.85**. The crate itself is `edition = "2021"`; the `uuid` dependency
+sets the Rust 1.85 floor, while some packages pulled in by `clap` and `getrandom` use
+edition 2024. On an older default toolchain the build fails with
+`feature 'edition2024' is required` — fix it with `rustup default stable`. There is
+deliberately no `rust-toolchain.toml`; CI installs `dtolnay/rust-toolchain@stable`.
 
 The first build takes a minute or two: `mosquitto-rs` and `openssl` compile vendored
 OpenSSL, which needs `cc`, `perl` and `make` on the box.
@@ -51,9 +51,11 @@ UI; the device list stays empty, which is expected.
 - **HTTP.** Web UI on `http://localhost:8056/` (redirects to `/assets/index.html`), REST at
   `/api/devices`. The UI pulls `lit` and `timeago.js` from unpkg/jsdelivr, so it renders
   fully only with internet egress.
-- **Credentials.** Real devices, scenes and cloud status need `GOVEE_EMAIL` /
-  `GOVEE_PASSWORD` and/or `GOVEE_API_KEY` — see [`docs/CONFIG.md`](docs/CONFIG.md). None of
-  them are required to build, test, or smoke-test.
+- **Credentials.** LAN-enabled devices can be discovered and controlled without Govee
+  credentials when LAN Control is enabled. Configure `GOVEE_EMAIL` / `GOVEE_PASSWORD`
+  and/or `GOVEE_API_KEY` for cloud-backed functionality and richer metadata — see
+  [`docs/CONFIG.md`](docs/CONFIG.md). None of them are required to build, test, or
+  smoke-test.
 
 ## CI
 
