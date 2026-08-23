@@ -61,6 +61,36 @@ PRs must pass `cargo build`, `cargo clippy -- -D warnings`, `cargo test`, and `c
 
 The fork also runs Claude Code CI (`.github/workflows/claude.yml`).
 
+### Add-on image builds
+
+`.github/workflows/build.yml` builds the Home Assistant add-on with HA's composable
+actions (`home-assistant/builder/actions/build-image@2026.06.0`), one job per arch on a
+native runner (`ubuntu-24.04` / `ubuntu-24.04-arm`). The deprecated monolithic
+`home-assistant/builder` action is not usable: no builder image was published for
+`2026.06.0`, and every older one bundles a cosign too old to read the signatures HA
+applied to its base images on 2026-06-16.
+
+Two things the composable actions do **not** do, so the workflow does them itself:
+
+- **They never read `addon/build.yaml`.** `BUILD_FROM`, the OCI labels, and the
+  base-image cosign identity are passed as workflow inputs. `addon/build.yaml` still
+  matters for Supervisor's local builds, so the two must be kept in sync by hand.
+- **They gate base-image cosign verification on `push == true`.** The PR job
+  (`test-addon`) therefore runs an explicit `cosign-verify` step; without it the check
+  would silently skip on exactly the runs that are meant to catch it.
+
+**The published add-on image tag is the `version:` in `addon/config.yaml`, not the git
+tag name.** `scripts/apply-tag.sh` derives it from the HEAD commit and the release job
+reads it back out of the file. Supervisor pulls
+`ghcr.io/florianhorner/govee2mqtt-{arch}:<that version>`, so publishing anything else
+404s every install and update.
+
+**Before cutting a release tag, check the open `addon/Dockerfile` item in `TODOS.md`.**
+Stage 1 is `FROM ghcr.io/florianhorner/govee2mqtt:latest`, and the `merge` job only
+refreshes `latest` on `main` — so a tag build can package a binary from a different
+commit than the tag. The build is green and the image is signed either way; nothing
+surfaces it. A green `test-addon` is not coverage of the publish path.
+
 ## Pre-commit Hooks
 
 The repo includes `.pre-commit-config.yaml` with local hooks for `cargo fmt` and `cargo clippy`. To enable:

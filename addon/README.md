@@ -12,7 +12,7 @@ voice assistants.
 
 ## What this fork adds over upstream
 
-- **H60B0 (Neon Rope Light 2)** LAN support
+- **H60B0 (Uplighter)** LAN support
 - **Panic hardening (in progress)** — critical `.expect()` panics replaced with graceful error handling
 - **Exit code fix** — silent `exit(0)` → `exit(1)` so HA properly restarts on failure
 - **Scene quick-cycle** — Next/Previous buttons and scene info sensor
