@@ -11,6 +11,17 @@ cargo clippy --all -- -D warnings
 cargo fmt --all -- --check
 ```
 
+### Toolchain
+
+Requires **Rust ≥ 1.85**. The crate itself is `edition = "2021"`; the `uuid` dependency
+sets the Rust 1.85 floor, while some packages pulled in by `clap` and `getrandom` use
+edition 2024. On an older default toolchain the build fails with
+`feature 'edition2024' is required` — fix it with `rustup default stable`. There is
+deliberately no `rust-toolchain.toml`; CI installs `dtolnay/rust-toolchain@stable`.
+
+The first build takes a minute or two: `mosquitto-rs` and `openssl` compile vendored
+OpenSSL, which needs `cc`, `perl` and `make` on the box.
+
 ## Project Structure
 
 - `src/` — Rust source code
@@ -18,6 +29,33 @@ cargo fmt --all -- --check
 - `scripts/` — Build and release scripts
 - `docs/` — Documentation
 - `test-data/` — Test fixtures
+
+## Running the bridge locally
+
+`govee serve` is headless and **requires an MQTT broker** — it exits without
+`--mqtt-host` (or `$GOVEE_MQTT_HOST`). For local testing, run Mosquitto with an anonymous
+listener (`listener 1883 127.0.0.1` + `allow_anonymous true`), then:
+
+```bash
+RUST_LOG=govee=info cargo run -- serve \
+  --mqtt-host 127.0.0.1 --mqtt-port 1883 --http-port 8056
+```
+
+No Govee credentials or hardware are needed to smoke-test this. The bridge connects to
+MQTT, publishes Home Assistant discovery for its own service device, and serves the web
+UI; the device list stays empty, which is expected.
+
+- **MQTT layout.** Discovery goes under the `homeassistant/` prefix (`--hass-discovery-prefix`).
+  The bridge's own topics use `gv2mqtt/` — availability at `gv2mqtt/availability`, commands
+  like `gv2mqtt/purge-caches`. Watch it all with `mosquitto_sub -h 127.0.0.1 -t '#' -v`.
+- **HTTP.** Web UI on `http://localhost:8056/` (redirects to `/assets/index.html`), REST at
+  `/api/devices`. The UI pulls `lit` and `timeago.js` from unpkg/jsdelivr, so it renders
+  fully only with internet egress.
+- **Credentials.** LAN-enabled devices can be discovered and controlled without Govee
+  credentials when LAN Control is enabled. Configure `GOVEE_EMAIL` / `GOVEE_PASSWORD`
+  and/or `GOVEE_API_KEY` for cloud-backed functionality and richer metadata — see
+  [`docs/CONFIG.md`](docs/CONFIG.md). None of them are required to build, test, or
+  smoke-test.
 
 ## CI
 
