@@ -24,7 +24,7 @@ your credentials before your first run:
 |---|---|----------|-------|-------|
 |`--govee-email`|`GOVEE_EMAIL`|`govee_email`|*(none)*|Your Govee account email|
 |`--govee-password`|`GOVEE_PASSWORD`|`govee_password`|*(none)*|Your Govee account password|
-|`--govee-2fa-code`|`GOVEE_2FA_CODE`|`govee_2fa_code`|*(none)*|One-time verification code, only needed if your account has 2FA. See below.|
+|`--govee-2fa-code`|`GOVEE_2FA_CODE`|`govee_2fa_code`|*(none)*|Emailed verification code, only needed if your account has 2FA. See below.|
 |`--api-key`|`GOVEE_API_KEY`|`govee_api_key`|*(none)*|Your Govee API key ([get one here](https://developer.govee.com/reference/apply-you-govee-api-key))|
 
 *Concerned about sharing your credentials? See [Privacy](PRIVACY.md) for
@@ -32,34 +32,43 @@ details on how your data is used.*
 
 ### Two-factor authentication (2FA)
 
-If your Govee account has two-factor authentication enabled, login will fail with a
-clear error in the add-on logs ("Govee account requires 2FA verification...").
-To get past it:
+If your Govee account requires two-factor authentication:
 
-1. **Trigger a fresh code.** Sign in to the Govee Home mobile app on your phone with
-   the same account. Govee emails a 6-digit verification code to the address on file.
-   The code is valid for **about 15 minutes** — work fast.
-2. **Set the code.** In Home Assistant, open the add-on configuration panel and paste
-   the code into `govee_2fa_code`. In Docker, set `GOVEE_2FA_CODE` in your `.env`.
-3. **Restart Govee2MQTT.** Restart the Home Assistant add-on or the Docker
-   container so it retries the login with the code attached.
+1. **Start without a code.** Leave `govee_2fa_code` or `GOVEE_2FA_CODE` unset and
+   start Govee2MQTT. On status **454**, it requests a code by email. Retries for
+   the same account reuse that request for 15 minutes.
+2. **Set the code.** In Home Assistant, paste it into `govee_2fa_code`. In
+   Docker, set `GOVEE_2FA_CODE` in your `.env`. Govee codes expire after
+   **about 15 minutes**.
+3. **Restart Govee2MQTT.** Restart the Home Assistant add-on or Docker container
+   to retry login with the code. After login succeeds, remove the code from the
+   saved configuration. The running process also clears its copy.
 
-If you see status **454** in the logs, either no code was set or the supplied
-code was rejected/expired — go back to step 1.
-If you see status **455**, the code was rejected (expired or wrong) — generate
-a fresh one and update the config.
+If Govee returns status **454** or **455** with a configured code, clear it and
+restart without one. This clears the cached email request, so the next no-code
+454 can request another. Codes from Govee's web store (Shopify) use a different
+`clientId` and may fail here with status 455. Use the code requested by
+Govee2MQTT.
 
-You can leave `govee_2fa_code` set after a successful login; Govee remembers the
-device. If your token later expires and Govee demands a new code, you'll see the
-454 message again — repeat the steps above.
+**If no email arrives.** Two warnings can appear and they mean different things.
+
+`Could not request a Govee 2FA verification code` means the request never
+reached Govee, so no code was sent. Restart to retry it right away.
+
+`Govee 2FA verification request outcome unknown, assuming the code was sent`
+means Govee answered but the reply was unreadable or reported a failure. A code
+may well be sitting in your inbox already. Govee2MQTT will not request another
+one for 15 minutes, because a second code invalidates the first — so restarting
+inside that window will not send a new email.
+
+In both cases the 2FA instructions above still apply and `govee_2fa_code` is
+still the setting to fill in. Do **not** follow the "remove your Govee API
+credentials" suggestion that appears further down that log message — that
+disables cloud control entirely and is not the fix for a 2FA prompt.
 
 > **Note on token refresh:** Govee's session tokens last days, sometimes weeks.
-> When the token eventually expires the add-on re-runs the login. If Govee
-> requires a fresh 2FA challenge per login (rather than remembering the device),
-> the add-on will fail with status 454 or 455 in the logs and you'll need to
-> generate and paste a new code. This is rare in practice but worth knowing if
-> Home Assistant suddenly stops seeing your Govee devices long after you set
-> things up — check the add-on logs first.
+> When a later login requires 2FA, repeat the steps above. If Home Assistant
+> stops seeing Govee devices, check the add-on logs for status 454 or 455.
 
 ## LAN API Control
 
