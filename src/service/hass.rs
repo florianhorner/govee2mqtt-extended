@@ -250,6 +250,78 @@ pub struct IdParameter {
     pub id: String,
 }
 
+#[derive(Deserialize)]
+struct MusicPaletteCommand {
+    style: String,
+    colors: Vec<String>,
+    #[serde(default = "default_music_sensitivity")]
+    sensitivity: u8,
+}
+
+fn default_music_sensitivity() -> u8 {
+    // What the Govee app uses when untouched, and what the Platform API
+    // path hardcodes today
+    100
+}
+
+/// `gv2mqtt/<id>/set-music-palette` with a JSON payload like
+/// `{"style": "Rhythm", "colors": ["#0000ff", "#ff0000"], "sensitivity": 99}`.
+///
+/// Programs music mode with a caller-chosen palette over LAN, for the SKUs
+/// mapped in `src/music.rs`. Opt-in: the topic only acts when
+/// `GOVEE_MUSIC_PALETTE=true` is set. Documented in docs/MUSIC_MODE.md.
+async fn mqtt_set_music_palette(
+    Payload(payload): Payload<String>,
+    Params(IdParameter { id }): Params<IdParameter>,
+    State(state): State<StateHandle>,
+) -> anyhow::Result<()> {
+    let enabled = std::env::var("GOVEE_MUSIC_PALETTE")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    anyhow::ensure!(
+        enabled,
+        "set-music-palette is opt-in: set GOVEE_MUSIC_PALETTE=true to enable it"
+    );
+
+    let command: MusicPaletteCommand = serde_json::from_str(&payload)
+        .with_context(|| format!("parsing set-music-palette payload {payload:?}"))?;
+
+    let device = state.resolve_device_for_control(&id).await?;
+
+    let profile = crate::music::music_profile(&device.sku, &command.style).ok_or_else(|| {
+        match crate::music::music_styles(&device.sku) {
+            Some(styles) => anyhow::anyhow!(
+                "style {:?} is not mapped for {}; mapped styles: {}",
+                command.style,
+                device.sku,
+                styles.join(", ")
+            ),
+            None => anyhow::anyhow!(
+                "{} has no music profile table entry yet; \
+                 docs/MUSIC_MODE.md describes how to map a new SKU",
+                device.sku
+            ),
+        }
+    })?;
+
+    let colors = command
+        .colors
+        .iter()
+        .map(|color| crate::music::parse_hex_color(color))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    state
+        .device_set_music_palette(
+            &device,
+            &crate::ble::SetMusicPalette {
+                profile,
+                colors,
+                sensitivity: command.sensitivity,
+            },
+        )
+        .await
+}
+
 /// Someone pressed the "Scene Next" button
 async fn mqtt_scene_next(
     Params(IdParameter { id }): Params<IdParameter>,
@@ -653,6 +725,9 @@ async fn run_mqtt_loop(
             .await?;
         router
             .route("gv2mqtt/:id/set-mode-scene", mqtt_set_mode_scene)
+            .await?;
+        router
+            .route("gv2mqtt/:id/set-music-palette", mqtt_set_music_palette)
             .await?;
 
         tokio::time::sleep(HASS_REGISTER_DELAY).await;

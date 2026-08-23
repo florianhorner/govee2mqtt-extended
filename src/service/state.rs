@@ -1,4 +1,6 @@
-use crate::ble::{Base64HexBytes, SetHumidifierMode, SetHumidifierNightlightParams};
+use crate::ble::{
+    Base64HexBytes, SetHumidifierMode, SetHumidifierNightlightParams, SetMusicPalette,
+};
 use crate::lan_api::{Client as LanClient, DeviceStatus as LanDeviceStatus, LanDevice};
 use crate::platform_api::{DeviceCapability, DeviceType, GoveeApiClient};
 use crate::service::coordinator::Coordinator;
@@ -846,6 +848,39 @@ impl State {
         }
 
         anyhow::bail!("Unable to set scene for {device}");
+    }
+
+    /// Program music mode with a caller-chosen palette. LAN-only: the
+    /// frames ride `ptReal`, and no other transport is verified for them
+    /// (docs/MUSIC_MODE.md). The burst is UDP without acknowledgement, so
+    /// it is sent twice, like the Govee app does — the sequence is
+    /// idempotent, and a lost burst otherwise means a silently ignored
+    /// command.
+    pub async fn device_set_music_palette(
+        self: &Arc<Self>,
+        device: &Device,
+        command: &SetMusicPalette,
+    ) -> anyhow::Result<()> {
+        let encoded = Base64HexBytes::encode_for_sku("Generic:Light", command)?.base64();
+
+        if let Some(lan_dev) = &device.lan_device {
+            log::info!("Using LAN API to set {device} music palette");
+            lan_dev.send_real(encoded.clone()).await?;
+            sleep(Duration::from_millis(300)).await;
+            lan_dev.send_real(encoded).await?;
+            // The device no longer shows whatever scene the bridge last
+            // applied; music mode replaces it.
+            self.device_mut(&device.sku, &device.id)
+                .await
+                .set_active_scene(None);
+            return Ok(());
+        }
+
+        anyhow::bail!(
+            "Unable to set music palette for {device}: it was not discovered \
+             on the LAN. Music palettes are LAN-only; check that LAN Control \
+             is enabled for this device in the Govee Home app"
+        );
     }
 
     // Take care not to call this while you hold a mutable device

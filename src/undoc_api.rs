@@ -216,6 +216,23 @@ fn build_2fa_error(status: u64, code_was_set: bool) -> Option<NoCacheError> {
     }
 }
 
+/// Preserve the actionable 454 guidance without claiming that a failed email
+/// request succeeded.
+fn build_2fa_request_failed_error() -> NoCacheError {
+    NoCacheError(
+        TwoFactorLoginError {
+            status: 454,
+            code_was_set: false,
+            message: "Govee requires 2FA verification, but Govee2MQTT could not \
+                      request a code by email. Restart without a code after a short \
+                      wait to retry. After the email arrives, set govee_2fa_code in \
+                      the add-on configuration (or GOVEE_2FA_CODE) and restart \
+                      within about 15 minutes.",
+        }
+        .into(),
+    )
+}
+
 /// Validate the body because Govee may return HTTP 200 for a failed request.
 ///
 /// Both failure paths are `VerificationDeliveryUnknown`, not plain errors:
@@ -698,14 +715,15 @@ impl GoveeUndocumentedApi {
             // appends ISSUE_76_EXPLANATION to whatever surfaces here, and that
             // text tells the user to remove their Govee credentials and drop to
             // LAN-only -- ruinous advice for someone who only needed to paste a
-            // code. Log the transport failure and fall through, so the message
-            // the user actually reads always names govee_2fa_code.
+            // code. Log the transport failure, then return guidance that names
+            // the setting without claiming that an email was requested.
             if let Err(err) = request_code.await {
                 log::warn!(
                     "Could not request a Govee 2FA verification code: {err:#}. \
                      Reporting the 2FA requirement anyway so the configuration \
                      steps stay visible."
                 );
+                return Ok(Some(build_2fa_request_failed_error()));
             }
         }
         Ok(build_2fa_error(status, code_was_set))
@@ -1900,6 +1918,18 @@ mod test {
             msg.contains("govee_2fa_code"),
             "the user must still be told which setting to fill in: {msg}"
         );
+        assert!(
+            msg.contains("could not request a code by email"),
+            "the user must be told that the email request failed: {msg}"
+        );
+        assert!(
+            !msg.contains("Govee2MQTT requested a code by email"),
+            "a failed request must not be reported as successful: {msg}"
+        );
+        assert!(
+            msg.contains("15 minutes"),
+            "the code-entry window must remain actionable after a retry succeeds: {msg}"
+        );
         assert_eq!(requests.load(Ordering::SeqCst), 1);
 
         // A proven failure lands in the negative cache, so an outage is not
@@ -1933,10 +1963,15 @@ mod test {
                 requests.fetch_add(1, Ordering::SeqCst);
                 Err::<(), _>(VerificationDeliveryUnknown("simulated timeout".to_string()).into())
             });
-            api.handle_2fa_status(&cache, 454, request)
+            let err = api
+                .handle_2fa_status(&cache, 454, request)
                 .await
                 .expect("an unknown outcome must not abort 2FA reporting")
                 .expect("454 produces a user-facing error");
+            assert!(
+                format!("{}", err.0).contains("requested a code by email"),
+                "an unknown delivery outcome must retain the suppression-window guidance"
+            );
         }
         assert_eq!(
             requests.load(Ordering::SeqCst),
@@ -1961,7 +1996,10 @@ mod test {
             .await
             .expect("a raw request error must not abort 2FA reporting")
             .expect("454 produces a user-facing error");
-        assert!(format!("{}", err.0).contains("govee_2fa_code"));
+        let msg = format!("{}", err.0);
+        assert!(msg.contains("govee_2fa_code"));
+        assert!(msg.contains("could not request a code by email"));
+        assert!(!msg.contains("Govee2MQTT requested a code by email"));
     }
 
     #[test]

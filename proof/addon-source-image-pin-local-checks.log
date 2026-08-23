@@ -1,0 +1,53 @@
+# Local verification log — addon source-image pin (fix/addon-source-image-pin)
+# base: d1c23f751a7c7b91b198e1619a18dc4a7277b3f7 (origin/main)
+# date: 2026-08-22T15:59:33Z
+# host: macOS 26.5.1, rustc 1.94.1 (e408947bf 2026-03-25), actionlint 1.7.12
+#
+# Docker is unavailable on this host, so the add-on image cannot be built
+# locally. test-addon exercises the Dockerfile ARG default in CI; the release
+# override runs only on a tag. See the PR body.
+
+## git diff --stat origin/main (excluding this log)
+ .github/workflows/build.yml | 12 +++++++++++
+ CLAUDE.md                   | 21 ++++++++++++++-----
+ TODOS.md                    | 49 ++++++++++++++++++++++++---------------------
+ addon/Dockerfile            |  8 +++++++-
+ 4 files changed, 61 insertions(+), 29 deletions(-)
+
+## addon/Dockerfile ARG / FROM ordering
+1:ARG BUILD_FROM
+7:ARG GOVEE_IMAGE=ghcr.io/florianhorner/govee2mqtt:latest
+8:FROM ${GOVEE_IMAGE} AS govee2mqtt
+9:FROM $BUILD_FROM
+   (global ARGs precede the first FROM, so GOVEE_IMAGE is usable in it)
+
+## build-args resolved per job
+   addon:
+      BUILD_FROM=ghcr.io/home-assistant/${{ matrix.arch }}-base-debian:bookworm
+      GOVEE_IMAGE=ghcr.io/florianhorner/govee2mqtt:${{ github.ref_name }}
+   test-addon:
+      BUILD_FROM=ghcr.io/home-assistant/${{ matrix.arch }}-base-debian:bookworm
+   test-addon omits GOVEE_IMAGE on purpose. That exercises the Dockerfile
+   default, which is the path a Supervisor local build takes.
+
+## the pinned tag matches what the merge job publishes
+   merge tags the standalone image via docker/metadata-action:
+     143:            type=ref,event=tag,enable=${{ github.ref_type == 'tag' }}
+   That is the git tag name, which is what github.ref_name resolves to.
+   Checked against published tags on ghcr.io/florianhorner/govee2mqtt:
+     2026.03.16, 2026.03.22 (bare git tag names)
+   against the add-on images ghcr.io/florianhorner/govee2mqtt-amd64:
+     2026.03.16-df31383a, 2026.03.22-ba238f5e (addon/config.yaml versions)
+   The namespaces differ, so GOVEE_IMAGE must use github.ref_name.
+
+## actionlint .github/workflows/build.yml (this branch)
+   findings: 3
+## actionlint at origin/main (baseline)
+   findings: 3
+   => zero new findings
+
+## cargo fmt --all -- --check
+   FMT: exit 0
+
+## cargo test --all
+test result: ok. 142 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.84s

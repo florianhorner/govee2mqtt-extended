@@ -18,6 +18,17 @@ python3 -m unittest scripts/test_live_2fa.py   # live-2FA harness unit tests
 probe used by `scripts/live_2fa.py`. It is never enabled in a release build — see
 [`docs/LIVE_2FA_TEST.md`](docs/LIVE_2FA_TEST.md).
 
+### Toolchain
+
+Requires **Rust ≥ 1.85**. The crate itself is `edition = "2021"`; the `uuid` dependency
+sets the Rust 1.85 floor, while some packages pulled in by `clap` and `getrandom` use
+edition 2024. On an older default toolchain the build fails with
+`feature 'edition2024' is required` — fix it with `rustup default stable`. There is
+deliberately no `rust-toolchain.toml`; CI installs `dtolnay/rust-toolchain@stable`.
+
+The first build takes a minute or two: `mosquitto-rs` and `openssl` compile vendored
+OpenSSL, which needs `cc`, `perl` and `make` on the box.
+
 ## Project Structure
 
 - `src/` — Rust source code
@@ -25,6 +36,33 @@ probe used by `scripts/live_2fa.py`. It is never enabled in a release build — 
 - `scripts/` — Build and release scripts
 - `docs/` — Documentation
 - `test-data/` — Test fixtures
+
+## Running the bridge locally
+
+`govee serve` is headless and **requires an MQTT broker** — it exits without
+`--mqtt-host` (or `$GOVEE_MQTT_HOST`). For local testing, run Mosquitto with an anonymous
+listener (`listener 1883 127.0.0.1` + `allow_anonymous true`), then:
+
+```bash
+RUST_LOG=govee=info cargo run -- serve \
+  --mqtt-host 127.0.0.1 --mqtt-port 1883 --http-port 8056
+```
+
+No Govee credentials or hardware are needed to smoke-test this. The bridge connects to
+MQTT, publishes Home Assistant discovery for its own service device, and serves the web
+UI; the device list stays empty, which is expected.
+
+- **MQTT layout.** Discovery goes under the `homeassistant/` prefix (`--hass-discovery-prefix`).
+  The bridge's own topics use `gv2mqtt/` — availability at `gv2mqtt/availability`, commands
+  like `gv2mqtt/purge-caches`. Watch it all with `mosquitto_sub -h 127.0.0.1 -t '#' -v`.
+- **HTTP.** Web UI on `http://localhost:8056/` (redirects to `/assets/index.html`), REST at
+  `/api/devices`. The UI pulls `lit` and `timeago.js` from unpkg/jsdelivr, so it renders
+  fully only with internet egress.
+- **Credentials.** LAN-enabled devices can be discovered and controlled without Govee
+  credentials when LAN Control is enabled. Configure `GOVEE_EMAIL` / `GOVEE_PASSWORD`
+  and/or `GOVEE_API_KEY` for cloud-backed functionality and richer metadata — see
+  [`docs/CONFIG.md`](docs/CONFIG.md). None of them are required to build, test, or
+  smoke-test.
 
 ## CI
 
@@ -56,11 +94,22 @@ reads it back out of the file. Supervisor pulls
 `ghcr.io/florianhorner/govee2mqtt-{arch}:<that version>`, so publishing anything else
 404s every install and update.
 
-**Before cutting a release tag, check the open `addon/Dockerfile` item in `TODOS.md`.**
-Stage 1 is `FROM ghcr.io/florianhorner/govee2mqtt:latest`, and the `merge` job only
-refreshes `latest` on `main` — so a tag build can package a binary from a different
-commit than the tag. The build is green and the image is signed either way; nothing
-surfaces it. A green `test-addon` is not coverage of the publish path.
+**The add-on copies its binary out of the standalone `govee2mqtt` image, and the release
+job pins which one.** `addon/Dockerfile` takes `ARG GOVEE_IMAGE`, defaulting to
+`:latest`; the `addon` job overrides it with `ghcr.io/florianhorner/govee2mqtt:${{ github.ref_name }}`.
+That pin matters because the `merge` job only refreshes `latest` on `main`, so a tag build
+reading `:latest` would package whatever `main` last published rather than the tagged
+commit. The job passes and the image is signed either way, so nothing flags the mismatch.
+
+The two image families take their tags from different places: the standalone
+`govee2mqtt` image is tagged by `merge` with the **git tag name**, while the add-on
+`govee2mqtt-{arch}` images are tagged with `addon/config.yaml`'s `version:`. They have
+diverged before (git tag `2026.03.22` published `govee2mqtt-amd64:2026.03.22-ba238f5e`), so
+`GOVEE_IMAGE` must use `github.ref_name` and the add-on tag must not.
+
+`test-addon` deliberately does not pass `GOVEE_IMAGE`, so CI still exercises the Dockerfile
+default, which is the path a Supervisor local build takes. A green `test-addon` does not
+cover the publish path, which runs only on a tag.
 
 ## Pre-commit Hooks
 

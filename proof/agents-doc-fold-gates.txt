@@ -1,0 +1,40 @@
+PR #37 — fold agent setup notes into CLAUDE.md
+Run date: 2026-08-23   Branch: cursor/setup-dev-environment-b918 @ 16ac9e0
+Toolchain: rustc 1.94.1 (e408947bf 2026-03-25)
+Tree: origin/main (3172c08) merged in, incl. #48, #49 and #51
+
+== Local gates ==
+$ cargo build --all                     -> Finished `dev` profile
+$ cargo fmt --all -- --check            -> exit 0, no diff
+$ cargo clippy --all -- -D warnings     -> Finished, no warnings
+$ cargo test --all
+    test result: ok. 142 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.83s
+
+== Doc claims re-verified against this tree ==
+Rust >= 1.85 / edition2024 deps:
+    clap 4.6.0, clap_builder 4.6.0, clap_derive 4.6.0, clap_lex 1.1.0, getrandom 0.4.2
+        -> edition = "2024" in their locked manifests
+    uuid 1.23.0 -> rust-version = "1.85.0"
+    own crate   -> Cargo.toml edition = "2021"   (so the >= 1.85 floor comes from deps, not us)
+CI toolchain is unpinned stable: .github/workflows/build.yml dtolnay/rust-toolchain@stable
+    (no rust-toolchain.toml in repo)
+
+$ ./target/debug/govee serve --help | grep -E 'mqtt-host|mqtt-port|http-port|hass-discovery-prefix'
+      --http-port <HTTP_PORT>
+      --mqtt-host <MQTT_HOST>
+      --mqtt-port <MQTT_PORT>
+      --hass-discovery-prefix <HASS_DISCOVERY_PREFIX>
+
+Source cross-checks for the new "Running the bridge locally" section:
+    --mqtt-host required, else $GOVEE_MQTT_HOST      src/service/hass.rs:69-73
+    --http-port default_value_t = 8056               src/commands/serve.rs:23
+    hass_discovery_prefix default "homeassistant"    src/service/hass.rs:49
+    gv2mqtt/availability, gv2mqtt/purge-caches       src/service/hass.rs:237,245
+    / -> /assets/index.html, /api/devices            src/service/http.rs:263,268
+    unpkg (lit) + jsdelivr (timeago.js)              assets/index.html:17-31
+    GOVEE_EMAIL / GOVEE_PASSWORD / GOVEE_API_KEY     src/undoc_api.rs:192,205; src/platform_api.rs:46
+
+== Not verified here ==
+The end-to-end mosquitto round trip. Mosquitto is not installed on this machine and
+installing a system package was out of scope. The "requires a broker" behaviour is
+verified from source (src/service/hass.rs:69-73) and from --help, not from a live run.

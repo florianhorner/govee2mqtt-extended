@@ -234,8 +234,16 @@ jobs:
           container-registry-password: ${{ secrets.GITHUB_TOKEN }}
           # build-image does not read addon/build.yaml; BUILD_FROM must match
           # the build_from: entry there so CI and Supervisor local builds agree.
+          # GOVEE_IMAGE pins the standalone image the add-on copies its binary
+          # from to this tag. The merge job publishes govee2mqtt:<tag> via
+          # docker/metadata-action type=ref,event=tag, and addon needs: merge,
+          # so that tag exists before this step runs. Without the pin the
+          # Dockerfile default :latest applies, and merge only refreshes
+          # :latest on main, so a tag build would package whatever main last
+          # published.
           build-args: |
             BUILD_FROM=ghcr.io/home-assistant/${{ matrix.arch }}-base-debian:bookworm
+            GOVEE_IMAGE=ghcr.io/florianhorner/govee2mqtt:${{ github.ref_name }}
           labels: ${{ env.ADDON_LABELS }}
 
   test-addon:
@@ -309,6 +317,10 @@ jobs:
           push: "false"
           cosign: "true"
           container-registry-password: ${{ secrets.GITHUB_TOKEN }}
+          # GOVEE_IMAGE is deliberately NOT passed here. The release job pins it
+          # to the tag; leaving it unset makes this job exercise the Dockerfile
+          # default (:latest), which is the path Supervisor takes on a local
+          # build. Passing it would leave that default untested.
           build-args: |
             BUILD_FROM=ghcr.io/home-assistant/${{ matrix.arch }}-base-debian:bookworm
           labels: ${{ env.ADDON_LABELS }}
