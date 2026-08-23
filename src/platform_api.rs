@@ -1,6 +1,10 @@
 use crate::cache::{cache_get, CacheComputeResult, CacheGetOptions};
 use crate::hass_mqtt::climate::parse_temperature_constraints;
 use crate::opt_env_var;
+use crate::sensitive::{
+    describe_json_error_with_policy, describe_request_url, describe_sensitive_body_with_policy,
+    should_log_sensitive_data,
+};
 use crate::service::state::sort_and_dedup_scenes;
 use crate::temperature::{TemperatureUnits, TemperatureValue};
 use crate::undoc_api::GoveeUndocumentedApi;
@@ -973,22 +977,73 @@ pub struct ArrayOption {
 }
 
 pub fn from_json<T: serde::de::DeserializeOwned, S: AsRef<[u8]>>(text: S) -> anyhow::Result<T> {
+    from_json_with_policy(text, should_log_sensitive_data())
+}
+
+pub(crate) fn from_json_with_policy<T: serde::de::DeserializeOwned, S: AsRef<[u8]>>(
+    text: S,
+    allow_sensitive: bool,
+) -> anyhow::Result<T> {
     let text = text.as_ref();
-    serde_json_path_to_error::from_slice(text).map_err(|err| {
+    serde_json_path_to_error::from_slice(text).map_err(|error| {
         anyhow::anyhow!(
-            "{} {err}. Input: {}",
-            std::any::type_name::<T>(),
-            String::from_utf8_lossy(text)
+            "{}",
+            describe_json_error_with_policy::<T>(&error, text, allow_sensitive)
         )
     })
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 struct EmbeddedRequestStatus {
-    #[serde(alias = "msg")]
-    message: String,
+    #[serde(rename = "message", alias = "msg")]
+    _message: String,
     #[serde(alias = "code")]
     status: u16,
+}
+
+fn embedded_http_failure_message_with_policy(
+    url: &reqwest::Url,
+    status: u16,
+    body: &[u8],
+    allow_sensitive: bool,
+) -> String {
+    let url = describe_request_url(url);
+    let status = reqwest::StatusCode::from_u16(status)
+        .map(|code| format!("code {code}"))
+        .unwrap_or_else(|_| format!("status={status}"));
+    format!(
+        "Request to {url} failed with {status}. {}",
+        describe_sensitive_body_with_policy(body, allow_sensitive)
+    )
+}
+
+fn http_status_failure_message_with_policy(
+    url: &reqwest::Url,
+    status: reqwest::StatusCode,
+    body: &[u8],
+    allow_sensitive: bool,
+) -> String {
+    let url = describe_request_url(url);
+    format!(
+        "request {url} status {}: {}. {}",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or(""),
+        describe_sensitive_body_with_policy(body, allow_sensitive)
+    )
+}
+
+fn http_status_failure_with_policy(
+    url: &reqwest::Url,
+    status: reqwest::StatusCode,
+    body: &[u8],
+    allow_sensitive: bool,
+) -> anyhow::Error {
+    anyhow::anyhow!(http_status_failure_message_with_policy(
+        url,
+        status,
+        body,
+        allow_sensitive
+    ))
 }
 
 #[derive(Error, Debug)]
@@ -1005,66 +1060,76 @@ impl HttpRequestFailed {
     }
 }
 
+fn parse_json_body_with_policy<T: serde::de::DeserializeOwned>(
+    url: &reqwest::Url,
+    data: &[u8],
+    allow_sensitive: bool,
+) -> anyhow::Result<T> {
+    let diagnostic_url = describe_request_url(url);
+
+    if let Ok(status) = from_json_with_policy::<EmbeddedRequestStatus, _>(data, allow_sensitive) {
+        if status.status != reqwest::StatusCode::OK.as_u16() {
+            let content = embedded_http_failure_message_with_policy(
+                url,
+                status.status,
+                data,
+                allow_sensitive,
+            );
+            if let Ok(code) = reqwest::StatusCode::from_u16(status.status) {
+                return Err(HttpRequestFailed {
+                    status: code,
+                    content,
+                })
+                .with_context(|| format!("parsing {diagnostic_url} response"));
+            }
+
+            anyhow::bail!(content);
+        }
+    }
+
+    from_json_with_policy(data, allow_sensitive)
+        .with_context(|| format!("parsing {diagnostic_url} response"))
+}
+
 pub async fn json_body<T: serde::de::DeserializeOwned>(
     response: reqwest::Response,
 ) -> anyhow::Result<T> {
     let url = response.url().clone();
+    let diagnostic_url = describe_request_url(&url);
     let data = response
         .bytes()
         .await
-        .with_context(|| format!("read {url} response body"))?;
+        .with_context(|| format!("read {diagnostic_url} response body"))?;
 
-    if let Ok(status) = from_json::<EmbeddedRequestStatus, _>(&data) {
-        if status.status != reqwest::StatusCode::OK.as_u16() {
-            if let Ok(code) = reqwest::StatusCode::from_u16(status.status) {
-                return Err(HttpRequestFailed {
-                    status: code,
-                    content: format!(
-                        "Request to {url} failed with code {code} {message}. Full response: {}",
-                        String::from_utf8_lossy(&data),
-                        message = status.message
-                    ),
-                })
-                .with_context(|| format!("parsing {url} response"));
-            }
-
-            anyhow::bail!(
-                "Request to {url} failed with status={status} {message}. Full response was: {}",
-                String::from_utf8_lossy(&data),
-                status = status.status,
-                message = status.message,
-            );
-        }
-    }
-
-    from_json(&data).with_context(|| format!("parsing {url} response"))
+    parse_json_body_with_policy(&url, &data, should_log_sensitive_data())
 }
 
 pub async fn http_response_body<R: serde::de::DeserializeOwned>(
     response: reqwest::Response,
 ) -> anyhow::Result<R> {
     let url = response.url().clone();
+    let diagnostic_url = describe_request_url(&url);
 
     let status = response.status();
     if !status.is_success() {
         let body_bytes = response.bytes().await.with_context(|| {
             format!(
-                "request {url} status {}: {}, and failed to read response body",
+                "request {diagnostic_url} status {}: {}, and failed to read response body",
                 status.as_u16(),
                 status.canonical_reason().unwrap_or("")
             )
         })?;
 
-        anyhow::bail!(
-            "request {url} status {}: {}. Response body: {}",
-            status.as_u16(),
-            status.canonical_reason().unwrap_or(""),
-            String::from_utf8_lossy(&body_bytes)
-        );
+        return Err(http_status_failure_with_policy(
+            &url,
+            status,
+            &body_bytes,
+            should_log_sensitive_data(),
+        ));
     }
     json_body(response).await.with_context(|| {
         format!(
-            "request {url} status {}: {}",
+            "request {diagnostic_url} status {}: {}",
             status.as_u16(),
             status.canonical_reason().unwrap_or("")
         )
@@ -1113,6 +1178,19 @@ impl GoveeApiClient {
 #[cfg(test)]
 mod test {
     use super::*;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct NumericResponse {
+        value: u64,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct NestedNumericResponse {
+        data: NumericResponse,
+    }
 
     const SCENE_LIST: &str = include_str!("../test-data/scenes.json");
 
@@ -1173,5 +1251,85 @@ mod test {
         assert_ne!(first, second);
         uuid::Uuid::parse_str(&first).unwrap();
         uuid::Uuid::parse_str(&second).unwrap();
+    }
+
+    #[test]
+    fn from_json_error_withholds_top_level_rejected_value() {
+        let body = br#"{"value":"PASSWORD_SENTINEL"}"#;
+        let error = from_json_with_policy::<NumericResponse, _>(body, false)
+            .expect_err("string must not deserialize as u64");
+        let rendered = format!("{error:#}");
+
+        assert!(!rendered.contains("PASSWORD_SENTINEL"), "{rendered}");
+        assert!(
+            rendered.contains("NumericResponse JSON Data error"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("line 1"), "{rendered}");
+        assert!(
+            rendered.contains(&format!("Response body withheld ({} bytes)", body.len())),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn from_json_error_withholds_nested_rejected_value() {
+        let body = br#"{"data":{"value":"TOKEN_SENTINEL"}}"#;
+        let error = from_json_with_policy::<NestedNumericResponse, _>(body, false)
+            .expect_err("nested string must not deserialize as u64");
+        let rendered = format!("{error:#}");
+
+        assert!(!rendered.contains("TOKEN_SENTINEL"), "{rendered}");
+        assert!(
+            rendered.contains("NestedNumericResponse JSON Data error"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("column "), "{rendered}");
+    }
+
+    #[test]
+    fn authenticated_http_failure_chains_withhold_body_and_url_secrets() {
+        let url = reqwest::Url::parse("https://example.com/path?token=QUERY_SENTINEL")
+            .expect("test URL must parse");
+        let body = br#"{"message":"BODY_SENTINEL","status":401,"token":"TOKEN_SENTINEL"}"#;
+
+        let embedded = parse_json_body_with_policy::<NumericResponse>(&url, body, false)
+            .expect_err("embedded status 401 must fail");
+        let status =
+            http_status_failure_with_policy(&url, reqwest::StatusCode::UNAUTHORIZED, body, false);
+
+        for error in [&embedded, &status] {
+            let rendered = format!("{error:#}");
+            for secret in ["QUERY_SENTINEL", "BODY_SENTINEL", "TOKEN_SENTINEL"] {
+                assert!(!rendered.contains(secret), "leaked {secret}: {rendered}");
+            }
+            assert!(rendered.contains("https://example.com/path"), "{rendered}");
+            assert!(
+                rendered.contains(&format!("Response body withheld ({} bytes)", body.len())),
+                "{rendered}"
+            );
+        }
+        let embedded = format!("{embedded:#}");
+        let status = format!("{status:#}");
+        assert!(
+            embedded.contains("parsing https://example.com/path response"),
+            "{embedded}"
+        );
+        assert!(embedded.contains("code 401 Unauthorized"), "{embedded}");
+        assert!(status.contains("status 401: Unauthorized"), "{status}");
+    }
+
+    #[test]
+    fn embedded_http_failure_retains_unknown_numeric_status() {
+        let url = reqwest::Url::parse("https://example.com/path").expect("test URL must parse");
+        let rendered = embedded_http_failure_message_with_policy(
+            &url,
+            99,
+            br#"{"token":"TOKEN_SENTINEL"}"#,
+            false,
+        );
+
+        assert!(rendered.contains("status=99"), "{rendered}");
+        assert!(!rendered.contains("TOKEN_SENTINEL"), "{rendered}");
     }
 }

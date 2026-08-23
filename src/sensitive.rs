@@ -104,10 +104,12 @@ mod test {
 
     #[test]
     fn request_url_omits_credentials_query_and_fragment() {
-        let url = reqwest::Url::parse(
-            "https://USER_SENTINEL:PASSWORD_SENTINEL@example.com/path?token=TOKEN_SENTINEL#part",
-        )
-        .expect("test URL must parse");
+        let mut url = reqwest::Url::parse("https://example.com/path?token=TOKEN_SENTINEL#part")
+            .expect("test URL must parse");
+        url.set_username("USER_SENTINEL")
+            .expect("HTTPS URL accepts a username");
+        url.set_password(Some("PASSWORD_SENTINEL"))
+            .expect("HTTPS URL accepts a password");
         let description = describe_request_url(&url);
 
         for secret in [

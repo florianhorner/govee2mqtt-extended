@@ -159,8 +159,8 @@ where
             }
             Err(err) => {
                 log::warn!(
-                    "Error parsing CacheEntry: {err:#} {:?}",
-                    String::from_utf8_lossy(&current.data)
+                    "{}",
+                    cache_parse_failure_message::<T>(&options, &err, current.data.len())
                 );
             }
         }
@@ -229,6 +229,24 @@ where
     }
 }
 
+fn cache_parse_failure_message<T>(
+    options: &CacheGetOptions<'_>,
+    error: &serde_json::Error,
+    body_len: usize,
+) -> String {
+    format!(
+        "Error parsing cached {} for topic {:?}, key {:?}: JSON {:?} error at line {}, column {}. \
+         Cached payload withheld ({} bytes)",
+        std::any::type_name::<CacheEntry<T>>(),
+        options.topic,
+        options.key,
+        error.classify(),
+        error.line(),
+        error.column(),
+        body_len
+    )
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -259,6 +277,29 @@ mod test {
             negative_ttl,
             allow_stale: false,
         }
+    }
+
+    #[test]
+    fn corrupt_cache_diagnostic_withholds_serialized_value() {
+        let body = br#"{
+            "expires": "2999-01-01T00:00:00Z",
+            "result": {"Ok": "TOKEN_SENTINEL"}
+        }"#;
+        let error = serde_json::from_slice::<CacheEntry<u64>>(body)
+            .expect_err("string cache value must not deserialize as u64");
+        let options = opts("account-info", Duration::from_secs(10));
+        let rendered = cache_parse_failure_message::<u64>(&options, &error, body.len());
+
+        assert!(!rendered.contains("TOKEN_SENTINEL"), "{rendered}");
+        assert!(rendered.contains("topic \"test\""), "{rendered}");
+        assert!(rendered.contains("key \"account-info\""), "{rendered}");
+        assert!(rendered.contains("JSON Data error"), "{rendered}");
+        assert!(rendered.contains("line "), "{rendered}");
+        assert!(rendered.contains("column "), "{rendered}");
+        assert!(
+            rendered.contains(&format!("Cached payload withheld ({} bytes)", body.len())),
+            "{rendered}"
+        );
     }
 
     #[tokio::test]

@@ -3,8 +3,8 @@ use crate::cache::{cache_get, CacheComputeResult, CacheGetOptions, NoCacheError}
 use crate::lan_api::boolean_int;
 use crate::opt_env_var;
 use crate::platform_api::{
-    from_json, http_response_body, DeviceCapability, DeviceCapabilityKind, DeviceParameters,
-    EnumOption,
+    from_json, from_json_with_policy, http_response_body, DeviceCapability, DeviceCapabilityKind,
+    DeviceParameters, EnumOption,
 };
 use crate::sensitive::{
     describe_json_error_with_policy, describe_request_url, describe_sensitive_body_with_policy,
@@ -1188,9 +1188,16 @@ where
 pub fn embedded_json<'de, T: DeserializeOwned, D: serde::de::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<T, D::Error> {
+    embedded_json_with_policy(deserializer, should_log_sensitive_data())
+}
+
+fn embedded_json_with_policy<'de, T: DeserializeOwned, D: serde::de::Deserializer<'de>>(
+    deserializer: D,
+    allow_sensitive: bool,
+) -> Result<T, D::Error> {
     use serde::de::Error as _;
     let s = String::deserialize(deserializer)?;
-    from_json(if s.is_empty() { "null" } else { &s }).map_err(|e| {
+    from_json_with_policy(if s.is_empty() { "null" } else { &s }, allow_sensitive).map_err(|e| {
         D::Error::custom(format!(
             "{} {e:#} while processing embedded JSON",
             std::any::type_name::<T>()
@@ -1202,6 +1209,55 @@ pub fn embedded_json<'de, T: DeserializeOwned, D: serde::de::Deserializer<'de>>(
 mod test {
     use super::*;
     use crate::platform_api::from_json;
+
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct EmbeddedNumericValue {
+        value: u64,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct EmbeddedNumericEnvelope {
+        #[serde(deserialize_with = "embedded_json_without_sensitive_data")]
+        payload: EmbeddedNumericValue,
+    }
+
+    fn embedded_json_without_sensitive_data<
+        'de,
+        T: DeserializeOwned,
+        D: serde::de::Deserializer<'de>,
+    >(
+        deserializer: D,
+    ) -> Result<T, D::Error> {
+        embedded_json_with_policy(deserializer, false)
+    }
+
+    #[test]
+    fn embedded_json_error_withholds_rejected_string_value() {
+        let embedded = r#"{"value":"EMBEDDED_TOKEN_SENTINEL"}"#;
+        let body = format!(r#"{{"payload":{embedded:?}}}"#);
+        let error = serde_json::from_str::<EmbeddedNumericEnvelope>(&body)
+            .expect_err("embedded string must not deserialize as a numeric value");
+        let rendered = format!("{error:#}");
+
+        assert!(!rendered.contains("EMBEDDED_TOKEN_SENTINEL"), "{rendered}");
+        assert!(
+            rendered.contains("EmbeddedNumericValue JSON Data error"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("while processing embedded JSON"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!(
+                "Response body withheld ({} bytes)",
+                embedded.len()
+            )),
+            "{rendered}"
+        );
+    }
 
     #[test]
     fn get_device_scenes() {
