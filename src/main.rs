@@ -1,7 +1,8 @@
 use crate::lan_api::LanDiscoArguments;
 use crate::platform_api::GoveeApiArguments;
+use crate::sensitive::should_log_sensitive_data;
 use crate::service::hass::HassArguments;
-use crate::undoc_api::{should_log_sensitive_data, UndocApiArguments};
+use crate::undoc_api::UndocApiArguments;
 use anyhow::Context;
 use clap::Parser;
 use std::str::FromStr;
@@ -15,6 +16,7 @@ mod music;
 #[macro_use]
 mod platform_api;
 mod rest_api;
+mod sensitive;
 mod service;
 mod temperature;
 mod undoc_api;
