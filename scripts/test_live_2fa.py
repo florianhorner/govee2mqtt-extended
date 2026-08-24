@@ -186,6 +186,21 @@ class Live2faTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertEqual(printed.call_args[0][0], "live_confirmation_mismatch")
 
+    def test_malformed_account_hash_is_rejected_before_locking(self):
+        # main() carries its OWN copy of the sha256 regex, separate from the
+        # one in verify_account_allowlist. Testing that other copy gives this
+        # one no protection, so exercise it directly: valid confirmation, bad
+        # hash. Must fail before any lock or network work.
+        env = {
+            "GOVEE_LIVE_CONFIRM": live_2fa.CONFIRMATION,
+            "GOVEE_LIVE_ACCOUNT_SHA256": "nope-not-a-sha256",
+        }
+        with mock.patch.dict(live_2fa.os.environ, env, clear=False):
+            with mock.patch.object(live_2fa, "print") as printed:
+                exit_code = live_2fa.main(["preflight"])
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(printed.call_args[0][0], "account_hash_is_not_sha256")
+
     def test_lock_actually_excludes_a_second_holder(self):
         # flock is per-open-file-description, so a second RunLock on the same
         # path conflicts even within one process. This asserts real mutual

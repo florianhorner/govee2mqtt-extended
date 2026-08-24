@@ -150,4 +150,18 @@ No live Govee/IMAP run this round. All three fixes are on control-flow and
 filesystem paths that the recorded live sequence never hit (it had no timeouts,
 no concurrent run, and a valid configuration).
 
+### Round 5 addendum — independent coverage audit
+
+A parallel coverage audit of the round-4 delta reached the same conclusions
+independently, by manual branch trace plus its own mutation run, and proved one
+gap the round-5 fixes did NOT close: main() carries its own copy of the sha256
+regex, separate from the one in verify_account_allowlist, and testing the other
+copy gives it no protection. Closed with
+test_malformed_account_hash_is_rejected_before_locking; mutation-verified by
+deleting the guard, which fails that test. Python suite 21 -> 22.
+
+That audit ran against the pre-fix commit while these files were being edited,
+so its headline 33% figure describes b931026, not the shipped state. Recorded
+here because the finding it produced was real and is now fixed.
+
 ROUND 5 GATES: OK
