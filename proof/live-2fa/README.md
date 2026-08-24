@@ -9,9 +9,10 @@ not prove.
 **`20260819T230631.865433Z-0f69de279e82/`** — the full six-step live sequence,
 PASS, on commit `0f69de27`.
 
-**Coverage caveat.** Code review after that run changed the login path, so this
-bundle no longer matches HEAD byte for byte. See the *Post-review fixes* section
-of [`../issue-36-local-checks.log`](../issue-36-local-checks.log) for a per-change
+**Coverage caveat.** Code review after that run changed the login path across
+several rounds, so this bundle no longer matches HEAD byte for byte. See
+`## Round 3 gates` and `## Round 4` in
+[`../issue-36-local-checks.log`](../issue-36-local-checks.log) for a per-change
 statement of what the live run did and did not exercise. See what moved with:
 
 ```bash

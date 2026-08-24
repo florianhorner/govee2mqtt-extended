@@ -137,3 +137,28 @@ agent opens a PR against a repo outside `florianhorner/*`; the patch and PR text
 `.context/` and Florian sends it.
 **Depends on / blocked by:** The migration must be green on a real release here first.
 **Effort:** Small (the diff already exists), plus review latency upstream.
+
+## Live-2FA probe can't distinguish "email request failed" from "email sent"
+**What:** `classify_2fa_login_error` (`src/undoc_api.rs`) extracts only `(status, code_was_set)`
+from a 2FA login error, never the message. So when the login path builds
+`build_2fa_request_failed_error()` (the code-request transport genuinely failed, no email sent)
+versus the normal 454-with-email-sent case, the `undoc live2fa-login` probe emits the identical
+JSON either way: `{"schema":1,"outcome":"two_factor","status":454,"code_configured":false}`.
+`scripts/live_2fa.py` still fails correctly either way — `wait_for_total`/`assert_quiet` verify
+against the real mailbox over IMAP independently of the probe's claim — but a real transport
+failure surfaces as the generic `email_wait_timed_out` instead of a reason that tells a human the
+failure was on our send call, not on Govee's delivery.
+**Why:** Diagnostic quality only, not a correctness bug — flagged by the adversarial pass during
+`/ship` on PR #47 (confidence 7, classified FIXABLE, no false PASS produced).
+**Pros:** A future live-debugging session gets a precise reason instead of inferring it from a
+timeout, which is exactly the class of ambiguity this harness exists to eliminate.
+**Cons:** A real wire-contract change — a new probe outcome value, `validate_probe_payload`'s
+schema, and `docs/LIVE_2FA_TEST.md`'s documented contract ("returns only the outcome, status
+454/455, and whether a code was configured") all move together. `classify_2fa_login_error`'s own
+docstring makes its narrow (status, code_was_set)-only contract deliberate, so this is a scope
+decision, not just an oversight.
+**Context:** `src/undoc_api.rs` (`classify_2fa_login_error`, `build_2fa_request_failed_error`,
+`handle_2fa_status`) is also being substantially reworked by #52 (`fix/login-response-redaction`,
+open) in this exact region — do this after #52 lands to build on its final shape instead of
+conflicting with it mid-flight.
+**Effort:** Small-medium.
