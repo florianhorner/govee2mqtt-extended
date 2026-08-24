@@ -78,3 +78,76 @@ implied to be covered.
 IMAP operations carry their own 30-second socket timeouts and do not consult
 the global deadline, so a stalled server can make a run exceed the declared
 10-minute bound.
+
+================================================================
+## Round 5 — /ship re-run: Codex review of the round-4 fixes
+Run: 2026-08-24, branch issue-36-harness
+Scope: the two harness fixes from the prior /ship round were themselves
+       reviewed by Codex, which found all three items below.
+================================================================
+
+Codex verdict on the previous round: "Both fixes are incomplete."
+
+1. Deadline clamp re-created the timeout bug. `timeout=min(PROBE_TIMEOUT_SECONDS,
+   remaining)` still launched a probe with less than the full two-request budget
+   whenever the overall deadline was close, killing it mid-flight after Govee may
+   already have accepted the verification request. Fixed: refuse to start unless
+   the full budget remains, and report `overall_timeout_exceeded`, which is the
+   accurate reason.
+
+2. tempfile.gettempdir() was the wrong home for the lock. It honours $TMPDIR, so
+   two shells with different values silently took different locks; on Linux it
+   also defaults to a world-writable /tmp where another local user can pre-create
+   the predictable filename or a symlink at it. Fixed: the lock now lives in
+   ~/.cache/govee2mqtt-live-2fa/ (created mode 0700, ownership and non-symlink
+   verified at use).
+
+3. Confirmation-gate precedence had regressed. Reading GOVEE_LIVE_ACCOUNT_SHA256
+   before the GOVEE_LIVE_CONFIRM check changed which error a doubly-misconfigured
+   run reports. Codex confirmed no network-safety bypass. Fixed: confirmation is
+   checked first again.
+
+$ cargo test --all              -> 166 passed; 0 failed
+$ cargo test --all --all-features -> 167 passed; 0 failed
+$ python3 -m unittest scripts/test_live_2fa.py -> 21 passed (was 17)
+$ cargo clippy --all -- -D warnings              -> clean
+$ cargo clippy --all --all-features -- -D warnings -> clean
+$ cargo fmt --all -- --check                     -> clean
+
+### Regression proof (each fix reverted in isolation, suite re-run)
+
+  revert deadline refusal -> clamp
+    test_probe_refuses_to_start_without_its_full_budget ... FAILED
+  revert lock back to tempfile.gettempdir()
+    test_lock_path_ignores_tmpdir ... FAILED
+  revert confirmation-first ordering
+    test_confirmation_gate_is_checked_before_the_account_hash ... FAILED
+
+  All three restored: 21 passed, 0 failed.
+
+The ordering test was added specifically because the first mutation run of that
+revert passed — nothing covered it. Stated rather than quietly patched.
+
+### Empirical checks (not inference)
+
+  Two worktrees resolve tempfile.gettempdir() identically on this macOS host
+  (/var/folders/hf/.../T, mode 0700, uid 501), which is why the original TMPDIR
+  approach appeared to work locally. It is still wrong for the $TMPDIR-override
+  and Linux-/tmp cases Codex named, hence the move to ~/.cache.
+
+  Real lock dir after the fix:
+    /Users/<user>/.cache/govee2mqtt-live-2fa/<account-hash>.lock
+    dir mode 0700, owned by the running user, not a symlink, not world-writable.
+
+  fcntl.flock is per-open-file-description, verified on this host: a second
+  RunLock on the same path raises even inside one process. That is what makes
+  test_lock_actually_excludes_a_second_holder a genuine mutual-exclusion test
+  rather than a path-string comparison.
+
+### Not exercised live
+
+No live Govee/IMAP run this round. All three fixes are on control-flow and
+filesystem paths that the recorded live sequence never hit (it had no timeouts,
+no concurrent run, and a valid configuration).
+
+ROUND 5 GATES: OK

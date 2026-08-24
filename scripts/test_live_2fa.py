@@ -154,6 +154,53 @@ class Live2faTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         self.assertNotIn(repo_root, path_a.parents)
 
+    def test_lock_path_ignores_tmpdir(self):
+        # $TMPDIR must not move the lock. tempfile.gettempdir() honours it, so
+        # two shells with different TMPDIR values would have silently taken
+        # different locks and both run against the same account.
+        account = "c" * 64
+        baseline = live_2fa.account_scoped_lock_path(account)
+        with tempfile.TemporaryDirectory() as elsewhere:
+            with mock.patch.dict(
+                live_2fa.os.environ, {"TMPDIR": elsewhere}, clear=False
+            ):
+                live_2fa.tempfile.tempdir = None  # clear gettempdir()'s cache
+                moved = live_2fa.account_scoped_lock_path(account)
+        live_2fa.tempfile.tempdir = None
+        self.assertEqual(baseline, moved)
+        self.assertNotIn(Path(elsewhere), moved.parents)
+
+    def test_confirmation_gate_is_checked_before_the_account_hash(self):
+        # The confirmation phrase is the "I know this makes real requests"
+        # acknowledgement. It must stay the FIRST thing a misconfigured run
+        # trips on -- reading the account hash ahead of it silently changed
+        # which error the operator sees. Both are wrong here; assert which one
+        # is reported. Fails fast with no network and no evidence directory.
+        env = {
+            "GOVEE_LIVE_CONFIRM": "not-the-confirmation-phrase",
+            "GOVEE_LIVE_ACCOUNT_SHA256": "not-a-sha256",
+        }
+        with mock.patch.dict(live_2fa.os.environ, env, clear=False):
+            with mock.patch.object(live_2fa, "print") as printed:
+                exit_code = live_2fa.main(["preflight"])
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(printed.call_args[0][0], "live_confirmation_mismatch")
+
+    def test_lock_actually_excludes_a_second_holder(self):
+        # flock is per-open-file-description, so a second RunLock on the same
+        # path conflicts even within one process. This asserts real mutual
+        # exclusion, not just that two calls produce equal path strings.
+        with tempfile.TemporaryDirectory() as temporary:
+            lock_path = Path(temporary) / "exclusion.lock"
+            with live_2fa.RunLock(lock_path):
+                with self.assertRaises(live_2fa.LiveTestError) as caught:
+                    with live_2fa.RunLock(lock_path):
+                        pass
+                self.assertEqual(caught.exception.reason, "another_live_test_is_running")
+            # Released on exit -- the next run must be able to acquire it.
+            with live_2fa.RunLock(lock_path):
+                pass
+
     def test_probe_payload_accepts_only_the_redacted_contract(self):
         valid = {
             "schema": 1,
@@ -220,6 +267,41 @@ class Live2faTests(unittest.TestCase):
 
             self.assertEqual(captured["timeout"], live_2fa.PROBE_TIMEOUT_SECONDS)
 
+    def test_probe_refuses_to_start_without_its_full_budget(self):
+        # With less than a full probe budget left, starting anyway would clamp
+        # the subprocess timeout below the two-request budget and re-create the
+        # original bug. Refuse up front with the accurate reason instead.
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary)
+            config = type(
+                "ConfigStub",
+                (),
+                {
+                    "email_file": scratch / "email",
+                    "password_file": scratch / "password",
+                    "root": scratch / "repository",
+                },
+            )()
+
+            def must_not_run(command, **kwargs):
+                raise AssertionError("probe started without its full budget")
+
+            with mock.patch.object(
+                live_2fa.subprocess, "run", side_effect=must_not_run
+            ):
+                probe_runner = live_2fa.Probe(
+                    scratch / "govee",
+                    config,
+                    scratch / "cache",
+                    scratch,
+                    RecordingEvidence(),
+                    # Positive, but short of PROBE_TIMEOUT_SECONDS.
+                    live_2fa.time.monotonic() + (live_2fa.PROBE_TIMEOUT_SECONDS - 30),
+                )
+                with self.assertRaises(live_2fa.LiveTestError) as caught:
+                    probe_runner.invoke(None)
+                self.assertEqual(caught.exception.reason, "overall_timeout_exceeded")
+
     def test_probe_uses_scratch_cwd_scrubbed_env_and_ephemeral_code_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             scratch = Path(temporary)
@@ -269,7 +351,7 @@ class Live2faTests(unittest.TestCase):
                     scratch / "cache",
                     scratch,
                     evidence,
-                    live_2fa.time.monotonic() + 60,
+                    live_2fa.time.monotonic() + 600,
                 )
                 result = probe_runner.invoke("4821")
 

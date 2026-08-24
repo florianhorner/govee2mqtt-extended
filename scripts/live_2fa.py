@@ -188,15 +188,29 @@ def bounded_int(value: str, minimum: int, maximum: int, label: str) -> int:
 
 
 def account_scoped_lock_path(account_hash: str) -> Path:
-    """Lock path for one dedicated test account, shared machine-wide.
+    """Lock path for one dedicated test account, stable for this user.
 
     Deliberately NOT under the repository root: a per-checkout lock would let
     two worktrees or clones testing the SAME account each acquire their own
     lock and run concurrently. Their verification requests can invalidate
     each other's codes and each harness can consume the other's emails,
     breaking the documented stop-on-concurrent-run guarantee.
+
+    Also deliberately NOT under tempfile.gettempdir(): that honours $TMPDIR,
+    so two shells with different TMPDIR values would silently get different
+    locks and both proceed. On Linux it also defaults to a world-writable
+    /tmp, where another local user can pre-create the predictable filename
+    (or a symlink at it) and deny service. The home directory is stable
+    regardless of environment and private to this user.
     """
-    return Path(tempfile.gettempdir()) / f"govee-live-2fa-{account_hash}.lock"
+    directory = Path.home() / ".cache" / "govee2mqtt-live-2fa"
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # mkdir's mode only applies on creation, and a pre-existing path could be
+    # a symlink or someone else's. Verify rather than assume.
+    info = directory.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise LiveTestError("lock_directory_is_not_a_private_directory")
+    return directory / f"{account_hash}.lock"
 
 
 def verify_account_allowlist(account_email: str, expected_hash: str) -> None:
@@ -490,8 +504,14 @@ class Probe:
     def invoke(self, code: Optional[str]) -> ProbeResult:
         if self.count >= MAX_LOGIN_REQUESTS:
             raise LiveTestError("login_request_budget_exhausted")
+        # Refuse to start unless the FULL probe budget remains. Clamping the
+        # subprocess timeout down to whatever is left would re-create the very
+        # bug PROBE_TIMEOUT_SECONDS exists to prevent: a two-request invocation
+        # killed mid-flight, reported as an internal failure, after Govee may
+        # already have accepted the verification request. Running out of time
+        # is a real outcome and deserves its own accurate reason.
         remaining = int(self.deadline - time.monotonic())
-        if remaining <= 0:
+        if remaining < PROBE_TIMEOUT_SECONDS:
             raise LiveTestError("overall_timeout_exceeded")
         self.count += 1
 
@@ -531,7 +551,7 @@ class Probe:
                     env=child_env,
                     capture_output=True,
                     text=True,
-                    timeout=min(PROBE_TIMEOUT_SECONDS, remaining),
+                    timeout=PROBE_TIMEOUT_SECONDS,
                     check=False,
                 )
             except (OSError, subprocess.SubprocessError) as error:
@@ -999,12 +1019,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     reason = "internal_harness_error"
 
     try:
-        # Read and validate the account hash before locking -- see
-        # account_scoped_lock_path for why the lock is keyed on the account
-        # rather than this checkout. Same validation as
-        # verify_account_allowlist (Config.load re-checks it there too,
-        # harmlessly) so a malformed hash fails the same way regardless of
-        # which check catches it first.
+        # Confirmation gate stays FIRST, exactly as it was before the lock
+        # moved out of the checkout. It is the "I know this makes real
+        # requests against a real account" acknowledgement, so it must remain
+        # the error a misconfigured run reports; reading the account hash
+        # ahead of it silently changed that reason.
+        if required_env("GOVEE_LIVE_CONFIRM") != CONFIRMATION:
+            raise LiveTestError("live_confirmation_mismatch")
+        # Then the account hash -- see account_scoped_lock_path for why the
+        # lock is keyed on the account rather than this checkout. Config.load
+        # re-verifies this hash against the actual email, harmlessly.
         account_hash = required_env("GOVEE_LIVE_ACCOUNT_SHA256").lower()
         if not re.fullmatch(r"[0-9a-f]{64}", account_hash):
             raise LiveTestError("account_hash_is_not_sha256")

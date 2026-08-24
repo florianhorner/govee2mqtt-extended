@@ -13,7 +13,16 @@ the emailed code over IMAP, and writes a redacted evidence bundle.
   observes exactly two matching emails; provider-side duplicates are detected
   within the observation windows but cannot be prevented.
 - The runner stops on an unexpected response, an observed third matching email,
-  a timeout, a commit mismatch, a dirty worktree, or a concurrent run.
+  a timeout, a commit mismatch, a dirty worktree, or a concurrent run. The
+  concurrent-run lock is keyed on the account (a hash of
+  `GOVEE_LIVE_ACCOUNT_SHA256`) and lives in `~/.cache/govee2mqtt-live-2fa/`
+  (mode `0700`), so a second run against the same account is refused even when
+  it is launched from a different worktree or clone, and `$TMPDIR` cannot move
+  it. Two runs against two *different* dedicated accounts are independent and
+  may proceed in parallel.
+- A probe is never started unless the full per-probe budget still remains
+  inside the overall timeout. Running short reports `overall_timeout_exceeded`
+  rather than killing a request Govee may already have accepted.
 - IMAP is opened read-only with certificate verification. The runner first
   fetches only the `From` header with `BODY.PEEK`. After the sender matches
   exactly, it fetches that message with `BODY.PEEK`. Messages over 128 KiB fail;
