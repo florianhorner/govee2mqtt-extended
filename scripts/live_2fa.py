@@ -38,6 +38,14 @@ MAX_HEADER_BYTES = 64 * 1024
 MAX_MESSAGE_BYTES = 128 * 1024
 MAX_SUBJECT_CHARS = 512
 MIN_REDACTED_SECRET_LENGTH = 6
+# One probe invocation can make two sequential HTTP requests inside the Rust
+# binary, each with its own 30s timeout: the login POST, and -- only on a
+# no-code 454 -- the verification-email POST right after it. A network that
+# is slow but still within both of those timeouts can legitimately take
+# close to 60s end to end. Killing the subprocess sooner than that can cut
+# off a request Govee already accepted, reporting login_probe_execution_failed
+# for a run that actually sent an email.
+PROBE_TIMEOUT_SECONDS = 75
 CONFIRMATION = "allow-10-requests-4-email-triggers"
 EVENT_FIELDS = {
     "code_configured",
@@ -177,6 +185,18 @@ def bounded_int(value: str, minimum: int, maximum: int, label: str) -> int:
             f"{label} must be between {minimum} and {maximum}"
         )
     return parsed
+
+
+def account_scoped_lock_path(account_hash: str) -> Path:
+    """Lock path for one dedicated test account, shared machine-wide.
+
+    Deliberately NOT under the repository root: a per-checkout lock would let
+    two worktrees or clones testing the SAME account each acquire their own
+    lock and run concurrently. Their verification requests can invalidate
+    each other's codes and each harness can consume the other's emails,
+    breaking the documented stop-on-concurrent-run guarantee.
+    """
+    return Path(tempfile.gettempdir()) / f"govee-live-2fa-{account_hash}.lock"
 
 
 def verify_account_allowlist(account_email: str, expected_hash: str) -> None:
@@ -511,7 +531,7 @@ class Probe:
                     env=child_env,
                     capture_output=True,
                     text=True,
-                    timeout=min(45, remaining),
+                    timeout=min(PROBE_TIMEOUT_SECONDS, remaining),
                     check=False,
                 )
             except (OSError, subprocess.SubprocessError) as error:
@@ -979,7 +999,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     reason = "internal_harness_error"
 
     try:
-        with RunLock(root / ".context" / "live-2fa.lock"):
+        # Read and validate the account hash before locking -- see
+        # account_scoped_lock_path for why the lock is keyed on the account
+        # rather than this checkout. Same validation as
+        # verify_account_allowlist (Config.load re-checks it there too,
+        # harmlessly) so a malformed hash fails the same way regardless of
+        # which check catches it first.
+        account_hash = required_env("GOVEE_LIVE_ACCOUNT_SHA256").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", account_hash):
+            raise LiveTestError("account_hash_is_not_sha256")
+        with RunLock(account_scoped_lock_path(account_hash)):
             config = Config.load(args, root)
             evidence = Evidence(config, args.mode)
             evidence.record("configuration_validated")

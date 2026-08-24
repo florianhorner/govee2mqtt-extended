@@ -140,6 +140,20 @@ class Live2faTests(unittest.TestCase):
             with self.assertRaises(live_2fa.LiveTestError):
                 live_2fa.verify_account_allowlist(candidate_email, digest)
 
+    def test_account_scoped_lock_path_is_shared_across_checkouts(self):
+        # Two different Path(__file__) roots (i.e. two worktrees or clones)
+        # for the SAME account hash must resolve to the SAME lock path --
+        # that's the whole fix. A per-checkout lock would let both proceed.
+        same_account = "a" * 64
+        other_account = "b" * 64
+        path_a = live_2fa.account_scoped_lock_path(same_account)
+        path_b = live_2fa.account_scoped_lock_path(same_account)
+        self.assertEqual(path_a, path_b)
+        self.assertNotEqual(path_a, live_2fa.account_scoped_lock_path(other_account))
+        # Must not live inside any repository checkout.
+        repo_root = Path(__file__).resolve().parents[1]
+        self.assertNotIn(repo_root, path_a.parents)
+
     def test_probe_payload_accepts_only_the_redacted_contract(self):
         valid = {
             "schema": 1,
@@ -157,6 +171,54 @@ class Live2faTests(unittest.TestCase):
         ):
             with self.assertRaises(live_2fa.LiveTestError):
                 live_2fa.validate_probe_payload(invalid, 0)
+
+    def test_probe_subprocess_timeout_covers_both_rust_side_request_timeouts(self):
+        # The Rust probe can spend up to 30s on the login request and, only
+        # on a no-code 454, another 30s requesting the verification email --
+        # up to 60s of Rust-side HTTP time in one invocation. The Python
+        # subprocess timeout must not be shorter than that, or a slow-but-
+        # legitimate run gets killed and misreported as an internal failure
+        # after Govee may have already sent the email.
+        self.assertGreaterEqual(live_2fa.PROBE_TIMEOUT_SECONDS, 60)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary)
+            config = type(
+                "ConfigStub",
+                (),
+                {
+                    "email_file": scratch / "email",
+                    "password_file": scratch / "password",
+                    "root": scratch / "repository",
+                },
+            )()
+            evidence = RecordingEvidence()
+            captured = {}
+
+            def fake_run(command, **kwargs):
+                captured.update(kwargs)
+                return live_2fa.subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=(
+                        '{"schema":1,"outcome":"two_factor",'
+                        '"status":454,"code_configured":false}'
+                    ),
+                    stderr="",
+                )
+
+            with mock.patch.object(live_2fa.subprocess, "run", side_effect=fake_run):
+                probe_runner = live_2fa.Probe(
+                    scratch / "govee",
+                    config,
+                    scratch / "cache",
+                    scratch,
+                    evidence,
+                    live_2fa.time.monotonic() + 600,
+                )
+                probe_runner.invoke(None)
+
+            self.assertEqual(captured["timeout"], live_2fa.PROBE_TIMEOUT_SECONDS)
 
     def test_probe_uses_scratch_cwd_scrubbed_env_and_ephemeral_code_file(self):
         with tempfile.TemporaryDirectory() as temporary:
