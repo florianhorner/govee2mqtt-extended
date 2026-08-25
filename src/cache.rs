@@ -58,11 +58,17 @@ enum CacheResult<T> {
     Err(String),
 }
 
+const CACHED_ERROR_MESSAGE: &str =
+    "request failure is temporarily cached; retry after the negative-cache window";
+
 impl<T> CacheResult<T> {
     fn into_result(self) -> anyhow::Result<T> {
         match self {
             Self::Ok(v) => Ok(v),
-            Self::Err(err) => anyhow::bail!("{err}"),
+            // Older cache entries may contain the original error text. Never
+            // replay that serialized value: it predates the cache-safe error
+            // boundary and may contain credentials or response tokens.
+            Self::Err(_) => anyhow::bail!(CACHED_ERROR_MESSAGE),
         }
     }
 }
@@ -150,18 +156,32 @@ where
     if let Some(current) = &current_value {
         match serde_json::from_slice::<CacheEntry<T>>(&current.data) {
             Ok(entry) => {
-                if now < entry.expires {
+                let is_legacy_error = matches!(
+                    &entry.result,
+                    CacheResult::Err(message) if message != CACHED_ERROR_MESSAGE
+                );
+                if is_legacy_error {
+                    // A pre-fix error may contain credentials or response
+                    // tokens and may also have a longer negative TTL. Remove
+                    // it before recomputing so neither the bytes nor the old
+                    // suppression window survive this cache access.
+                    topic.delete(options.key)?;
+                } else if now < entry.expires {
                     log::trace!("cache hit for {}", options.key);
                     return entry.result.into_result();
+                } else {
+                    cache_entry.replace(entry);
                 }
-
-                cache_entry.replace(entry);
             }
             Err(err) => {
                 log::warn!(
                     "{}",
                     cache_parse_failure_message::<T>(&options, &err, current.data.len())
                 );
+                // The payload is unusable and may predate the cache-safe
+                // error format. Delete it before recomputing so a transient
+                // NoCacheError cannot leave secret-bearing bytes behind.
+                topic.delete(options.key)?;
             }
         }
     }
@@ -201,13 +221,12 @@ where
                 return Err(err);
             }
             match cache_entry.take() {
-                Some(mut entry) if options.allow_stale => {
+                Some(mut entry)
+                    if options.allow_stale && matches!(&entry.result, CacheResult::Ok(_)) =>
+                {
                     entry.expires = Utc::now() + options.negative_ttl;
 
                     log::warn!("{err:#}, will use prior results");
-                    if matches!(&entry.result, CacheResult::Err(_)) {
-                        entry.result = CacheResult::Err(format!("{err:#}"));
-                    }
 
                     let data = serde_json::to_string_pretty(&entry)?;
                     updater.write(data.as_bytes(), options.hard_ttl)?;
@@ -215,14 +234,17 @@ where
                     entry.result.into_result()
                 }
                 _ => {
-                    let entry = CacheEntry {
+                    let entry: CacheEntry<T> = CacheEntry {
                         expires: Utc::now() + options.negative_ttl,
-                        result: CacheResult::Err(format!("{err:#}")),
+                        // Arbitrary errors are not safe cache data. Return the
+                        // detailed error to the immediate caller, but persist
+                        // only an opaque marker for subsequent cache hits.
+                        result: CacheResult::Err(CACHED_ERROR_MESSAGE.to_string()),
                     };
 
                     let data = serde_json::to_string_pretty(&entry)?;
                     updater.write(data.as_bytes(), options.hard_ttl)?;
-                    entry.result.into_result()
+                    Err(err)
                 }
             }
         }
@@ -355,6 +377,269 @@ mod test {
             calls.load(Ordering::SeqCst),
             1,
             "plain Err must be negative-cached; future must NOT re-execute"
+        );
+    }
+
+    #[tokio::test]
+    async fn negative_cache_never_persists_or_replays_error_details() {
+        const SECRET: &str = "OPTED_IN_RESPONSE_SECRET_SENTINEL";
+
+        let cache = fresh_cache();
+        let calls = AtomicUsize::new(0);
+
+        let first = cache_get_inner(
+            &cache,
+            opts("secret-error", Duration::from_secs(60)),
+            async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<CacheComputeResult<u64>, _>(anyhow::anyhow!(SECRET))
+            },
+        )
+        .await
+        .expect_err("the immediate request must return its detailed failure");
+        assert!(format!("{first:#}").contains(SECRET), "{first:#}");
+
+        let stored = cache
+            .topic("test")
+            .expect("open test topic")
+            .get("secret-error")
+            .expect("read cached error")
+            .expect("negative-cache entry must exist");
+        let stored = String::from_utf8(stored.data).expect("cache entry must be UTF-8 JSON");
+        assert!(
+            !stored.contains(SECRET),
+            "secret persisted in cache: {stored}"
+        );
+        assert!(stored.contains(CACHED_ERROR_MESSAGE), "{stored}");
+
+        let second = cache_get_inner(
+            &cache,
+            opts("secret-error", Duration::from_secs(60)),
+            async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<CacheComputeResult<u64>, _>(anyhow::anyhow!(
+                    "future must not execute during the negative-cache window"
+                ))
+            },
+        )
+        .await
+        .expect_err("the cached failure must remain an error");
+        let rendered = format!("{second:#}");
+
+        assert!(
+            !rendered.contains(SECRET),
+            "cached error replayed secret: {rendered}"
+        );
+        assert!(rendered.contains(CACHED_ERROR_MESSAGE), "{rendered}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "negative-cache hit must not execute the second future"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_reuses_only_a_stale_success() {
+        let cache = fresh_cache();
+        let options = CacheGetOptions {
+            topic: "test",
+            key: "stale-success",
+            soft_ttl: Duration::ZERO,
+            hard_ttl: Duration::from_secs(60),
+            negative_ttl: Duration::from_secs(60),
+            allow_stale: true,
+        };
+
+        let first = cache_get_inner(&cache, options, async {
+            Ok::<_, anyhow::Error>(CacheComputeResult::Value(42_u64))
+        })
+        .await
+        .expect("seed stale successful value");
+        let second = cache_get_inner(&cache, options, async {
+            Err::<CacheComputeResult<u64>, _>(anyhow::anyhow!("refresh failed"))
+        })
+        .await
+        .expect("failed refresh must return the stale success");
+
+        assert_eq!(first, 42);
+        assert_eq!(second, 42);
+    }
+
+    #[tokio::test]
+    async fn expired_cached_error_returns_the_current_failure() {
+        let cache = fresh_cache();
+        let options = CacheGetOptions {
+            topic: "test",
+            key: "expired-error",
+            soft_ttl: Duration::ZERO,
+            hard_ttl: Duration::from_secs(60),
+            negative_ttl: Duration::ZERO,
+            allow_stale: true,
+        };
+
+        cache_get_inner(&cache, options, async {
+            Err::<CacheComputeResult<u64>, _>(anyhow::anyhow!("first failure"))
+        })
+        .await
+        .expect_err("seed expired negative-cache entry");
+
+        let second = cache_get_inner(&cache, options, async {
+            Err::<CacheComputeResult<u64>, _>(anyhow::anyhow!("CURRENT_FAILURE_SENTINEL"))
+        })
+        .await
+        .expect_err("expired cached error must execute and return the current failure");
+        let rendered = format!("{second:#}");
+
+        assert!(rendered.contains("CURRENT_FAILURE_SENTINEL"), "{rendered}");
+        assert!(!rendered.contains("first failure"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn fresh_legacy_cached_error_is_removed_before_recomputation() {
+        const SECRET: &str = "LEGACY_SECRET_SENTINEL";
+
+        let cache = fresh_cache();
+        let topic = cache.topic("test").expect("open test topic");
+        let (updater, _) = topic
+            .get_for_update("legacy-error")
+            .await
+            .expect("open legacy error for update");
+        let legacy = CacheEntry::<u64> {
+            expires: Utc::now() + Duration::from_secs(60),
+            result: CacheResult::Err(SECRET.to_string()),
+        };
+        let legacy = serde_json::to_vec(&legacy).expect("serialize legacy cached error");
+        updater
+            .write(&legacy, Duration::from_secs(60))
+            .expect("seed legacy cached error");
+
+        let calls = AtomicUsize::new(0);
+        let error = cache_get_inner(
+            &cache,
+            opts("legacy-error", Duration::from_secs(60)),
+            async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<CacheComputeResult<u64>, _>(
+                    NoCacheError(anyhow::anyhow!("CURRENT_TRANSIENT_FAILURE")).into(),
+                )
+            },
+        )
+        .await
+        .expect_err("the recomputed transient failure must be returned");
+        let rendered = format!("{error:#}");
+
+        assert!(!rendered.contains(SECRET), "{rendered}");
+        assert!(rendered.contains("CURRENT_TRANSIENT_FAILURE"), "{rendered}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        assert!(
+            topic
+                .get("legacy-error")
+                .expect("read removed legacy cached error")
+                .is_none(),
+            "legacy error must be deleted when recomputation is not cacheable"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_legacy_cached_error_is_removed_before_no_cache_error() {
+        const SECRET: &str = "EXPIRED_LEGACY_SECRET_SENTINEL";
+
+        let cache = fresh_cache();
+        let calls = AtomicUsize::new(0);
+        let topic = cache.topic("test").expect("open test topic");
+        let (updater, _) = topic
+            .get_for_update("expired-legacy-error")
+            .await
+            .expect("open expired legacy error for update");
+        let legacy = CacheEntry::<u64> {
+            expires: Utc::now() - Duration::from_secs(1),
+            result: CacheResult::Err(SECRET.to_string()),
+        };
+        let legacy = serde_json::to_vec(&legacy).expect("serialize expired legacy cached error");
+        updater
+            .write(&legacy, Duration::from_secs(60))
+            .expect("seed expired legacy cached error");
+
+        let error = cache_get_inner(
+            &cache,
+            opts("expired-legacy-error", Duration::from_secs(60)),
+            async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<CacheComputeResult<u64>, _>(
+                    NoCacheError(anyhow::anyhow!("CURRENT_TRANSIENT_FAILURE")).into(),
+                )
+            },
+        )
+        .await
+        .expect_err("the current transient failure must be returned");
+        let rendered = format!("{error:#}");
+
+        assert!(error.downcast_ref::<NoCacheError>().is_some(), "{rendered}");
+        assert!(!rendered.contains(SECRET), "{rendered}");
+        assert!(rendered.contains("CURRENT_TRANSIENT_FAILURE"), "{rendered}");
+        assert!(
+            topic
+                .get("expired-legacy-error")
+                .expect("read removed expired legacy error")
+                .is_none(),
+            "expired legacy error must be deleted before returning NoCacheError"
+        );
+
+        cache_get_inner(
+            &cache,
+            opts("expired-legacy-error", Duration::from_secs(60)),
+            async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<CacheComputeResult<u64>, _>(
+                    NoCacheError(anyhow::anyhow!("SECOND_TRANSIENT_FAILURE")).into(),
+                )
+            },
+        )
+        .await
+        .expect_err("the second transient failure must also be recomputed");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "removing a legacy error must preserve the no-cache retry contract"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_cached_value_is_removed_before_no_cache_error() {
+        const SECRET: &str = "MALFORMED_CACHE_SECRET_SENTINEL";
+
+        let cache = fresh_cache();
+        let topic = cache.topic("test").expect("open test topic");
+        let (updater, _) = topic
+            .get_for_update("malformed-error")
+            .await
+            .expect("open malformed error for update");
+        updater
+            .write(
+                format!(r#"{{"result":{{"Err":"{SECRET}"}}}}"#).as_bytes(),
+                Duration::from_secs(60),
+            )
+            .expect("seed malformed cached error");
+
+        cache_get_inner(
+            &cache,
+            opts("malformed-error", Duration::from_secs(60)),
+            async {
+                Err::<CacheComputeResult<u64>, _>(
+                    NoCacheError(anyhow::anyhow!("CURRENT_TRANSIENT_FAILURE")).into(),
+                )
+            },
+        )
+        .await
+        .expect_err("the current transient failure must be returned");
+
+        assert!(
+            topic
+                .get("malformed-error")
+                .expect("read removed malformed cached value")
+                .is_none(),
+            "malformed cache data must be deleted before returning NoCacheError"
         );
     }
 

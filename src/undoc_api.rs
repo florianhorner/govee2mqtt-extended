@@ -71,7 +71,8 @@ struct LoginResponse {
     client: LoginAccountResponse,
     #[serde(rename = "message")]
     _message: String,
-    status: u64,
+    #[serde(rename = "status")]
+    _status: u64,
 }
 
 /// Inspect a Govee login response body for the `status` field. Govee uses
@@ -1585,7 +1586,80 @@ fn embedded_json_with_policy<'de, T: DeserializeOwned, D: serde::de::Deserialize
 mod test {
     use super::*;
     use crate::platform_api::from_json;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread::JoinHandle;
+
+    enum TestHttpBody {
+        DeclaredLength(usize),
+        Chunked(Vec<Vec<u8>>),
+    }
+
+    fn spawn_test_http_response(
+        status: reqwest::StatusCode,
+        body: TestHttpBody,
+    ) -> anyhow::Result<(reqwest::Url, JoinHandle<std::io::Result<()>>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").context("binding loopback HTTP fixture")?;
+        let address = listener
+            .local_addr()
+            .context("reading loopback fixture address")?;
+        let url = reqwest::Url::parse(&format!("http://{address}/login?token=QUERY_SENTINEL"))
+            .context("building loopback fixture URL")?;
+
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+
+            let mut request = [0_u8; 4096];
+            stream.read(&mut request)?;
+
+            let reason = status.canonical_reason().unwrap_or("");
+            match body {
+                TestHttpBody::DeclaredLength(length) => {
+                    write!(
+                        stream,
+                        "HTTP/1.1 {} {reason}\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n",
+                        status.as_u16()
+                    )?;
+                }
+                TestHttpBody::Chunked(chunks) => {
+                    write!(
+                        stream,
+                        "HTTP/1.1 {} {reason}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                        status.as_u16()
+                    )?;
+                    for chunk in chunks {
+                        write!(stream, "{:X}\r\n", chunk.len())?;
+                        stream.write_all(&chunk)?;
+                        stream.write_all(b"\r\n")?;
+                    }
+                    stream.write_all(b"0\r\n\r\n")?;
+                }
+            }
+            stream.flush()?;
+            Ok(())
+        });
+
+        Ok((url, server))
+    }
+
+    async fn fetch_test_http_response(
+        status: reqwest::StatusCode,
+        body: TestHttpBody,
+    ) -> anyhow::Result<(reqwest::Response, JoinHandle<std::io::Result<()>>)> {
+        let (url, server) = spawn_test_http_response(status, body)?;
+        let response = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .context("building loopback HTTP client")?
+            .get(url)
+            .send()
+            .await
+            .context("fetching loopback HTTP response")?;
+        Ok((response, server))
+    }
 
     fn fresh_cache() -> sqlite_cache::Cache {
         let connection = sqlite_cache::rusqlite::Connection::open_in_memory()
@@ -2502,7 +2576,6 @@ mod test {
         let response = parse_login_response_with_policy(&url, body, false)
             .expect("valid login response must still parse");
 
-        assert_eq!(response.status, 200);
         assert_eq!(&**response.client.token, "access-token");
         assert_eq!(response.client.token_expire_cycle, 3600);
     }
@@ -2520,6 +2593,86 @@ mod test {
         assert!(!exceeds_login_body_cap(MAX_LOGIN_BODY_BYTES - 1, 1));
         assert!(exceeds_login_body_cap(MAX_LOGIN_BODY_BYTES - 1, 2));
         assert!(exceeds_login_body_cap(usize::MAX, 1));
+    }
+
+    #[tokio::test]
+    async fn login_reader_accepts_chunked_body_at_limit() -> anyhow::Result<()> {
+        let first_len = MAX_LOGIN_BODY_BYTES / 2;
+        let chunks = vec![
+            vec![b'a'; first_len],
+            vec![b'b'; MAX_LOGIN_BODY_BYTES - first_len],
+        ];
+        let (response, server) =
+            fetch_test_http_response(reqwest::StatusCode::OK, TestHttpBody::Chunked(chunks))
+                .await?;
+
+        let result = read_login_response_body(response).await;
+        server
+            .join()
+            .map_err(|_| anyhow::anyhow!("loopback HTTP fixture panicked"))??;
+        let (url, status, body) = result.context("accepting a chunked body at the cap")?;
+
+        assert_eq!(status, reqwest::StatusCode::OK);
+        assert_eq!(body.len(), MAX_LOGIN_BODY_BYTES);
+        assert_eq!(url.path(), "/login");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn login_reader_rejects_oversized_declared_5xx_as_no_cache_error() -> anyhow::Result<()> {
+        let (response, server) = fetch_test_http_response(
+            reqwest::StatusCode::BAD_GATEWAY,
+            TestHttpBody::DeclaredLength(MAX_LOGIN_BODY_BYTES + 1),
+        )
+        .await?;
+
+        let error = read_login_response_body(response)
+            .await
+            .expect_err("an oversized declared response must be rejected");
+        server
+            .join()
+            .map_err(|_| anyhow::anyhow!("loopback HTTP fixture panicked"))??;
+        let rendered = format!("{error:#}");
+
+        assert!(error.downcast_ref::<NoCacheError>().is_some(), "{rendered}");
+        assert!(rendered.contains("declared length"), "{rendered}");
+        assert!(
+            rendered.contains(&(MAX_LOGIN_BODY_BYTES + 1).to_string()),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("QUERY_SENTINEL"), "{rendered}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn login_reader_rejects_oversized_chunked_5xx_as_no_cache_error() -> anyhow::Result<()> {
+        let first_len = MAX_LOGIN_BODY_BYTES / 2;
+        let chunks = vec![
+            vec![b'a'; first_len],
+            vec![b'b'; MAX_LOGIN_BODY_BYTES - first_len],
+            vec![b'c'],
+        ];
+        let (response, server) = fetch_test_http_response(
+            reqwest::StatusCode::BAD_GATEWAY,
+            TestHttpBody::Chunked(chunks),
+        )
+        .await?;
+
+        let error = read_login_response_body(response)
+            .await
+            .expect_err("a chunked response crossing the cap must be rejected");
+        server
+            .join()
+            .map_err(|_| anyhow::anyhow!("loopback HTTP fixture panicked"))??;
+        let rendered = format!("{error:#}");
+
+        assert!(error.downcast_ref::<NoCacheError>().is_some(), "{rendered}");
+        assert!(
+            rendered.contains("exceeded the 65536-byte limit"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("QUERY_SENTINEL"), "{rendered}");
+        Ok(())
     }
 
     #[test]
