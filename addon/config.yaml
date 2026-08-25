@@ -51,3 +51,4 @@ schema:
   lan_breaker_cooldown: "int(30,900)?"
   disable_effects: "bool?"
   allowed_effects: "str?"
+  music_palette: "bool?"

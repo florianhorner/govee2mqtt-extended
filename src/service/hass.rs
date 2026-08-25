@@ -713,6 +713,12 @@ async fn run_mqtt_loop(
             .await?;
         router
             .route(
+                "gv2mqtt/:id/set-music-sensitivity",
+                crate::hass_mqtt::number::mqtt_music_sensitivity_command,
+            )
+            .await?;
+        router
+            .route(
                 "gv2mqtt/humidifier/:id/set-target",
                 mqtt_humidifier_set_target,
             )

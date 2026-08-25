@@ -166,3 +166,33 @@ let you trim or disable the published effect list. They are environment-only
 
 `disable_effects` wins: if it is set, no effects are published regardless of
 `allowed_effects`.
+
+## Music Mode
+
+Music mode reacts to sound. Selecting a `Music: <Style>` effect on a light
+already works through the Platform API and needs no configuration.
+
+Programming music mode with **your own palette** is opt-in, because the frames
+are reverse-engineered and only mapped for a few SKUs. Turning it on enables the
+`gv2mqtt/<id>/set-music-palette` MQTT command topic, which sends the palette
+over the LAN API. See [Music mode](MUSIC_MODE.md) for the supported devices, the
+payload format, and how to map a new SKU.
+
+|CLI|ENV|App Config|Default|Purpose|
+|---|---|----------|-------|-------|
+|*(none)*|`GOVEE_MUSIC_PALETTE=true`|`music_palette`|*(off)*|Enable the `set-music-palette` command topic. Requires LAN control for the device.|
+
+Sensitivity is separate. The **Music Sensitivity** number entity stores the value
+used the next time you select a `Music:` effect; it is not sent on its own,
+because Govee rejects a `music_setting` call that omits the style, and sending
+the style would switch the light into music mode (and power it on) as a side
+effect of moving a slider.
+
+The value is held in memory. After a Govee2MQTT restart the entity reads as
+unknown until you set it again, and a `Music:` effect selected in the meantime
+uses the default of 100. Govee offers no way to read the current sensitivity
+back from a light, so the bridge cannot recover it.
+
+The LAN palette frames carry their own sensitivity byte, which is a different
+setting from the Platform API one the number entity writes.
+

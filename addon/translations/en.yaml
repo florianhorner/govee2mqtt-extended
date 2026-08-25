@@ -121,11 +121,12 @@ configuration:
       A comma-separated list of effect names to allow (e.g. "Aurora,Rainbow").
       If set, only effects matching these names will be published to MQTT discovery.
       This helps reduce the payload size while still allowing some effects.
-
-
-
-
-
-
-
+  music_palette:
+    name: Music Mode Palettes (LAN)
+    description: >-
+      Set to true to enable the gv2mqtt/<id>/set-music-palette command topic,
+      which programs music mode with your own colours over the LAN API.
+      Off by default: the frames are reverse-engineered and only mapped for a
+      few SKUs. See docs/MUSIC_MODE.md for the supported devices and the
+      payload format.
 

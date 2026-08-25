@@ -57,6 +57,7 @@ Choose the installation method that matches your Home Assistant setup:
 * [Is my device supported?](docs/SKUS.md)
 * [Frequently Asked Questions](docs/FAQ.md)
 * [LAN API troubleshooting](docs/LAN.md)
+* [Music mode with custom palettes](docs/MUSIC_MODE.md)
 * [Privacy policy](docs/PRIVACY.md)
 
 ---

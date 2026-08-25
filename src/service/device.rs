@@ -57,6 +57,20 @@ pub struct Device {
     active_scene: Option<String>,
     /// Cached scene catalog to avoid repeated API calls during state notifications
     scene_catalog_cache: Option<SceneCatalogCache>,
+
+    /// Sensitivity applied the next time a `Music:` effect is selected.
+    ///
+    /// This is a stored preference, not device state. Govee never reports the
+    /// live value: the Platform API answers `""` for `musicMode` on lights, and
+    /// the `aa 05 13` BLE read-back only tracks values written over BLE or LAN,
+    /// not ones set through `music_setting` (measured on H607C, see #39).
+    ///
+    /// It cannot be pushed on its own either. `musicMode` is `required: true`
+    /// in the capability struct, so Govee rejects a sensitivity-only call with
+    /// 400 `Missing parameter`, and including the style would switch the light
+    /// into music mode and power it on — an unacceptable side effect of moving
+    /// a slider. So the value is held here and applied on the next style change.
+    music_sensitivity: Option<u8>,
 }
 
 impl std::fmt::Display for Device {
@@ -434,6 +448,27 @@ impl Device {
     /// and by `clear_scene_if_light_powered_off` when the device reports the light off.
     pub fn set_active_scene(&mut self, scene: Option<&str>) {
         self.active_scene = scene.map(|s| s.to_string());
+    }
+
+    /// Sensitivity to apply on the next `Music:` effect selection. The fallback
+    /// is the Platform API's own default, so an untouched install sends exactly
+    /// what it sent before the preference existed.
+    pub fn music_sensitivity(&self) -> u8 {
+        self.music_sensitivity
+            .unwrap_or(crate::platform_api::DEFAULT_MUSIC_SENSITIVITY)
+    }
+
+    /// True once the user has chosen a sensitivity. Lets the entity report
+    /// "unknown" rather than claiming the device is at the default.
+    pub fn music_sensitivity_is_set(&self) -> bool {
+        self.music_sensitivity.is_some()
+    }
+
+    /// Store the sensitivity for the next `Music:` effect selection. Values are
+    /// clamped rather than rejected: Govee's own range is 0-100 and HA can send
+    /// anything the user types into the number box.
+    pub fn set_music_sensitivity(&mut self, value: u8) {
+        self.music_sensitivity = Some(value.min(100));
     }
 
     /// Clears the remembered scene if the device reports the light powered off.
@@ -839,5 +874,44 @@ mod test {
         let state = device.device_state().expect("lan state");
         assert_eq!(state.mode, None);
         assert_eq!(state.mode_updated, None);
+    }
+
+    #[test]
+    fn music_sensitivity_defaults_without_asserting_device_state() {
+        let device = Device::new("H607C", "AA:BB:CC:DD:EE:FF:11:22");
+
+        // Unset reads as the historical constant, so an untouched install
+        // sends exactly what it sent before the preference existed.
+        assert_eq!(device.music_sensitivity(), 100);
+        assert_eq!(
+            device.music_sensitivity(),
+            crate::platform_api::DEFAULT_MUSIC_SENSITIVITY,
+            "the fallback must stay tied to the Platform API default"
+        );
+
+        // ...but we must not claim to have observed it. The entity keys its
+        // "report nothing yet" branch on this.
+        assert!(!device.music_sensitivity_is_set());
+    }
+
+    #[test]
+    fn music_sensitivity_round_trips_and_clamps() {
+        let mut device = Device::new("H607C", "AA:BB:CC:DD:EE:FF:11:22");
+
+        device.set_music_sensitivity(55);
+        assert_eq!(device.music_sensitivity(), 55);
+        assert!(device.music_sensitivity_is_set());
+
+        // Govee's range is 0-100; HA number boxes accept anything the user
+        // types, so out-of-range input is clamped rather than rejected.
+        device.set_music_sensitivity(255);
+        assert_eq!(device.music_sensitivity(), 100);
+
+        device.set_music_sensitivity(0);
+        assert_eq!(device.music_sensitivity(), 0);
+        assert!(
+            device.music_sensitivity_is_set(),
+            "zero is a real user choice, not an absent one"
+        );
     }
 }

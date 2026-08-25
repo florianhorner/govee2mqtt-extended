@@ -1,0 +1,35 @@
+# Local verification log: #39 Step A (music sensitivity) + GOVEE_MUSIC_PALETTE add-on wiring
+# base: 67f5ae027790beb826a778344549566ee41a9d2b
+# date: 2026-08-25T13:04:06Z
+# host: macOS 26.5.1, rustc 1.94.1 (e408947bf 2026-03-25)
+# live Govee account or hardware: NOT TESTED
+
+## cargo build --all
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.20s
+BUILD: OK
+
+## cargo test --all -- --show-output
+test result: ok. 196 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.83s
+TESTS: OK
+
+New regression coverage:
+- platform_api::test::music_payload_carries_the_requested_sensitivity
+- platform_api::test::music_payload_clamps_out_of_range_sensitivity
+- platform_api::test::music_payload_defaults_match_the_previous_hardcode
+- service::device::test::music_sensitivity_defaults_without_asserting_device_state
+- service::device::test::music_sensitivity_round_trips_and_clamps
+- platform_api::test::music_payload_is_none_for_an_unknown_style
+
+## cargo clippy --all -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.75s
+CLIPPY: OK
+
+## cargo fmt --all -- --check
+FMT: OK
+
+## YAML validity (add-on schema + translations)
+addon/config.yaml + addon/translations/en.yaml parse OK
+
+## Not covered here
+No Govee account or hardware was used. The Platform API payload is asserted
+against the recorded list_devices_2.json fixture, not a live music_setting call.

@@ -828,7 +828,20 @@ impl State {
             if let Some(client) = self.get_platform_client().await {
                 if let Some(info) = &device.http_device_info {
                     log::info!("Using Platform API to set {device} to scene {scene}");
-                    client.set_scene_by_name(info, scene).await?;
+                    // Music styles carry the stored sensitivity preference: it
+                    // cannot be sent on its own, so it rides the style change.
+                    //
+                    // Read it fresh rather than from `device`: callers hold a
+                    // snapshot cloned by `resolve_device_for_control` *before*
+                    // it acquires the per-device permit, so a slider write that
+                    // lands while this command waits would otherwise be lost.
+                    let sensitivity = match self.device_by_id(&device.id).await {
+                        Some(current) => current.music_sensitivity(),
+                        None => device.music_sensitivity(),
+                    };
+                    client
+                        .set_scene_by_name_with_sensitivity(info, scene, sensitivity)
+                        .await?;
                     self.device_mut(&device.sku, &device.id)
                         .await
                         .set_active_scene(Some(scene));

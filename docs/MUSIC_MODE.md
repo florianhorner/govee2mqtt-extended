@@ -25,6 +25,10 @@ The topic only acts when the bridge runs with:
 GOVEE_MUSIC_PALETTE=true
 ```
 
+In the Home Assistant add-on, set the **Music Mode Palettes (LAN)**
+(`music_palette`) option instead; the add-on exports the environment variable
+for you. See the [configuration reference](CONFIG.md#music-mode).
+
 It is off by default because the frames below are reverse-engineered and
 only mapped for a handful of SKUs; see [Supported devices](#supported-devices).
 The device must also be reachable over LAN ("LAN Control" enabled in the

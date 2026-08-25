@@ -115,6 +115,10 @@ if bashio::config.has_value allowed_effects ; then
   export GOVEE_ALLOWED_EFFECTS="$(bashio::config allowed_effects)"
 fi
 
+if bashio::config.has_value music_palette ; then
+  export GOVEE_MUSIC_PALETTE="$(bashio::config music_palette)"
+fi
+
 env | grep GOVEE_ | sed -r 's/_(EMAIL|KEY|PASSWORD|2FA_CODE)=.*/_\1=REDACTED/'
 set -x
 

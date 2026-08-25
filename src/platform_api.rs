@@ -71,6 +71,33 @@ pub struct GoveeApiClient {
     key: String,
 }
 
+/// Build the `music_setting` payload for a named style.
+///
+/// Returns `None` when the capability does not offer that style, which is the
+/// signal to fall through to the ordinary scene lookup. Split out from
+/// `set_scene_by_name_with_sensitivity` so the wire shape is testable against
+/// the recorded device fixtures without an HTTP mock.
+fn build_music_mode_payload(
+    cap: &DeviceCapability,
+    music_mode: &str,
+    sensitivity: u8,
+) -> Option<JsonValue> {
+    let value = cap
+        .struct_field_by_name("musicMode")?
+        .field_type
+        .enum_parameter_by_name(music_mode)?;
+    Some(serde_json::json!({
+        "musicMode": value,
+        // Govee's range is a percentage; clamp rather than trust the caller.
+        "sensitivity": sensitivity.min(100),
+        "autoColor": 1,
+    }))
+}
+
+/// Sensitivity this bridge sent unconditionally before the preference
+/// existed. Kept as the fallback so untouched installs are unchanged.
+pub const DEFAULT_MUSIC_SENSITIVITY: u8 = 100;
+
 impl GoveeApiClient {
     pub fn new<K: Into<String>>(key: K) -> Self {
         Self { key: key.into() }
@@ -333,6 +360,20 @@ impl GoveeApiClient {
         device: &HttpDeviceInfo,
         scene: &str,
     ) -> anyhow::Result<ControlDeviceResponseCapability> {
+        self.set_scene_by_name_with_sensitivity(device, scene, DEFAULT_MUSIC_SENSITIVITY)
+            .await
+    }
+
+    /// As [`Self::set_scene_by_name`], but carries the sensitivity to use when
+    /// `scene` names a music mode. Sensitivity cannot be sent on its own (Govee
+    /// rejects a `musicMode`-less call), so the caller's stored preference rides
+    /// along with the style change that does reach the device.
+    pub async fn set_scene_by_name_with_sensitivity(
+        &self,
+        device: &HttpDeviceInfo,
+        scene: &str,
+        sensitivity: u8,
+    ) -> anyhow::Result<ControlDeviceResponseCapability> {
         if scene.is_empty() {
             // Can't set no scene
             anyhow::bail!("Cannot set scene to no-scene");
@@ -340,15 +381,8 @@ impl GoveeApiClient {
 
         if let Some(music_mode) = scene.strip_prefix("Music: ") {
             if let Some(cap) = device.capability_by_instance("musicMode") {
-                if let Some(field) = cap.struct_field_by_name("musicMode") {
-                    if let Some(value) = field.field_type.enum_parameter_by_name(music_mode) {
-                        let value = serde_json::json!({
-                            "musicMode": value,
-                            "sensitivity": 100,
-                            "autoColor": 1,
-                        });
-                        return self.control_device(device, cap, value).await;
-                    }
+                if let Some(value) = build_music_mode_payload(cap, music_mode, sensitivity) {
+                    return self.control_device(device, cap, value).await;
                 }
             }
         }
@@ -1331,5 +1365,59 @@ mod test {
 
         assert!(rendered.contains("status=99"), "{rendered}");
         assert!(!rendered.contains("TOKEN_SENTINEL"), "{rendered}");
+    }
+
+    /// The recorded H6072 fixture carries a real `musicMode` capability, so
+    /// these assert the wire shape against Govee's own schema rather than a
+    /// hand-written stub.
+    fn music_capability() -> DeviceCapability {
+        let resp: GetDevicesResponse = from_json(&LIST_DEVICES_EXAMPLE2).unwrap();
+        resp.data
+            .iter()
+            .find_map(|d| d.capability_by_instance("musicMode").cloned())
+            .expect("fixture has a musicMode capability")
+    }
+
+    #[test]
+    fn music_payload_carries_the_requested_sensitivity() {
+        let cap = music_capability();
+        let payload =
+            build_music_mode_payload(&cap, "Rhythm", 55).expect("Rhythm is a style in the fixture");
+
+        assert_eq!(payload["sensitivity"], 55);
+        assert_eq!(payload["autoColor"], 1);
+        assert!(
+            !payload["musicMode"].is_null(),
+            "the style must resolve to its enum value: {payload}"
+        );
+    }
+
+    #[test]
+    fn music_payload_defaults_match_the_previous_hardcode() {
+        let cap = music_capability();
+        let payload = build_music_mode_payload(&cap, "Rhythm", DEFAULT_MUSIC_SENSITIVITY)
+            .expect("Rhythm is a style in the fixture");
+
+        // Before the preference existed this call always sent 100/1. An
+        // install that never touches the slider must be byte-identical.
+        assert_eq!(payload["sensitivity"], 100);
+        assert_eq!(payload["autoColor"], 1);
+    }
+
+    #[test]
+    fn music_payload_clamps_out_of_range_sensitivity() {
+        let cap = music_capability();
+        let payload = build_music_mode_payload(&cap, "Rhythm", 255).unwrap();
+        assert_eq!(payload["sensitivity"], 100);
+    }
+
+    #[test]
+    fn music_payload_is_none_for_an_unknown_style() {
+        let cap = music_capability();
+        assert!(
+            build_music_mode_payload(&cap, "NotAStyle", 50).is_none(),
+            "an unmapped style must fall through to the scene lookup, not \
+             send a malformed music_setting call"
+        );
     }
 }

@@ -4,7 +4,7 @@ use crate::hass_mqtt::climate::TargetTemperatureEntity;
 use crate::hass_mqtt::humidifier::Humidifier;
 use crate::hass_mqtt::instance::EntityList;
 use crate::hass_mqtt::light::DeviceLight;
-use crate::hass_mqtt::number::WorkModeNumber;
+use crate::hass_mqtt::number::{MusicSensitivityNumber, WorkModeNumber};
 use crate::hass_mqtt::scene::SceneConfig;
 use crate::hass_mqtt::select::{SceneModeSelect, WorkModeSelect};
 use crate::hass_mqtt::sensor::{
@@ -188,6 +188,20 @@ pub async fn enumerate_entities_for_device(
                 DeviceCapabilityKind::Toggle | DeviceCapabilityKind::OnOff => {
                     entities.add(CapabilitySwitch::new(d, state, cap).await?);
                 }
+                DeviceCapabilityKind::MusicSetting
+                    if cap.instance == "musicMode" && !d.avoid_platform_api() =>
+                {
+                    // Styles already ship as `Music: <name>` light effects; the
+                    // only thing HA cannot reach is the sensitivity parameter.
+                    //
+                    // Gated on the same condition `device_set_scene` uses to
+                    // pick the Platform branch. Devices we deliberately keep off
+                    // the Platform API (the `with_broken_platform` quirks) take
+                    // the LAN path, which cannot carry sensitivity — publishing
+                    // the entity there would echo a value that never applies.
+                    entities.add(MusicSensitivityNumber::new(d, state));
+                }
+
                 DeviceCapabilityKind::ColorSetting
                 | DeviceCapabilityKind::SegmentColorSetting
                 | DeviceCapabilityKind::MusicSetting

@@ -1,7 +1,9 @@
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
 use crate::hass_mqtt::instance::{publish_entity_config, EntityInstance};
 use crate::service::device::Device as ServiceDevice;
-use crate::service::hass::{availability_topic, topic_safe_id, topic_safe_string, HassClient};
+use crate::service::hass::{
+    availability_topic, topic_safe_id, topic_safe_string, HassClient, IdParameter,
+};
 use crate::service::state::StateHandle;
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -193,5 +195,107 @@ pub async fn mqtt_number_command(
         .humidifier_set_parameter(&device, work_mode, value)
         .await?;
 
+    Ok(())
+}
+
+/// Sensitivity used the next time a `Music:` effect is selected.
+///
+/// Reports a stored preference rather than device state, because Govee exposes
+/// no readback: `GET /user/devices` answers `""` for `musicMode` on lights, and
+/// the `aa 05 13` BLE triple only tracks BLE/LAN writes. Writing the slider
+/// therefore sends nothing to the device; see `Device::set_music_sensitivity`.
+pub struct MusicSensitivityNumber {
+    number: NumberConfig,
+    device_id: String,
+    state: StateHandle,
+}
+
+impl MusicSensitivityNumber {
+    pub fn new(device: &ServiceDevice, state: &StateHandle) -> Self {
+        let id = topic_safe_id(device);
+        Self {
+            number: NumberConfig {
+                base: EntityConfig {
+                    availability_topic: availability_topic(),
+                    name: Some("Music Sensitivity".to_string()),
+                    device_class: None,
+                    origin: Origin::default(),
+                    device: Device::for_device(device),
+                    unique_id: format!("gv2mqtt-{id}-music-sensitivity"),
+                    entity_category: Some("config".to_string()),
+                    icon: Some("mdi:music-note".to_string()),
+                },
+                command_topic: format!("gv2mqtt/{id}/set-music-sensitivity"),
+                state_topic: Some(format!("gv2mqtt/{id}/notify-music-sensitivity")),
+                min: Some(0.),
+                max: Some(100.),
+                step: 1f32,
+                unit_of_measurement: Some("%"),
+            },
+            device_id: device.id.to_string(),
+            state: state.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl EntityInstance for MusicSensitivityNumber {
+    async fn publish_config(&self, state: &StateHandle, client: &HassClient) -> anyhow::Result<()> {
+        self.number.publish(state, client).await
+    }
+
+    async fn notify_state(&self, client: &HassClient) -> anyhow::Result<()> {
+        let state_topic = self
+            .number
+            .state_topic
+            .as_ref()
+            .ok_or_else(|| anyhow!("state_topic is None!?"))?;
+
+        let Some(device) = self.state.device_by_id(&self.device_id).await else {
+            log::warn!(
+                "Device {} not found in state, skipping notify",
+                self.device_id
+            );
+            return Ok(());
+        };
+
+        // Until the user picks a value there is nothing truthful to report:
+        // the device is not queryable, so claiming the default would assert
+        // something we have not observed.
+        if !device.music_sensitivity_is_set() {
+            return Ok(());
+        }
+
+        client
+            .publish(state_topic, device.music_sensitivity().to_string())
+            .await
+    }
+}
+
+pub async fn mqtt_music_sensitivity_command(
+    Payload(value): Payload<i64>,
+    Params(IdParameter { id }): Params<IdParameter>,
+    State(state): State<StateHandle>,
+) -> anyhow::Result<()> {
+    // Read-only resolver on purpose: this stores a preference and sends
+    // nothing. Taking the control coordinator would hold the per-device permit
+    // and schedule a `poll_after_control` Platform API request 5s after every
+    // slider move.
+    let device = state.resolve_device_read_only(&id).await?;
+    let clamped = value.clamp(0, 100) as u8;
+    log::info!(
+        "Storing music sensitivity {clamped} for {device}; \
+         it applies on the next Music: effect"
+    );
+    // Scope the guard: `device_mut` locks the whole device map, and
+    // `notify_of_state_change` re-locks it. Holding one across the other
+    // deadlocks — see the warning on `notify_of_state_change` in state.rs.
+    {
+        state
+            .device_mut(&device.sku, &device.id)
+            .await
+            .set_music_sensitivity(clamped);
+    }
+    state.notify_of_state_change(&device.id).await?;
     Ok(())
 }
