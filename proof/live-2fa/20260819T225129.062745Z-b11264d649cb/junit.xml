@@ -1,0 +1,2 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuite name="govee-live-2fa" tests="1" failures="1" timestamp="2026-08-19T22:54:36Z"><testcase name="account-login-2fa-sequence"><failure message="email_wait_timed_out">email_wait_timed_out</failure></testcase></testsuite>

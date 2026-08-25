@@ -163,7 +163,10 @@ fn truncate_body_for_diagnostics(body_bytes: &[u8]) -> String {
 /// whether a code was configured, never the message or any credential. The
 /// user-facing error stays wrapped in `NoCacheError`, preserving the login
 /// cache-bypass contract.
-#[cfg(test)]
+///
+/// Also compiled under `live-2fa-test`, where the `undoc live2fa-login` probe
+/// uses it to emit a redacted outcome. See `docs/LIVE_2FA_TEST.md`.
+#[cfg(any(test, feature = "live-2fa-test"))]
 pub(crate) fn classify_2fa_login_error(err: &anyhow::Error) -> Option<(u64, bool)> {
     let no_cache = err.downcast_ref::<NoCacheError>()?;
     let two_factor = no_cache.0.downcast_ref::<TwoFactorLoginError>()?;
@@ -808,9 +811,12 @@ impl GoveeUndocumentedApi {
             }
         }
         if status == 454 && !code_was_set {
-            // A failed request must never replace the 454 guidance. Log the
-            // transport failure, then return guidance that names the setting
-            // without claiming that an email was requested.
+            // A failed request must never replace the 454 guidance. serve.rs
+            // appends ISSUE_76_EXPLANATION to whatever surfaces here, and that
+            // text tells the user to remove their Govee credentials and drop to
+            // LAN-only -- ruinous advice for someone who only needed to paste a
+            // code. Log the transport failure, then return guidance that names
+            // the setting without claiming that an email was requested.
             if let Err(err) = request_code.await {
                 log::warn!(
                     "Could not request a Govee 2FA verification code: {err:#}. \

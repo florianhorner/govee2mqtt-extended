@@ -149,8 +149,14 @@ fn setup_logger() {
 #[tokio::main(worker_threads = 2)]
 async fn main() -> anyhow::Result<()> {
     color_backtrace::install();
-    if let Ok(path) = dotenvy::dotenv() {
-        eprintln!("Loading environment overrides from {path:?}");
+    #[cfg(feature = "live-2fa-test")]
+    let skip_dotenv = std::env::var("GOVEE_LIVE_2FA_NO_DOTENV").as_deref() == Ok("1");
+    #[cfg(not(feature = "live-2fa-test"))]
+    let skip_dotenv = false;
+    if !skip_dotenv {
+        if let Ok(path) = dotenvy::dotenv() {
+            eprintln!("Loading environment overrides from {path:?}");
+        }
     }
 
     setup_logger();

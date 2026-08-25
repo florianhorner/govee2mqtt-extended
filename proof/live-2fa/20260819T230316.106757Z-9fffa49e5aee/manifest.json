@@ -1,0 +1,22 @@
+{
+  "account_allowlist_verified": true,
+  "commit": "9fffa49e5aee9080e7b835d9e156225429404d05",
+  "limits": {
+    "email_timeout_seconds": 180,
+    "email_trigger_requests_upper_bound": 4,
+    "expected_emails": 2,
+    "govee_http_requests_upper_bound": 10,
+    "login_requests": 6,
+    "overall_timeout_seconds": 600,
+    "quiet_window_seconds": 30,
+    "verification_requests_upper_bound": 4
+  },
+  "mode": "run",
+  "run_id": "20260819T230316.106757Z-9fffa49e5aee",
+  "runtime": {
+    "platform": "macOS-26.5.1-arm64-arm-64bit",
+    "python": "3.9.6"
+  },
+  "schema": 1,
+  "started_utc": "2026-08-19T23:03:16Z"
+}

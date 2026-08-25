@@ -1,0 +1,167 @@
+# Local verification log: live 2FA test harness
+# base: issue-36-feature (the 2FA email-request change)
+# date: 2026-08-20
+# host: macOS 26.5.1, rustc 1.94.1 (e408947bf 2026-03-25), Python 3.9.6
+# live Govee/IMAP account: TESTED (bundles under proof/live-2fa/)
+# Govee device hardware: NOT TESTED
+
+This PR adds the harness that produced the evidence cited by the 2FA
+email-request PR. It ships no user-facing behaviour change: the
+`live-2fa-test` cargo feature is off by default and `scripts/build-cross.sh`
+builds `--release` with no `--features`, so neither the `undoc live2fa-login`
+probe nor the `GOVEE_LIVE_2FA_NO_DOTENV` dotenv bypass is compiled into any
+released binary or add-on image.
+
+## cargo build --all
+Finished `dev` profile successfully.
+BUILD: OK
+
+## cargo clippy --all -- -D warnings
+Finished `dev` profile successfully.
+SHIPPED-CONFIG CLIPPY: OK
+
+## cargo clippy --all --all-features -- -D warnings
+Finished `dev` profile successfully.
+LIVE PROBE CLIPPY: OK
+
+## cargo test --all -- --show-output
+test result: ok. 159 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+SHIPPED-CONFIG TESTS: OK
+
+## cargo test --all --all-features -- --show-output
+test result: ok. 160 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+TESTS: OK
+
+The two runs differ by one test on purpose:
+commands::undoc::test::probe_subcommand_name_matches_the_harness_invocation is
+feature-gated. A single --all-features run would never compile the
+#[cfg(not(feature = "live-2fa-test"))] arms, which are the ones that ship, so
+CI runs both.
+
+## cargo fmt --all -- --check
+FMT: OK
+
+## python3 -m unittest scripts/test_live_2fa.py
+Ran 15 tests
+OK
+LIVE HARNESS TESTS: OK
+
+## cargo run --quiet --features live-2fa-test -- undoc --help
+Subcommand renders as `live2fa-login`, matching the name scripts/live_2fa.py
+invokes. The name is pinned with #[command(name = ...)] rather than derived,
+and probe_subcommand_name_matches_the_harness_invocation reads the invocation
+back out of the harness source so the two cannot drift. Mutation-checked:
+renaming the pin to `live-2fa-login` fails that test with
+"harness runs `undoc live2fa-login` but clap renders [...]".
+PROBE CLI: OK
+
+## Live account runs
+
+Six bundles under `proof/live-2fa/`, indexed by `proof/live-2fa/README.md`.
+Four PASS, two FAIL. Both failures are kept on purpose: each recorded a real
+provider finding, and both findings have regression tests
+(`test_mail_parser_extracts_one_unique_code_from_html_body`,
+`test_mailbox_filters_reversed_empty_uid_range`).
+
+Totals across all six runs: 9 login requests, at most 7 verification
+requests, at most 16 Govee HTTP requests, 4 delivered verification emails.
+No device or MQTT endpoint was contacted in any run.
+
+## Known gaps
+
+The harness's own safety gates are not unit-tested: `Config.load`,
+`secret_file`, `ensure_clean_worktree`, and `Probe.invoke`'s request budget.
+`FakeProbe` in the test file hand-duplicates the budget check, so the real
+one is never exercised. Tracked as follow-up work; stated here rather than
+implied to be covered.
+
+IMAP operations carry their own 30-second socket timeouts and do not consult
+the global deadline, so a stalled server can make a run exceed the declared
+10-minute bound.
+
+================================================================
+## Round 5 — /ship re-run: Codex review of the round-4 fixes
+Run: 2026-08-24, branch issue-36-harness
+Scope: the two harness fixes from the prior /ship round were themselves
+       reviewed by Codex, which found all three items below.
+================================================================
+
+Codex verdict on the previous round: "Both fixes are incomplete."
+
+1. Deadline clamp re-created the timeout bug. `timeout=min(PROBE_TIMEOUT_SECONDS,
+   remaining)` still launched a probe with less than the full two-request budget
+   whenever the overall deadline was close, killing it mid-flight after Govee may
+   already have accepted the verification request. Fixed: refuse to start unless
+   the full budget remains, and report `overall_timeout_exceeded`, which is the
+   accurate reason.
+
+2. tempfile.gettempdir() was the wrong home for the lock. It honours $TMPDIR, so
+   two shells with different values silently took different locks; on Linux it
+   also defaults to a world-writable /tmp where another local user can pre-create
+   the predictable filename or a symlink at it. Fixed: the lock now lives in
+   ~/.cache/govee2mqtt-live-2fa/ (created mode 0700, ownership and non-symlink
+   verified at use).
+
+3. Confirmation-gate precedence had regressed. Reading GOVEE_LIVE_ACCOUNT_SHA256
+   before the GOVEE_LIVE_CONFIRM check changed which error a doubly-misconfigured
+   run reports. Codex confirmed no network-safety bypass. Fixed: confirmation is
+   checked first again.
+
+$ cargo test --all              -> 166 passed; 0 failed
+$ cargo test --all --all-features -> 167 passed; 0 failed
+$ python3 -m unittest scripts/test_live_2fa.py -> 21 passed (was 17)
+$ cargo clippy --all -- -D warnings              -> clean
+$ cargo clippy --all --all-features -- -D warnings -> clean
+$ cargo fmt --all -- --check                     -> clean
+
+### Regression proof (each fix reverted in isolation, suite re-run)
+
+  revert deadline refusal -> clamp
+    test_probe_refuses_to_start_without_its_full_budget ... FAILED
+  revert lock back to tempfile.gettempdir()
+    test_lock_path_ignores_tmpdir ... FAILED
+  revert confirmation-first ordering
+    test_confirmation_gate_is_checked_before_the_account_hash ... FAILED
+
+  All three restored: 21 passed, 0 failed.
+
+The ordering test was added specifically because the first mutation run of that
+revert passed — nothing covered it. Stated rather than quietly patched.
+
+### Empirical checks (not inference)
+
+  Two worktrees resolve tempfile.gettempdir() identically on this macOS host
+  (/var/folders/hf/.../T, mode 0700, uid 501), which is why the original TMPDIR
+  approach appeared to work locally. It is still wrong for the $TMPDIR-override
+  and Linux-/tmp cases Codex named, hence the move to ~/.cache.
+
+  Real lock dir after the fix:
+    /Users/<user>/.cache/govee2mqtt-live-2fa/<account-hash>.lock
+    dir mode 0700, owned by the running user, not a symlink, not world-writable.
+
+  fcntl.flock is per-open-file-description, verified on this host: a second
+  RunLock on the same path raises even inside one process. That is what makes
+  test_lock_actually_excludes_a_second_holder a genuine mutual-exclusion test
+  rather than a path-string comparison.
+
+### Not exercised live
+
+No live Govee/IMAP run this round. All three fixes are on control-flow and
+filesystem paths that the recorded live sequence never hit (it had no timeouts,
+no concurrent run, and a valid configuration).
+
+### Round 5 addendum — independent coverage audit
+
+A parallel coverage audit of the round-4 delta reached the same conclusions
+independently, by manual branch trace plus its own mutation run, and proved one
+gap the round-5 fixes did NOT close: main() carries its own copy of the sha256
+regex, separate from the one in verify_account_allowlist, and testing the other
+copy gives it no protection. Closed with
+test_malformed_account_hash_is_rejected_before_locking; mutation-verified by
+deleting the guard, which fails that test. Python suite 21 -> 22.
+
+That audit ran against the pre-fix commit while these files were being edited,
+so its headline 33% figure describes b931026, not the shipped state. Recorded
+here because the finding it produced was real and is now fixed.
+
+ROUND 5 GATES: OK

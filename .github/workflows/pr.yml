@@ -17,10 +17,19 @@ jobs:
     - uses: actions/checkout@v6
     - name: Build
       run: cargo build --all
-    - name: Clippy
+    # Lint the shipped configuration first: release builds use default features,
+    # so a warning that only fires with live-2fa-test OFF must still fail CI.
+    - name: Clippy (default features)
       run: cargo clippy --all -- -D warnings
-    - name: Run tests
+    - name: Clippy (all features)
+      run: cargo clippy --all --all-features -- -D warnings
+    # Same reasoning as clippy: --all-features never compiles the
+    # #[cfg(not(feature = "live-2fa-test"))] arms, which are the ones that ship.
+    - name: Run tests (default features)
       run: cargo test --all -- --show-output
+    - name: Run tests (all features)
+      run: cargo test --all --all-features -- --show-output
+    - name: Test live 2FA harness
+      run: python3 -m unittest scripts/test_live_2fa.py
     - name: Check formatting
       run: cargo fmt --all -- --check
-
