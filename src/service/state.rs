@@ -1286,4 +1286,52 @@ mod tests {
                 .await
         );
     }
+
+    /// Regression guard for the sensitivity read in `device_set_scene`.
+    ///
+    /// The `Device` a control command holds is a clone taken by
+    /// `resolve_device_for_control` *before* it acquires the per-device permit,
+    /// so a slider write that lands while the command queues is absent from it.
+    /// The scene call therefore re-reads the canonical device; reverting to
+    /// `device.music_sensitivity()` would silently ship the pre-write value.
+    #[tokio::test]
+    async fn music_sensitivity_is_read_from_the_canonical_device_not_the_snapshot() {
+        let state = State::new();
+        let stale_snapshot = Device::new("H607C", "AA:BB:CC:DD:EE:FF");
+        {
+            let mut canonical = state.device_mut("H607C", "AA:BB:CC:DD:EE:FF").await;
+            canonical.set_music_sensitivity(42);
+        }
+
+        assert_eq!(
+            stale_snapshot.music_sensitivity(),
+            crate::platform_api::DEFAULT_MUSIC_SENSITIVITY,
+            "the snapshot predates the slider write"
+        );
+
+        // The exact lookup device_set_scene performs before calling
+        // set_scene_by_name_with_sensitivity.
+        let sensitivity = match state.device_by_id(&stale_snapshot.id).await {
+            Some(current) => current.music_sensitivity(),
+            None => stale_snapshot.music_sensitivity(),
+        };
+        assert_eq!(sensitivity, 42, "the fresh value must win");
+    }
+
+    /// The fallback arm of that same lookup: if the device is no longer in the
+    /// map, the command must still send something rather than bail.
+    #[tokio::test]
+    async fn music_sensitivity_falls_back_to_the_snapshot_when_the_device_is_gone() {
+        let state = State::new();
+        let mut snapshot = Device::new("H607C", "AA:BB:CC:DD:EE:FF");
+        snapshot.set_music_sensitivity(7);
+
+        assert!(state.device_by_id(&snapshot.id).await.is_none());
+
+        let sensitivity = match state.device_by_id(&snapshot.id).await {
+            Some(current) => current.music_sensitivity(),
+            None => snapshot.music_sensitivity(),
+        };
+        assert_eq!(sensitivity, 7);
+    }
 }

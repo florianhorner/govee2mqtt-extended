@@ -27,7 +27,17 @@ const SERVER: &str = "https://openapi.api.govee.com";
 pub const ONE_WEEK: Duration = Duration::from_secs(86400 * 7);
 pub const FIVE_MINUTES: Duration = Duration::from_secs(5 * 60);
 
+/// Test-only redirect for the Platform API base. Production always uses
+/// `SERVER`: the override is `#[cfg(test)]`, so it does not exist in a release
+/// build and cannot be reached by configuration.
+#[cfg(test)]
+pub(crate) static TEST_API_BASE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 fn endpoint(url: &str) -> String {
+    #[cfg(test)]
+    if let Some(base) = TEST_API_BASE.get() {
+        return format!("{base}{url}");
+    }
     format!("{SERVER}{url}")
 }
 
@@ -1418,6 +1428,243 @@ mod test {
             build_music_mode_payload(&cap, "NotAStyle", 50).is_none(),
             "an unmapped style must fall through to the scene lookup, not \
              send a malformed music_setting call"
+        );
+    }
+
+    /// A `musicMode` capability whose parameters are absent (or not a struct)
+    /// must yield no payload at all. Sending `music_setting` without the
+    /// required `musicMode` field is the 400 `Missing parameter` case; falling
+    /// through to the ordinary scene lookup is the correct recovery.
+    #[test]
+    fn music_payload_is_none_when_the_capability_has_no_music_mode_field() {
+        let cap = DeviceCapability {
+            kind: DeviceCapabilityKind::MusicSetting,
+            instance: "musicMode".to_string(),
+            parameters: None,
+            alarm_type: None,
+            event_state: None,
+        };
+
+        assert!(
+            build_music_mode_payload(&cap, "Rhythm", 50).is_none(),
+            "a capability with no musicMode struct field cannot produce a \
+             well-formed music_setting call"
+        );
+    }
+
+    /// The empty-scene guard runs before any network call, so it is the one
+    /// branch of `set_scene_by_name_with_sensitivity` that is reachable without
+    /// an HTTP mock. It must still reject, and must not be bypassed by the
+    /// music-mode branch that now sits behind it.
+    #[tokio::test]
+    async fn set_scene_with_sensitivity_refuses_an_empty_scene() {
+        let resp: GetDevicesResponse = from_json(&LIST_DEVICES_EXAMPLE2).unwrap();
+        let device = resp
+            .data
+            .iter()
+            .find(|d| d.capability_by_instance("musicMode").is_some())
+            .expect("fixture has a musicMode device")
+            .clone();
+
+        let client = GoveeApiClient::new("test-key");
+        let err = client
+            .set_scene_by_name_with_sensitivity(&device, "", 55)
+            .await
+            .expect_err("an empty scene name must be rejected");
+
+        assert!(err.to_string().contains("no-scene"), "{err:#}");
+    }
+
+    // ---- Live Platform API path, exercised against a real in-process server ----
+    //
+    // The music payload tests above prove the JSON we *build*. These prove the
+    // JSON that actually leaves the process: `set_scene_by_name_with_sensitivity`
+    // through `control_device`, `request_with_json_response`, reqwest, and back.
+    // No new dependency: axum and tokio are already in the tree, and the base URL
+    // override is `#[cfg(test)]` so production cannot reach it.
+
+    use std::sync::{Arc, Mutex};
+
+    /// Requests the bridge sent, captured in order.
+    type Captured = Arc<Mutex<Vec<JsonValue>>>;
+
+    /// Live-path tests share one capture server, so they assert on request
+    /// *position*. Hold this for the duration of each one: without it, a
+    /// concurrent test's request lands in between and the count is wrong.
+    static LIVE_PATH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the serialization lock, ignoring poisoning. A panic in one live test
+    /// should surface as that test's own failure, not as a `PoisonError`
+    /// cascade that hides it in every sibling.
+    fn live_path_guard() -> std::sync::MutexGuard<'static, ()> {
+        LIVE_PATH.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The capture server runs on its own thread with its own runtime.
+    ///
+    /// Spawning it inside a `#[tokio::test]` looks fine and passes in isolation,
+    /// but that runtime is torn down when the test returns, killing the server
+    /// for every test that runs after it. A dedicated thread outlives the whole
+    /// test binary.
+    fn capture_server() -> Captured {
+        use axum::{extract::State as AxumState, routing::post, Json, Router};
+
+        static SERVER: std::sync::OnceLock<Captured> = std::sync::OnceLock::new();
+
+        SERVER
+            .get_or_init(|| {
+                let (tx, rx) = std::sync::mpsc::channel();
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(2)
+                        .enable_all()
+                        .build()
+                        .expect("capture-server runtime");
+
+                    rt.block_on(async move {
+                        async fn control(
+                            AxumState(captured): AxumState<Captured>,
+                            Json(body): Json<JsonValue>,
+                        ) -> Json<JsonValue> {
+                            let instance = body["payload"]["capability"]["instance"]
+                                .as_str()
+                                .unwrap_or("unknown")
+                                .to_string();
+                            let value = body["payload"]["capability"]["value"].clone();
+                            captured
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push(body);
+                            Json(serde_json::json!({
+                                "requestId": "test",
+                                "code": 200,
+                                "msg": "success",
+                                "capability": {
+                                    "type": "devices.capabilities.music_setting",
+                                    "instance": instance,
+                                    "value": value,
+                                    "state": {},
+                                },
+                            }))
+                        }
+
+                        let captured: Captured = Arc::new(Mutex::new(vec![]));
+                        let app = Router::new()
+                            .route("/router/api/v1/device/control", post(control))
+                            .with_state(captured.clone());
+
+                        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                            .await
+                            .expect("bind capture server");
+                        let addr = listener.local_addr().expect("local addr");
+                        tx.send((addr, captured)).expect("hand back the address");
+
+                        axum::serve(listener, app).await.expect("serve");
+                    });
+                });
+
+                let (addr, captured) = rx.recv().expect("capture server started");
+                TEST_API_BASE
+                    .set(format!("http://{addr}"))
+                    .expect("base URL set exactly once");
+                captured
+            })
+            .clone()
+    }
+
+    fn music_device() -> HttpDeviceInfo {
+        let resp: GetDevicesResponse = from_json(&LIST_DEVICES_EXAMPLE2).unwrap();
+        resp.data
+            .iter()
+            .find(|d| d.capability_by_instance("musicMode").is_some())
+            .expect("fixture has a device with musicMode")
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn music_effect_sends_the_stored_sensitivity_over_the_wire() {
+        let _serialized = live_path_guard();
+        let captured = capture_server();
+        let client = GoveeApiClient::new("test-key");
+        let device = music_device();
+
+        let before = captured.lock().unwrap_or_else(|e| e.into_inner()).len();
+        client
+            .set_scene_by_name_with_sensitivity(&device, "Music: Rhythm", 42)
+            .await
+            .expect("control_device succeeds against the capture server");
+
+        let sent = captured.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(sent.len(), before + 1, "exactly one request should be sent");
+        let cap = &sent[before]["payload"]["capability"];
+        assert_eq!(cap["instance"], "musicMode");
+        assert_eq!(cap["type"], "devices.capabilities.music_setting");
+        assert_eq!(
+            cap["value"]["sensitivity"], 42,
+            "the stored preference must reach the wire, not the old hardcoded 100"
+        );
+        assert_eq!(cap["value"]["autoColor"], 1);
+        assert!(!cap["value"]["musicMode"].is_null());
+    }
+
+    #[tokio::test]
+    async fn music_effect_clamps_over_range_sensitivity_on_the_wire() {
+        let _serialized = live_path_guard();
+        let captured = capture_server();
+        let client = GoveeApiClient::new("test-key");
+        let device = music_device();
+
+        let before = captured.lock().unwrap_or_else(|e| e.into_inner()).len();
+        client
+            .set_scene_by_name_with_sensitivity(&device, "Music: Rhythm", 250)
+            .await
+            .expect("control_device succeeds");
+
+        let sent = captured.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            sent[before]["payload"]["capability"]["value"]["sensitivity"], 100,
+            "out-of-range input must be clamped before it leaves the process"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_set_scene_by_name_still_sends_the_historical_default() {
+        let _serialized = live_path_guard();
+        let captured = capture_server();
+        let client = GoveeApiClient::new("test-key");
+        let device = music_device();
+
+        let before = captured.lock().unwrap_or_else(|e| e.into_inner()).len();
+        client
+            .set_scene_by_name(&device, "Music: Rhythm")
+            .await
+            .expect("control_device succeeds");
+
+        let sent = captured.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            sent[before]["payload"]["capability"]["value"]["sensitivity"], 100,
+            "the CLI path must be byte-identical to the pre-preference behaviour"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_scene_never_reaches_the_wire() {
+        let _serialized = live_path_guard();
+        let captured = capture_server();
+        let client = GoveeApiClient::new("test-key");
+        let device = music_device();
+
+        let before = captured.lock().unwrap_or_else(|e| e.into_inner()).len();
+        let err = client
+            .set_scene_by_name_with_sensitivity(&device, "", 50)
+            .await
+            .expect_err("an empty scene must be refused");
+        assert!(format!("{err:#}").contains("no-scene"));
+        assert_eq!(
+            captured.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            before,
+            "a refused scene must send nothing"
         );
     }
 }

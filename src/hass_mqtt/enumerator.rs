@@ -189,7 +189,8 @@ pub async fn enumerate_entities_for_device(
                     entities.add(CapabilitySwitch::new(d, state, cap).await?);
                 }
                 DeviceCapabilityKind::MusicSetting
-                    if cap.instance == "musicMode" && !d.avoid_platform_api() =>
+                    if cap.instance.eq_ignore_ascii_case("musicMode")
+                        && !d.avoid_platform_api() =>
                 {
                     // Styles already ship as `Music: <name>` light effects; the
                     // only thing HA cannot reach is the sensitivity parameter.
@@ -239,4 +240,118 @@ pub async fn enumerate_entities_for_device(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::platform_api::HttpDeviceInfo;
+    use crate::service::state::{SceneCatalogCache, State};
+    use std::sync::Arc;
+
+    const DEVICE_ID: &str = "AA:BB:CC:DD:EE:FF:11:22";
+
+    fn capability(kind: DeviceCapabilityKind, instance: &str) -> DeviceCapability {
+        DeviceCapability {
+            kind,
+            instance: instance.to_string(),
+            parameters: None,
+            alarm_type: None,
+            event_state: None,
+        }
+    }
+
+    fn device_with_capabilities(sku: &str, capabilities: Vec<DeviceCapability>) -> ServiceDevice {
+        let mut device = ServiceDevice::new(sku, DEVICE_ID);
+        device.http_device_info = Some(HttpDeviceInfo {
+            sku: sku.to_string(),
+            device: DEVICE_ID.to_string(),
+            device_name: "Test Light".to_string(),
+            device_type: DeviceType::Light,
+            capabilities,
+        });
+        device
+    }
+
+    /// Enumerates against a state that already holds an (empty) scene catalog
+    /// for the device, so the light entity's effect list is served from cache
+    /// and no test ever reaches out to the Govee API.
+    async fn entity_count(device: &ServiceDevice) -> usize {
+        let state: StateHandle = Arc::new(State::new());
+        {
+            let mut canonical = state.device_mut(&device.sku, &device.id).await;
+            canonical.set_scene_catalog(SceneCatalogCache {
+                platform_signature: None,
+                categories: vec![],
+            });
+        }
+
+        let mut entities = EntityList::new();
+        enumerate_entities_for_device(device, &state, &mut entities)
+            .await
+            .expect("enumeration must not fail");
+        entities.len()
+    }
+
+    /// A Platform-API device that advertises `musicMode` gains exactly one
+    /// extra entity: the sensitivity slider. Measured as a delta against the
+    /// same device without the capability, so unrelated entity additions to
+    /// the enumerator do not make this test lie.
+    #[tokio::test]
+    async fn music_mode_capability_publishes_the_sensitivity_slider() {
+        // H9999 is deliberately absent from the quirk table: no quirk means
+        // no rgb/brightness inference, so only the capability list matters.
+        let without = entity_count(&device_with_capabilities("H9999", vec![])).await;
+        let with = entity_count(&device_with_capabilities(
+            "H9999",
+            vec![capability(DeviceCapabilityKind::MusicSetting, "musicMode")],
+        ))
+        .await;
+
+        assert_eq!(
+            with,
+            without + 1,
+            "musicMode must add exactly the Music Sensitivity number"
+        );
+    }
+
+    /// The arm is guarded on the instance name, not just the capability kind.
+    /// Other `MusicSetting` instances must keep falling through to the
+    /// deliberate no-op arm rather than publishing a slider that maps to
+    /// nothing (or hitting the `kind => warn` catch-all).
+    #[tokio::test]
+    async fn other_music_setting_instances_publish_nothing() {
+        let without = entity_count(&device_with_capabilities("H9999", vec![])).await;
+        let with = entity_count(&device_with_capabilities(
+            "H9999",
+            vec![capability(DeviceCapabilityKind::MusicSetting, "musicScene")],
+        ))
+        .await;
+
+        assert_eq!(with, without, "only the musicMode instance is actionable");
+    }
+
+    /// Devices quirked off the Platform API take the LAN scene path, which
+    /// cannot carry sensitivity. Publishing the slider there would echo a
+    /// value that never reaches the device. H6141 is `with_broken_platform`.
+    #[tokio::test]
+    async fn broken_platform_quirks_do_not_publish_the_slider() {
+        let quirked = device_with_capabilities(
+            "H6141",
+            vec![capability(DeviceCapabilityKind::MusicSetting, "musicMode")],
+        );
+        assert!(
+            quirked.avoid_platform_api(),
+            "H6141 must still be quirked off the Platform API, or this test \
+             is guarding nothing"
+        );
+
+        let without = entity_count(&device_with_capabilities("H6141", vec![])).await;
+        let with = entity_count(&quirked).await;
+
+        assert_eq!(
+            with, without,
+            "a LAN-only device must not get a sensitivity slider"
+        );
+    }
 }

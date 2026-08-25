@@ -208,6 +208,10 @@ pub struct MusicSensitivityNumber {
     number: NumberConfig,
     device_id: String,
     state: StateHandle,
+    /// Owned rather than re-read from `number.state_topic`: this entity always
+    /// has one, and reading back through the `Option` forced an error arm that
+    /// could never be constructed.
+    state_topic: String,
 }
 
 impl MusicSensitivityNumber {
@@ -234,6 +238,7 @@ impl MusicSensitivityNumber {
             },
             device_id: device.id.to_string(),
             state: state.clone(),
+            state_topic: format!("gv2mqtt/{id}/notify-music-sensitivity"),
         }
     }
 }
@@ -245,12 +250,6 @@ impl EntityInstance for MusicSensitivityNumber {
     }
 
     async fn notify_state(&self, client: &HassClient) -> anyhow::Result<()> {
-        let state_topic = self
-            .number
-            .state_topic
-            .as_ref()
-            .ok_or_else(|| anyhow!("state_topic is None!?"))?;
-
         let Some(device) = self.state.device_by_id(&self.device_id).await else {
             log::warn!(
                 "Device {} not found in state, skipping notify",
@@ -267,13 +266,16 @@ impl EntityInstance for MusicSensitivityNumber {
         }
 
         client
-            .publish(state_topic, device.music_sensitivity().to_string())
+            .publish(&self.state_topic, device.music_sensitivity().to_string())
             .await
     }
 }
 
 pub async fn mqtt_music_sensitivity_command(
-    Payload(value): Payload<i64>,
+    // `Payload<String>` + explicit parse, like `mqtt_set_temperature`: HA sends
+    // integers, but a hand-published "55.0" would fail `Payload<i64>` before the
+    // handler ever runs, losing the chance to say why.
+    Payload(value): Payload<String>,
     Params(IdParameter { id }): Params<IdParameter>,
     State(state): State<StateHandle>,
 ) -> anyhow::Result<()> {
@@ -282,6 +284,11 @@ pub async fn mqtt_music_sensitivity_command(
     // and schedule a `poll_after_control` Platform API request 5s after every
     // slider move.
     let device = state.resolve_device_read_only(&id).await?;
+    let value: i64 = value
+        .trim()
+        .parse::<f64>()
+        .map(|v| v.round() as i64)
+        .map_err(|_| anyhow::anyhow!("music sensitivity must be a number, got {value:?}"))?;
     let clamped = value.clamp(0, 100) as u8;
     log::info!(
         "Storing music sensitivity {clamped} for {device}; \
@@ -298,4 +305,230 @@ pub async fn mqtt_music_sensitivity_command(
     }
     state.notify_of_state_change(&device.id).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::service::state::State as ServiceState;
+    use std::sync::Arc;
+
+    /// Deliberately colon-bearing: `topic_safe_id` must rewrite it, and the
+    /// command topic the slider publishes to carries the rewritten form.
+    const DEVICE_ID: &str = "AA:BB:CC:DD:EE:FF:11:22";
+    const SKU: &str = "H607C";
+
+    fn test_device() -> ServiceDevice {
+        ServiceDevice::new(SKU, DEVICE_ID)
+    }
+
+    fn empty_state() -> StateHandle {
+        Arc::new(ServiceState::new())
+    }
+
+    async fn state_with_device() -> StateHandle {
+        let state = empty_state();
+        {
+            let _device = state.device_mut(SKU, DEVICE_ID).await;
+        }
+        state
+    }
+
+    async fn stored_sensitivity(state: &StateHandle) -> ServiceDevice {
+        state
+            .device_by_id(DEVICE_ID)
+            .await
+            .expect("device is in state")
+    }
+
+    /// The entity is a config-category percent slider over Govee's own 0-100
+    /// range. `entity_category` keeps it out of the main device card, and the
+    /// unique_id is the identity Home Assistant keys the entity registry on:
+    /// changing it orphans every existing slider.
+    #[test]
+    fn music_sensitivity_entity_is_a_config_percent_slider() {
+        let device = test_device();
+        let entity = MusicSensitivityNumber::new(&device, &empty_state());
+        let cfg = &entity.number;
+
+        assert_eq!(
+            cfg.base.unique_id,
+            format!("gv2mqtt-{}-music-sensitivity", topic_safe_id(&device))
+        );
+        assert_eq!(cfg.base.name.as_deref(), Some("Music Sensitivity"));
+        assert_eq!(cfg.base.entity_category.as_deref(), Some("config"));
+        assert_eq!(cfg.base.icon.as_deref(), Some("mdi:music-note"));
+        assert_eq!(cfg.base.device_class, None);
+
+        assert_eq!(cfg.min, Some(0.));
+        assert_eq!(cfg.max, Some(100.));
+        assert_eq!(cfg.step, 1f32);
+        assert_eq!(cfg.unit_of_measurement, Some("%"));
+
+        // notify_state resolves the device from state by raw id, not topic id.
+        assert_eq!(entity.device_id, DEVICE_ID);
+    }
+
+    /// The slider is inert unless `hass.rs` subscribes to exactly the topic the
+    /// discovery payload advertises. Renaming one side only is silent: HA shows
+    /// a working slider that writes to a topic nobody reads.
+    #[test]
+    fn command_and_state_topics_match_the_registered_mqtt_route() {
+        let device = test_device();
+        let entity = MusicSensitivityNumber::new(&device, &empty_state());
+        let id = topic_safe_id(&device);
+
+        assert_eq!(
+            entity.number.command_topic,
+            format!("gv2mqtt/{id}/set-music-sensitivity")
+        );
+        let expected_state_topic = format!("gv2mqtt/{id}/notify-music-sensitivity");
+        assert_eq!(
+            entity.number.state_topic.as_deref(),
+            Some(expected_state_topic.as_str())
+        );
+
+        let route = entity.number.command_topic.replacen(&id, ":id", 1);
+        assert_eq!(route, "gv2mqtt/:id/set-music-sensitivity");
+        assert!(
+            include_str!("../service/hass.rs").contains(&format!("\"{route}\"")),
+            "src/service/hass.rs must register the route {route} that this \
+             entity tells Home Assistant to publish to"
+        );
+    }
+
+    /// What actually reaches Home Assistant's discovery topic.
+    #[test]
+    fn music_sensitivity_discovery_payload_carries_the_slider_bounds() {
+        let device = test_device();
+        let entity = MusicSensitivityNumber::new(&device, &empty_state());
+        let json = serde_json::to_value(&entity.number).unwrap();
+
+        assert_eq!(json["min"], 0.0);
+        assert_eq!(json["max"], 100.0);
+        assert_eq!(json["step"], 1.0);
+        assert_eq!(json["unit_of_measurement"], "%");
+        assert_eq!(json["entity_category"], "config");
+        assert_eq!(json["icon"], "mdi:music-note");
+        assert_eq!(json["name"], "Music Sensitivity");
+        assert!(
+            json["command_topic"].is_string() && json["state_topic"].is_string(),
+            "both topics must survive serialization: {json}"
+        );
+        assert!(
+            json.get("device_class").is_none(),
+            "a percent preference has no HA device class: {json}"
+        );
+    }
+
+    /// The HA slider write path, end to end minus the broker.
+    #[tokio::test]
+    async fn slider_write_stores_the_preference() {
+        let state = state_with_device().await;
+
+        // Bounded on purpose. `device_mut` locks the whole device map and
+        // `notify_of_state_change` re-locks it, so holding the guard across
+        // the notify deadlocks rather than failing -- the timeout turns that
+        // into a named failure instead of a hung CI job.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            mqtt_music_sensitivity_command(
+                Payload("55".to_string()),
+                Params(IdParameter {
+                    id: DEVICE_ID.to_string(),
+                }),
+                State(state.clone()),
+            ),
+        )
+        .await
+        .expect("the device_mut guard must be dropped before notify_of_state_change")
+        .expect("storing a preference must not fail without a hass client");
+
+        let device = stored_sensitivity(&state).await;
+        assert_eq!(device.music_sensitivity(), 55);
+        assert!(device.music_sensitivity_is_set());
+    }
+
+    /// Home Assistant publishes to `gv2mqtt/<topic_safe_id>/...`, so the `:id`
+    /// the router hands the command is the topic-safe form — colons rewritten.
+    /// `resolve_device_read_only` has to accept that form or every slider write
+    /// fails with "device not found".
+    #[tokio::test]
+    async fn slider_write_resolves_the_topic_safe_id_from_the_command_topic() {
+        let state = state_with_device().await;
+        let topic_id = topic_safe_id(&test_device());
+        assert_ne!(
+            topic_id, DEVICE_ID,
+            "the fixture id must differ from its topic-safe form, or this \
+             test proves nothing"
+        );
+
+        mqtt_music_sensitivity_command(
+            Payload("30".to_string()),
+            Params(IdParameter { id: topic_id }),
+            State(state.clone()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stored_sensitivity(&state).await.music_sensitivity(), 30);
+    }
+
+    /// The command topic is open to anything on the broker, so the handler
+    /// clamps instead of trusting the HA min/max. The `as u8` cast after the
+    /// clamp is only sound because the clamp ran first.
+    #[tokio::test]
+    async fn slider_write_clamps_payloads_outside_the_govee_range() {
+        let state = state_with_device().await;
+
+        for (payload, expected) in [
+            (0i64, 0u8),
+            (100, 100),
+            (-5, 0),
+            (1000, 100),
+            (i64::MIN, 0),
+            (i64::MAX, 100),
+        ] {
+            mqtt_music_sensitivity_command(
+                Payload(payload.to_string()),
+                Params(IdParameter {
+                    id: DEVICE_ID.to_string(),
+                }),
+                State(state.clone()),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                stored_sensitivity(&state).await.music_sensitivity(),
+                expected,
+                "payload {payload} must clamp to {expected}"
+            );
+        }
+    }
+
+    /// `device_mut` creates a device for any id it is handed. The handler must
+    /// resolve first, so a stray publish to an unknown id cannot conjure a
+    /// phantom device into the state map (which would then be published to HA).
+    #[tokio::test]
+    async fn slider_write_for_an_unknown_device_errors_without_creating_one() {
+        let state = empty_state();
+
+        let err = mqtt_music_sensitivity_command(
+            Payload("50".to_string()),
+            Params(IdParameter {
+                id: "no-such-device".to_string(),
+            }),
+            State(state.clone()),
+        )
+        .await
+        .expect_err("an unknown device must not resolve");
+
+        assert!(err.to_string().contains("not found"), "{err:#}");
+        assert!(
+            state.devices().await.is_empty(),
+            "resolving must happen before device_mut, or an unknown id \
+             conjures a device"
+        );
+    }
 }

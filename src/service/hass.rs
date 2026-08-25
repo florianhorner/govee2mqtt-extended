@@ -882,6 +882,7 @@ pub fn camel_case_to_space_separated(camel: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hass_mqtt::instance::EntityInstance;
 
     #[test]
     fn test_camel_case_ascii() {
@@ -966,5 +967,167 @@ mod tests {
             compute_scene_cycle_index(&scenes, Some("nonexistent"), 1),
             0
         );
+    }
+
+    /// The add-on option must reach the bridge under the name the bridge reads.
+    /// `music_palette` is declared in three files that nothing else ties
+    /// together: a rename in any one of them leaves a toggle in the Home
+    /// Assistant UI that silently does nothing.
+    #[test]
+    fn addon_music_palette_option_is_wired_to_the_env_var_the_bridge_reads() {
+        const ENV_VAR: &str = "GOVEE_MUSIC_PALETTE";
+        const OPTION: &str = "music_palette";
+        const CONFIG: &str = include_str!("../../addon/config.yaml");
+        const RUN_SH: &str = include_str!("../../addon/run.sh");
+        const TRANSLATIONS: &str = include_str!("../../addon/translations/en.yaml");
+
+        assert!(
+            CONFIG.contains(&format!("{OPTION}: \"bool?\"")),
+            "addon/config.yaml must declare {OPTION} as an optional bool"
+        );
+        assert!(
+            RUN_SH.contains(&format!("bashio::config.has_value {OPTION}")),
+            "addon/run.sh must read the {OPTION} option"
+        );
+        assert!(
+            RUN_SH.contains(&format!("export {ENV_VAR}=\"$(bashio::config {OPTION})\"")),
+            "addon/run.sh must export {OPTION} as {ENV_VAR}"
+        );
+        assert!(
+            TRANSLATIONS.contains(&format!("{OPTION}:")),
+            "addon/translations/en.yaml must label {OPTION}, or the add-on \
+             config page shows a bare key"
+        );
+        assert!(
+            include_str!("hass.rs").contains(&format!("std::env::var(\"{ENV_VAR}\")")),
+            "the handler must read {ENV_VAR}, the name run.sh exports"
+        );
+    }
+
+    /// `bashio::config.has_value` is true for a boolean `false`, so switching
+    /// the add-on toggle OFF exports `GOVEE_MUSIC_PALETTE=false` rather than
+    /// leaving the variable unset. Anything but the exact string "true" has to
+    /// keep the reverse-engineered LAN palette path disabled.
+    #[tokio::test]
+    async fn music_palette_topic_requires_the_env_var_to_be_exactly_true() {
+        const ENV_VAR: &str = "GOVEE_MUSIC_PALETTE";
+        let previous = std::env::var(ENV_VAR).ok();
+        let state: StateHandle = Arc::new(crate::service::state::State::new());
+
+        for off in ["false", "False", "TRUE", "1", "yes", ""] {
+            std::env::set_var(ENV_VAR, off);
+            let err = mqtt_set_music_palette(
+                Payload("{}".to_string()),
+                Params(IdParameter {
+                    id: "no-such-device".to_string(),
+                }),
+                State(state.clone()),
+            )
+            .await
+            .expect_err("must refuse while opted out");
+            assert!(
+                err.to_string().contains("opt-in"),
+                "{off:?} must not enable the topic: {err:#}"
+            );
+        }
+
+        std::env::remove_var(ENV_VAR);
+        let err = mqtt_set_music_palette(
+            Payload("{}".to_string()),
+            Params(IdParameter {
+                id: "no-such-device".to_string(),
+            }),
+            State(state.clone()),
+        )
+        .await
+        .expect_err("must refuse while unset");
+        assert!(err.to_string().contains("opt-in"), "{err:#}");
+
+        // ...and "true" gets past the gate: the next failure is the payload,
+        // not the opt-in check.
+        std::env::set_var(ENV_VAR, "true");
+        let err = mqtt_set_music_palette(
+            Payload("not json".to_string()),
+            Params(IdParameter {
+                id: "no-such-device".to_string(),
+            }),
+            State(state.clone()),
+        )
+        .await
+        .expect_err("an unparseable payload still fails");
+        assert!(
+            !err.to_string().contains("opt-in"),
+            "GOVEE_MUSIC_PALETTE=true must enable the topic: {err:#}"
+        );
+        assert!(
+            format!("{err:#}").contains("parsing set-music-palette payload"),
+            "{err:#}"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var(ENV_VAR, value),
+            None => std::env::remove_var(ENV_VAR),
+        }
+    }
+
+    /// The state-report half of the slider. `HassClient` wraps a private
+    /// `Client` and has no constructor, so this is the only module that can
+    /// build one; the client is deliberately never connected, which makes the
+    /// gate observable: the branches that report nothing return `Ok` without
+    /// touching the broker, and the branch that does report fails on it.
+    #[tokio::test]
+    async fn music_sensitivity_reports_nothing_until_the_user_picks_a_value() {
+        const ID: &str = "AA:BB:CC:DD:EE:FF:11:22";
+        let state: StateHandle = Arc::new(crate::service::state::State::new());
+        let device = ServiceDevice::new("H607C", ID);
+        {
+            let _canonical = state.device_mut("H607C", ID).await;
+        }
+
+        let entity = crate::hass_mqtt::number::MusicSensitivityNumber::new(&device, &state);
+        let client = HassClient {
+            client: Client::with_auto_id().expect("mosquitto client"),
+        };
+
+        // Govee cannot be asked what the light's sensitivity is, so before the
+        // user picks one there is nothing truthful to publish.
+        tokio::time::timeout(Duration::from_secs(5), entity.notify_state(&client))
+            .await
+            .expect("notify must not block")
+            .expect("an unreported preference must not be an error");
+
+        state
+            .device_mut("H607C", ID)
+            .await
+            .set_music_sensitivity(60);
+
+        // Now it does publish -- and the only reason this fails is that the
+        // client above was never connected to a broker.
+        let reported = tokio::time::timeout(Duration::from_secs(5), entity.notify_state(&client))
+            .await
+            .expect("notify must not block");
+        assert!(
+            reported.is_err(),
+            "a stored preference must be published to the state topic"
+        );
+    }
+
+    /// A device that vanished from the state map between discovery and the
+    /// state sweep must be skipped, not turned into an error that aborts the
+    /// whole `EntityList::notify_state` loop for every other entity.
+    #[tokio::test]
+    async fn music_sensitivity_notify_skips_a_device_that_left_the_state_map() {
+        let state: StateHandle = Arc::new(crate::service::state::State::new());
+        let device = ServiceDevice::new("H607C", "AA:BB:CC:DD:EE:FF:11:22");
+        let entity = crate::hass_mqtt::number::MusicSensitivityNumber::new(&device, &state);
+        let client = HassClient {
+            client: Client::with_auto_id().expect("mosquitto client"),
+        };
+
+        assert!(state.devices().await.is_empty());
+        tokio::time::timeout(Duration::from_secs(5), entity.notify_state(&client))
+            .await
+            .expect("notify must not block")
+            .expect("an absent device is skipped, not an error");
     }
 }
