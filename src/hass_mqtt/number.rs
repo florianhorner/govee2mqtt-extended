@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::ops::Range;
 
+pub const MUSIC_SENSITIVITY_COMMAND_ROUTE: &str = "gv2mqtt/:id/set-music-sensitivity";
+const MUSIC_SENSITIVITY_RESET_PAYLOAD: &str = "None";
+
 #[derive(Serialize, Clone, Debug)]
 pub struct NumberConfig {
     #[serde(flatten)]
@@ -20,6 +23,8 @@ pub struct NumberConfig {
     pub command_topic: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_topic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_reset: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,6 +104,7 @@ impl WorkModeNumber {
                 },
                 command_topic,
                 state_topic: Some(state_topic),
+                payload_reset: None,
                 min: range.as_ref().map(|r| r.start as f32).or(Some(0.)),
                 max: range
                     .as_ref()
@@ -208,15 +214,40 @@ pub struct MusicSensitivityNumber {
     number: NumberConfig,
     device_id: String,
     state: StateHandle,
-    /// Owned rather than re-read from `number.state_topic`: this entity always
-    /// has one, and reading back through the `Option` forced an error arm that
-    /// could never be constructed.
-    state_topic: String,
+}
+
+fn music_sensitivity_state_topic(device: &ServiceDevice) -> String {
+    format!("gv2mqtt/{}/notify-music-sensitivity", topic_safe_id(device))
+}
+
+#[async_trait]
+trait MusicSensitivityPublisher: Sync {
+    async fn publish_music_sensitivity(&self, topic: &str, value: &str) -> anyhow::Result<()>;
+}
+
+#[async_trait]
+impl MusicSensitivityPublisher for HassClient {
+    async fn publish_music_sensitivity(&self, topic: &str, value: &str) -> anyhow::Result<()> {
+        self.publish(topic, value).await
+    }
+}
+
+async fn publish_music_sensitivity_value<P: MusicSensitivityPublisher>(
+    publisher: &P,
+    topic: &str,
+    value: u8,
+) -> anyhow::Result<()> {
+    publisher
+        .publish_music_sensitivity(topic, &value.to_string())
+        .await
 }
 
 impl MusicSensitivityNumber {
     pub fn new(device: &ServiceDevice, state: &StateHandle) -> Self {
         let id = topic_safe_id(device);
+        // Built once: the discovery payload tells HA which topic to subscribe
+        // to, and `notify_value` publishes through that same config field.
+        let state_topic = music_sensitivity_state_topic(device);
         Self {
             number: NumberConfig {
                 base: EntityConfig {
@@ -229,8 +260,9 @@ impl MusicSensitivityNumber {
                     entity_category: Some("config".to_string()),
                     icon: Some("mdi:music-note".to_string()),
                 },
-                command_topic: format!("gv2mqtt/{id}/set-music-sensitivity"),
-                state_topic: Some(format!("gv2mqtt/{id}/notify-music-sensitivity")),
+                command_topic: MUSIC_SENSITIVITY_COMMAND_ROUTE.replacen(":id", &id, 1),
+                state_topic: Some(state_topic),
+                payload_reset: Some(MUSIC_SENSITIVITY_RESET_PAYLOAD),
                 min: Some(0.),
                 max: Some(100.),
                 step: 1f32,
@@ -238,8 +270,57 @@ impl MusicSensitivityNumber {
             },
             device_id: device.id.to_string(),
             state: state.clone(),
-            state_topic: format!("gv2mqtt/{id}/notify-music-sensitivity"),
         }
+    }
+
+    async fn notify_value<P: MusicSensitivityPublisher>(
+        &self,
+        publisher: &P,
+        value: u8,
+    ) -> anyhow::Result<()> {
+        publish_music_sensitivity_value(
+            publisher,
+            self.number
+                .state_topic
+                .as_deref()
+                .ok_or_else(|| anyhow!("number has no state_topic"))?,
+            value,
+        )
+        .await
+    }
+
+    async fn notify_state_with<P: MusicSensitivityPublisher>(
+        &self,
+        publisher: &P,
+    ) -> anyhow::Result<()> {
+        let Some(value) = self
+            .state
+            .device_music_sensitivity_value(&self.device_id)
+            .await
+        else {
+            log::warn!(
+                "Device {} not found in state, skipping notify",
+                self.device_id
+            );
+            return Ok(());
+        };
+
+        match value {
+            Some(value) => self.notify_value(publisher, value).await?,
+            None => {
+                publisher
+                    .publish_music_sensitivity(
+                        self.number
+                            .state_topic
+                            .as_deref()
+                            .ok_or_else(|| anyhow!("number has no state_topic"))?,
+                        MUSIC_SENSITIVITY_RESET_PAYLOAD,
+                    )
+                    .await?;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -250,25 +331,20 @@ impl EntityInstance for MusicSensitivityNumber {
     }
 
     async fn notify_state(&self, client: &HassClient) -> anyhow::Result<()> {
-        let Some(device) = self.state.device_by_id(&self.device_id).await else {
-            log::warn!(
-                "Device {} not found in state, skipping notify",
-                self.device_id
-            );
-            return Ok(());
-        };
-
-        // Until the user picks a value there is nothing truthful to report:
-        // the device is not queryable, so claiming the default would assert
-        // something we have not observed.
-        if !device.music_sensitivity_is_set() {
-            return Ok(());
-        }
-
-        client
-            .publish(&self.state_topic, device.music_sensitivity().to_string())
-            .await
+        self.notify_state_with(client).await
     }
+}
+
+fn parse_music_sensitivity(value: &str) -> anyhow::Result<u8> {
+    let parsed = value
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| anyhow::anyhow!("music sensitivity must be a number, got {value:?}"))?;
+    anyhow::ensure!(
+        parsed.is_finite(),
+        "music sensitivity must be a finite number, got {value:?}"
+    );
+    Ok(parsed.round().clamp(0.0, 100.0) as u8)
 }
 
 pub async fn mqtt_music_sensitivity_command(
@@ -284,26 +360,27 @@ pub async fn mqtt_music_sensitivity_command(
     // and schedule a `poll_after_control` Platform API request 5s after every
     // slider move.
     let device = state.resolve_device_read_only(&id).await?;
-    let value: i64 = value
-        .trim()
-        .parse::<f64>()
-        .map(|v| v.round() as i64)
-        .map_err(|_| anyhow::anyhow!("music sensitivity must be a number, got {value:?}"))?;
-    let clamped = value.clamp(0, 100) as u8;
+    let clamped = parse_music_sensitivity(&value)?;
+    // Share the device's control semaphore without scheduling a device poll:
+    // preferences send no device command, but still need ordering against a
+    // concurrent scene selection and other slider writes.
+    let _permit = state.acquire_device_update_permit(&device).await?;
     log::info!(
         "Storing music sensitivity {clamped} for {device}; \
          it applies on the next Music: effect"
     );
-    // Scope the guard: `device_mut` locks the whole device map, and
-    // `notify_of_state_change` re-locks it. Holding one across the other
-    // deadlocks — see the warning on `notify_of_state_change` in state.rs.
     {
         state
             .device_mut(&device.sku, &device.id)
             .await
             .set_music_sensitivity(clamped);
     }
-    state.notify_of_state_change(&device.id).await?;
+    // A preference update only changes this entity. Publishing it directly
+    // avoids rebuilding and notifying every entity for the device.
+    if let Some(client) = state.get_hass_client().await {
+        publish_music_sensitivity_value(&client, &music_sensitivity_state_topic(&device), clamped)
+            .await?;
+    }
     Ok(())
 }
 
@@ -312,6 +389,35 @@ mod test {
     use super::*;
     use crate::service::state::State as ServiceState;
     use std::sync::Arc;
+
+    #[derive(Default)]
+    struct CapturingPublisher {
+        messages: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait]
+    impl MusicSensitivityPublisher for CapturingPublisher {
+        async fn publish_music_sensitivity(&self, topic: &str, value: &str) -> anyhow::Result<()> {
+            self.messages
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push((topic.to_string(), value.to_string()));
+            Ok(())
+        }
+    }
+
+    struct FailingPublisher;
+
+    #[async_trait]
+    impl MusicSensitivityPublisher for FailingPublisher {
+        async fn publish_music_sensitivity(
+            &self,
+            _topic: &str,
+            _value: &str,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("synthetic publish failure")
+        }
+    }
 
     /// Deliberately colon-bearing: `topic_safe_id` must rewrite it, and the
     /// command topic the slider publishes to carries the rewritten form.
@@ -389,12 +495,7 @@ mod test {
         );
 
         let route = entity.number.command_topic.replacen(&id, ":id", 1);
-        assert_eq!(route, "gv2mqtt/:id/set-music-sensitivity");
-        assert!(
-            include_str!("../service/hass.rs").contains(&format!("\"{route}\"")),
-            "src/service/hass.rs must register the route {route} that this \
-             entity tells Home Assistant to publish to"
-        );
+        assert_eq!(route, MUSIC_SENSITIVITY_COMMAND_ROUTE);
     }
 
     /// What actually reaches Home Assistant's discovery topic.
@@ -408,6 +509,7 @@ mod test {
         assert_eq!(json["max"], 100.0);
         assert_eq!(json["step"], 1.0);
         assert_eq!(json["unit_of_measurement"], "%");
+        assert_eq!(json["payload_reset"], MUSIC_SENSITIVITY_RESET_PAYLOAD);
         assert_eq!(json["entity_category"], "config");
         assert_eq!(json["icon"], "mdi:music-note");
         assert_eq!(json["name"], "Music Sensitivity");
@@ -426,10 +528,8 @@ mod test {
     async fn slider_write_stores_the_preference() {
         let state = state_with_device().await;
 
-        // Bounded on purpose. `device_mut` locks the whole device map and
-        // `notify_of_state_change` re-locks it, so holding the guard across
-        // the notify deadlocks rather than failing -- the timeout turns that
-        // into a named failure instead of a hung CI job.
+        // Bounded so a leaked device permit becomes a named failure instead
+        // of a hung test process.
         tokio::time::timeout(
             std::time::Duration::from_secs(10),
             mqtt_music_sensitivity_command(
@@ -441,12 +541,129 @@ mod test {
             ),
         )
         .await
-        .expect("the device_mut guard must be dropped before notify_of_state_change")
+        .expect("the preference update must release its device locks")
         .expect("storing a preference must not fail without a hass client");
 
         let device = stored_sensitivity(&state).await;
         assert_eq!(device.music_sensitivity(), 55);
-        assert!(device.music_sensitivity_is_set());
+        assert_eq!(device.music_sensitivity_value(), Some(55));
+    }
+
+    #[tokio::test]
+    async fn sensitivity_state_echo_has_the_exact_topic_and_payload() {
+        let state = state_with_device().await;
+        let entity = MusicSensitivityNumber::new(&test_device(), &state);
+        let publisher = CapturingPublisher::default();
+
+        entity
+            .notify_state_with(&publisher)
+            .await
+            .expect("an unset preference must reset stale HA state");
+
+        state
+            .device_mut(SKU, DEVICE_ID)
+            .await
+            .set_music_sensitivity(60);
+        entity
+            .notify_state_with(&publisher)
+            .await
+            .expect("a stored preference must publish");
+
+        assert_eq!(
+            *publisher
+                .messages
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            vec![
+                (
+                    format!(
+                        "gv2mqtt/{}/notify-music-sensitivity",
+                        topic_safe_id(&test_device())
+                    ),
+                    MUSIC_SENSITIVITY_RESET_PAYLOAD.to_string(),
+                ),
+                (
+                    format!(
+                        "gv2mqtt/{}/notify-music-sensitivity",
+                        topic_safe_id(&test_device())
+                    ),
+                    "60".to_string(),
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn unset_sensitivity_reset_propagates_publish_failures() {
+        let state = state_with_device().await;
+        let entity = MusicSensitivityNumber::new(&test_device(), &state);
+
+        let error = entity
+            .notify_state_with(&FailingPublisher)
+            .await
+            .expect_err("MQTT reset failures must reach the caller");
+        assert!(error.to_string().contains("synthetic publish failure"));
+    }
+
+    #[tokio::test]
+    async fn sensitivity_state_echo_propagates_publish_failures() {
+        let state = state_with_device().await;
+        state
+            .device_mut(SKU, DEVICE_ID)
+            .await
+            .set_music_sensitivity(60);
+        let entity = MusicSensitivityNumber::new(&test_device(), &state);
+
+        let error = entity
+            .notify_state_with(&FailingPublisher)
+            .await
+            .expect_err("MQTT publication failures must reach the caller");
+        assert!(error.to_string().contains("synthetic publish failure"));
+    }
+
+    #[tokio::test]
+    async fn slider_handler_waits_for_the_device_update_permit() {
+        let state = state_with_device().await;
+        let device = stored_sensitivity(&state).await;
+        let permit = state
+            .acquire_device_update_permit(&device)
+            .await
+            .expect("test holds the device permit");
+
+        let command_state = state.clone();
+        let mut command = tokio::spawn(async move {
+            mqtt_music_sensitivity_command(
+                Payload("73".to_string()),
+                Params(IdParameter {
+                    id: DEVICE_ID.to_string(),
+                }),
+                State(command_state),
+            )
+            .await
+        });
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut command)
+                .await
+                .is_err(),
+            "the real handler must wait behind an in-flight device control"
+        );
+        assert_eq!(
+            stored_sensitivity(&state).await.music_sensitivity_value(),
+            None,
+            "the preference must not mutate before the permit is acquired"
+        );
+
+        drop(permit);
+        tokio::time::timeout(std::time::Duration::from_secs(1), command)
+            .await
+            .expect("the handler proceeds after permit release")
+            .expect("handler task does not panic")
+            .expect("handler stores the preference");
+        assert_eq!(
+            stored_sensitivity(&state).await.music_sensitivity_value(),
+            Some(73)
+        );
     }
 
     /// Home Assistant publishes to `gv2mqtt/<topic_safe_id>/...`, so the `:id`
@@ -505,6 +722,54 @@ mod test {
                 "payload {payload} must clamp to {expected}"
             );
         }
+    }
+
+    #[test]
+    fn slider_write_rounds_fractional_payloads() {
+        for (payload, expected) in [
+            ("55.0", 55),
+            ("55.4", 55),
+            ("55.5", 56),
+            ("-0.6", 0),
+            ("99.6", 100),
+        ] {
+            assert_eq!(
+                parse_music_sensitivity(payload).expect("finite decimal must parse"),
+                expected,
+                "payload {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn slider_write_rejects_non_finite_and_non_numeric_payloads() {
+        for payload in [
+            "NaN",
+            "nan",
+            "inf",
+            "+inf",
+            "-inf",
+            "Infinity",
+            "1e999",
+            "not-a-number",
+            "",
+        ] {
+            let err = parse_music_sensitivity(payload)
+                .expect_err("non-finite and non-numeric values must be rejected");
+            assert!(
+                err.to_string().contains("must be"),
+                "payload {payload:?}: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn sensitivity_state_is_unknown_until_the_user_sets_it() {
+        let mut device = test_device();
+
+        assert_eq!(device.music_sensitivity_value(), None);
+        device.set_music_sensitivity(60);
+        assert_eq!(device.music_sensitivity_value(), Some(60));
     }
 
     /// `device_mut` creates a device for any id it is handed. The handler must

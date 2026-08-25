@@ -170,7 +170,8 @@ let you trim or disable the published effect list. They are environment-only
 ## Music Mode
 
 Music mode reacts to sound. Selecting a `Music: <Style>` effect on a light
-already works through the Platform API and needs no configuration.
+already works through the Platform API with no additional music-specific
+opt-in once the API key is configured.
 
 Programming music mode with **your own palette** is opt-in, because the frames
 are reverse-engineered and only mapped for a few SKUs. Turning it on enables the
@@ -193,6 +194,21 @@ unknown until you set it again, and a `Music:` effect selected in the meantime
 uses the default of 100. Govee offers no way to read the current sensitivity
 back from a light, so the bridge cannot recover it.
 
+The Platform API also accepts one fixed music colour. Send it together with the
+effect through Home Assistant's normal light service:
+
+```yaml
+service: light.turn_on
+target:
+  entity_id: light.your_govee
+data:
+  effect: "Music: Rhythm"
+  rgb_color: [18, 52, 86]
+```
+
+With `rgb_color`, the bridge sends `autoColor: 0` plus the packed RGB value.
+Without it, the bridge preserves the historical `autoColor: 1`, so the device
+chooses colours. The Platform API supports only this one colour, not a palette.
+
 The LAN palette frames carry their own sensitivity byte, which is a different
 setting from the Platform API one the number entity writes.
-

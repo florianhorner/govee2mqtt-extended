@@ -1,35 +1,92 @@
-# Local verification log: #39 Step A (music sensitivity) + GOVEE_MUSIC_PALETTE add-on wiring
+# Local verification log: #39 Step A Platform music settings + GOVEE_MUSIC_PALETTE add-on wiring
 # base: 67f5ae027790beb826a778344549566ee41a9d2b
-# date: 2026-08-25T13:04:06Z
-# host: macOS 26.5.1, rustc 1.94.1 (e408947bf 2026-03-25)
+# source/config/docs diff SHA-256 (this proof log excluded): cc6dce1f998a10018804d09443da36fac198223cf4dda08ff51b999a80d8978d
+# date: 2026-08-25T20:53:13Z
+# host: macOS 26.5.1 (25F80), rustc 1.94.1 (e408947bf 2026-03-25)
 # live Govee account or hardware: NOT TESTED
 
-## cargo build --all
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.20s
+## Prescribed local gates
+
+### cargo build --all
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.42s
 BUILD: OK
 
-## cargo test --all -- --show-output
-test result: ok. 196 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.83s
+### cargo test --all -- --show-output
+test result: ok. 231 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.84s
 TESTS: OK
 
-New regression coverage:
-- platform_api::test::music_payload_carries_the_requested_sensitivity
-- platform_api::test::music_payload_clamps_out_of_range_sensitivity
-- platform_api::test::music_payload_defaults_match_the_previous_hardcode
-- service::device::test::music_sensitivity_defaults_without_asserting_device_state
-- service::device::test::music_sensitivity_round_trips_and_clamps
-- platform_api::test::music_payload_is_none_for_an_unknown_style
+### cargo test --all --all-features -- --show-output
+test result: ok. 232 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.84s
+ALL-FEATURE TESTS: OK
 
-## cargo clippy --all -- -D warnings
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.75s
+### cargo clippy --all -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.55s
 CLIPPY: OK
 
-## cargo fmt --all -- --check
-FMT: OK
+### cargo clippy --all --all-features -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.28s
+ALL-FEATURE CLIPPY: OK
 
-## YAML validity (add-on schema + translations)
-addon/config.yaml + addon/translations/en.yaml parse OK
+### cargo fmt --all -- --check
+FMT: OK (stable-toolchain warning for nightly-only imports_granularity only)
+
+### python3 -m unittest scripts/test_live_2fa.py
+Ran 22 tests in 0.042s
+PYTHON HARNESS: OK
+
+### cargo check --release
+    Finished `release` profile [optimized] target(s) in 5.19s
+RELEASE CHECK: OK
+
+### git diff --check origin/main
+DIFF CHECK: OK
+
+## Add-on validation
+
+- PyYAML 6.0.3 safe-loaded addon/config.yaml and addon/translations/en.yaml.
+- All 21 schema, translation, and bashio::config.has_value keys match.
+- music_palette maps bool? -> GOVEE_MUSIC_PALETTE -> the Rust reader.
+- bash -n addon/run.sh: OK; executable mode preserved.
+- shellcheck -s bash addon/run.sh has only the 24 SC2155 and one SC2164
+  warnings already present on origin/main; this change adds no warning.
+
+## Regression and wire coverage
+
+- Discovery: only usable numeric musicMode metadata publishes the 0..100
+  configuration slider; case variants and malformed/empty metadata are covered.
+- Input: decimal values round, out-of-range values clamp, and NaN, infinity,
+  overflow, and non-numeric MQTT payloads fail explicitly.
+- Ordering: the real slider handler waits for the per-device control permit.
+- MQTT: discovery and state echo share one topic constructor; exact topic,
+  payload, reset of stale HA state after restart, and publish-error propagation
+  are asserted.
+- Platform API: sensitivity, historical defaults, clamping, autoColor, and one
+  packed RGB colour are asserted in payload builders and through an in-process
+  HTTP capture server.
+- Home Assistant: a Music effect plus rgb_color disables autoColor on the wire;
+  an ordinary scene in the same command ignores RGB as before.
+- State: scene dispatch uses the fresh canonical sensitivity and retains the
+  detached-device fallback without cloning full device/catalog state.
+- Add-on: a source-level contract ties the schema option, translation, run
+  script export, and exact environment variable consumed by the bridge.
+
+## Mutation checks
+
+Each focused regression test was observed failing after its production guard
+was temporarily removed, then the source was restored exactly:
+
+- finite-number guard -> slider_write_rejects_non_finite_and_non_numeric_payloads FAILED
+- music-option viability guard -> unusable_music_mode_metadata_does_not_publish_the_slider FAILED
+- musicMode instance-name guard -> other_music_setting_instances_publish_nothing FAILED
+- broken-Platform quirk guard -> broken_platform_quirks_do_not_publish_the_slider FAILED
+- device update permit -> slider_handler_waits_for_the_device_update_permit FAILED
+- effect early return -> ordinary_effect_still_ignores_rgb_in_the_same_command FAILED
+- shared state-topic literal -> sensitivity_state_echo_has_the_exact_topic_and_payload FAILED
+- unset-state reset branch -> sensitivity_state_echo_has_the_exact_topic_and_payload FAILED
 
 ## Not covered here
-No Govee account or hardware was used. The Platform API payload is asserted
-against the recorded list_devices_2.json fixture, not a live music_setting call.
+
+No Govee account or physical device was used, and no live MQTT broker was
+available. Device-bound Platform requests were exercised against the loopback
+HTTP capture server; MQTT publication was exercised through the exact publisher
+seam. Hardware validation remains required before claiming real-device proof.

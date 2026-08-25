@@ -1,8 +1,10 @@
 use crate::ble::{
     Base64HexBytes, SetHumidifierMode, SetHumidifierNightlightParams, SetMusicPalette,
 };
-use crate::lan_api::{Client as LanClient, DeviceStatus as LanDeviceStatus, LanDevice};
-use crate::platform_api::{DeviceCapability, DeviceType, GoveeApiClient};
+use crate::lan_api::{
+    Client as LanClient, DeviceColor, DeviceStatus as LanDeviceStatus, LanDevice,
+};
+use crate::platform_api::{DeviceCapability, DeviceType, GoveeApiClient, MusicModeSettings};
 use crate::service::coordinator::Coordinator;
 use crate::service::device::Device;
 use crate::service::hass::{topic_safe_id, HassClient};
@@ -15,7 +17,7 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard, Semaphore};
+use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard, OwnedSemaphorePermit, Semaphore};
 use tokio::time::{sleep, Duration};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -97,6 +99,27 @@ impl State {
         devices.get(id).cloned()
     }
 
+    /// Read the effective Platform music sensitivity without cloning the
+    /// device's capabilities, undocumented metadata, or scene catalog.
+    pub(crate) async fn device_music_sensitivity(&self, id: &str) -> Option<u8> {
+        self.devices_by_id
+            .lock()
+            .await
+            .get(id)
+            .map(Device::music_sensitivity)
+    }
+
+    /// Read the raw stored preference while preserving the distinction between
+    /// a missing device (`None`) and a device whose value is still unknown
+    /// (`Some(None)`).
+    pub(crate) async fn device_music_sensitivity_value(&self, id: &str) -> Option<Option<u8>> {
+        self.devices_by_id
+            .lock()
+            .await
+            .get(id)
+            .map(Device::music_sensitivity_value)
+    }
+
     async fn semaphore_for_device(&self, device: &Device) -> Arc<Semaphore> {
         self.semaphore_by_id
             .lock()
@@ -104,6 +127,20 @@ impl State {
             .entry(device.id.clone())
             .or_insert_with(|| Arc::new(Semaphore::new(1)))
             .clone()
+    }
+
+    /// Serialize a local preference update with device controls without
+    /// scheduling the post-control device poll that [`Self::resolve_device_for_control`]
+    /// intentionally creates for actual hardware commands.
+    pub(crate) async fn acquire_device_update_permit(
+        &self,
+        device: &Device,
+    ) -> anyhow::Result<OwnedSemaphorePermit> {
+        Ok(self
+            .semaphore_for_device(device)
+            .await
+            .acquire_owned()
+            .await?)
     }
 
     pub async fn resolve_device_read_only(self: &Arc<Self>, label: &str) -> anyhow::Result<Device> {
@@ -821,6 +858,19 @@ impl State {
         device: &Device,
         scene: &str,
     ) -> anyhow::Result<()> {
+        self.device_set_scene_with_music_color(device, scene, None)
+            .await
+    }
+
+    /// Set a scene, optionally carrying the Platform API's single music-mode
+    /// colour. The colour only has meaning for `Music:` effects; other scene
+    /// and LAN paths retain their existing behaviour.
+    pub async fn device_set_scene_with_music_color(
+        self: &Arc<Self>,
+        device: &Device,
+        scene: &str,
+        music_color: Option<DeviceColor>,
+    ) -> anyhow::Result<()> {
         // TODO: some plumbing to maintain offline scene controls for preferred-LAN control
         let avoid_platform_api = device.avoid_platform_api();
 
@@ -828,19 +878,28 @@ impl State {
             if let Some(client) = self.get_platform_client().await {
                 if let Some(info) = &device.http_device_info {
                     log::info!("Using Platform API to set {device} to scene {scene}");
-                    // Music styles carry the stored sensitivity preference: it
-                    // cannot be sent on its own, so it rides the style change.
-                    //
-                    // Read it fresh rather than from `device`: callers hold a
-                    // snapshot cloned by `resolve_device_for_control` *before*
-                    // it acquires the per-device permit, so a slider write that
-                    // lands while this command waits would otherwise be lost.
-                    let sensitivity = match self.device_by_id(&device.id).await {
-                        Some(current) => current.music_sensitivity(),
-                        None => device.music_sensitivity(),
+                    let settings = if scene.strip_prefix("Music: ").is_some() {
+                        // Music styles carry the stored sensitivity preference:
+                        // it cannot be sent on its own, so it rides the style
+                        // change. Read it fresh rather than from `device`:
+                        // callers hold a snapshot cloned before they acquire the
+                        // per-device permit, so a queued slider write would
+                        // otherwise be lost.
+                        let sensitivity = self
+                            .device_music_sensitivity(&device.id)
+                            .await
+                            .unwrap_or_else(|| device.music_sensitivity());
+                        let rgb = music_color.map(|color| {
+                            ((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32
+                        });
+                        MusicModeSettings { sensitivity, rgb }
+                    } else {
+                        // Ordinary scenes ignore music-only settings and avoid
+                        // touching the canonical device map on this hot path.
+                        MusicModeSettings::default()
                     };
                     client
-                        .set_scene_by_name_with_sensitivity(info, scene, sensitivity)
+                        .set_scene_by_name_with_music_settings(info, scene, settings)
                         .await?;
                     self.device_mut(&device.sku, &device.id)
                         .await
@@ -1217,6 +1276,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_device_updates_share_the_control_semaphore() {
+        let state = State::new();
+        let device = Device::new("H607C", "AA:BB:CC:DD:EE:FF");
+        let first = state
+            .acquire_device_update_permit(&device)
+            .await
+            .expect("first update permit");
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                state.acquire_device_update_permit(&device)
+            )
+            .await
+            .is_err(),
+            "a second update for the same device must wait"
+        );
+
+        drop(first);
+        let _second = tokio::time::timeout(
+            Duration::from_secs(1),
+            state.acquire_device_update_permit(&device),
+        )
+        .await
+        .expect("the next update must proceed after release")
+        .expect("second update permit");
+    }
+
+    #[tokio::test]
     async fn test_scene_catalog_reads_canonical_cache_for_stale_clone() {
         let state = State::new();
         let stale_clone = Device::new("H6001", "AA:BB:CC:DD:EE:FF");
@@ -1287,51 +1375,95 @@ mod tests {
         );
     }
 
-    /// Regression guard for the sensitivity read in `device_set_scene`.
+    /// Drives `device_set_scene` end to end against the capture server and
+    /// reads the sensitivity back off the wire.
     ///
-    /// The `Device` a control command holds is a clone taken by
+    /// The two tests that lived here re-implemented the `match` inside
+    /// `device_set_scene` in the test body, so they passed no matter what the
+    /// production code did. A test that cannot fail is worse than no test.
+    ///
+    /// What it guards: the `Device` a control command holds is a clone taken by
     /// `resolve_device_for_control` *before* it acquires the per-device permit,
-    /// so a slider write that lands while the command queues is absent from it.
-    /// The scene call therefore re-reads the canonical device; reverting to
-    /// `device.music_sensitivity()` would silently ship the pre-write value.
+    /// so a slider write landing while the command queues is absent from it.
     #[tokio::test]
-    async fn music_sensitivity_is_read_from_the_canonical_device_not_the_snapshot() {
-        let state = State::new();
-        let stale_snapshot = Device::new("H607C", "AA:BB:CC:DD:EE:FF");
-        {
-            let mut canonical = state.device_mut("H607C", "AA:BB:CC:DD:EE:FF").await;
-            canonical.set_music_sensitivity(42);
-        }
+    async fn device_set_scene_sends_the_freshly_stored_sensitivity() {
+        use crate::platform_api::test::{capture_server, live_path_guard, music_device};
 
+        let _serialized = live_path_guard();
+        let (base_url, captured) = capture_server();
+
+        let info = music_device();
+        let state: StateHandle = Arc::new(State::new());
+        state
+            .set_platform_client(crate::platform_api::GoveeApiClient::new_for_test(
+                "test-key", base_url,
+            ))
+            .await;
+
+        {
+            let mut d = state.device_mut(&info.sku, &info.device).await;
+            d.set_http_device_info(info.clone());
+        }
+        let snapshot = state
+            .device_by_id(&info.device)
+            .await
+            .expect("device is in the map");
+
+        // The slider write lands AFTER the caller took its snapshot.
+        {
+            let mut d = state.device_mut(&info.sku, &info.device).await;
+            d.set_music_sensitivity(42);
+        }
         assert_eq!(
-            stale_snapshot.music_sensitivity(),
+            snapshot.music_sensitivity(),
             crate::platform_api::DEFAULT_MUSIC_SENSITIVITY,
-            "the snapshot predates the slider write"
+            "the snapshot must still hold the stale value"
         );
 
-        // The exact lookup device_set_scene performs before calling
-        // set_scene_by_name_with_sensitivity.
-        let sensitivity = match state.device_by_id(&stale_snapshot.id).await {
-            Some(current) => current.music_sensitivity(),
-            None => stale_snapshot.music_sensitivity(),
-        };
-        assert_eq!(sensitivity, 42, "the fresh value must win");
+        let before = captured.lock().unwrap_or_else(|e| e.into_inner()).len();
+        state
+            .device_set_scene(&snapshot, "Music: Rhythm")
+            .await
+            .expect("device_set_scene succeeds against the capture server");
+
+        let sent = captured.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(sent.len(), before + 1, "exactly one request");
+        assert_eq!(
+            sent[before]["payload"]["capability"]["value"]["sensitivity"], 42,
+            "device_set_scene must re-read the preference, not trust its stale snapshot"
+        );
     }
 
-    /// The fallback arm of that same lookup: if the device is no longer in the
-    /// map, the command must still send something rather than bail.
     #[tokio::test]
-    async fn music_sensitivity_falls_back_to_the_snapshot_when_the_device_is_gone() {
-        let state = State::new();
-        let mut snapshot = Device::new("H607C", "AA:BB:CC:DD:EE:FF");
-        snapshot.set_music_sensitivity(7);
+    async fn device_set_scene_uses_snapshot_sensitivity_if_device_left_state() {
+        use crate::platform_api::test::{capture_server, live_path_guard, music_device};
 
+        let _serialized = live_path_guard();
+        let (base_url, captured) = capture_server();
+        let info = music_device();
+        let state: StateHandle = Arc::new(State::new());
+        state
+            .set_platform_client(crate::platform_api::GoveeApiClient::new_for_test(
+                "test-key", base_url,
+            ))
+            .await;
+
+        let mut snapshot = Device::new(&info.sku, &info.device);
+        snapshot.set_http_device_info(info);
+        snapshot.set_music_sensitivity(7);
         assert!(state.device_by_id(&snapshot.id).await.is_none());
 
-        let sensitivity = match state.device_by_id(&snapshot.id).await {
-            Some(current) => current.music_sensitivity(),
-            None => snapshot.music_sensitivity(),
-        };
-        assert_eq!(sensitivity, 7);
+        let before = captured.lock().unwrap_or_else(|e| e.into_inner()).len();
+        state
+            .device_set_scene(&snapshot, "Music: Rhythm")
+            .await
+            .expect("a detached snapshot still carries enough data for the request");
+
+        let sent = captured.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(sent.len(), before + 1, "exactly one request");
+        assert_eq!(
+            sent[before]["payload"]["capability"]["value"]["sensitivity"], 7,
+            "the fallback must use the caller's snapshot"
+        );
     }
 }

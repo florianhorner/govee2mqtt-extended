@@ -458,10 +458,11 @@ impl Device {
             .unwrap_or(crate::platform_api::DEFAULT_MUSIC_SENSITIVITY)
     }
 
-    /// True once the user has chosen a sensitivity. Lets the entity report
-    /// "unknown" rather than claiming the device is at the default.
-    pub fn music_sensitivity_is_set(&self) -> bool {
-        self.music_sensitivity.is_some()
+    /// The user's stored preference, if one has been chosen. Keeping the raw
+    /// `Option` separate from [`Self::music_sensitivity`] lets Home Assistant
+    /// report "unknown" instead of presenting the fallback as observed state.
+    pub fn music_sensitivity_value(&self) -> Option<u8> {
+        self.music_sensitivity
     }
 
     /// Store the sensitivity for the next `Music:` effect selection. Values are
@@ -891,7 +892,7 @@ mod test {
 
         // ...but we must not claim to have observed it. The entity keys its
         // "report nothing yet" branch on this.
-        assert!(!device.music_sensitivity_is_set());
+        assert_eq!(device.music_sensitivity_value(), None);
     }
 
     #[test]
@@ -900,7 +901,7 @@ mod test {
 
         device.set_music_sensitivity(55);
         assert_eq!(device.music_sensitivity(), 55);
-        assert!(device.music_sensitivity_is_set());
+        assert_eq!(device.music_sensitivity_value(), Some(55));
 
         // Govee's range is 0-100; HA number boxes accept anything the user
         // types, so out-of-range input is clamped rather than rejected.
@@ -909,8 +910,9 @@ mod test {
 
         device.set_music_sensitivity(0);
         assert_eq!(device.music_sensitivity(), 0);
-        assert!(
-            device.music_sensitivity_is_set(),
+        assert_eq!(
+            device.music_sensitivity_value(),
+            Some(0),
             "zero is a real user choice, not an absent one"
         );
     }

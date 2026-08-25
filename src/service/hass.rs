@@ -2,7 +2,7 @@ use crate::hass_mqtt::climate::mqtt_set_temperature;
 use crate::hass_mqtt::enumerator::{enumerate_all_entites, enumerate_entities_for_device};
 use crate::hass_mqtt::humidifier::{mqtt_device_set_work_mode, mqtt_humidifier_set_target};
 use crate::hass_mqtt::instance::EntityList;
-use crate::hass_mqtt::number::mqtt_number_command;
+use crate::hass_mqtt::number::{mqtt_number_command, MUSIC_SENSITIVITY_COMMAND_ROUTE};
 use crate::hass_mqtt::select::mqtt_set_mode_scene;
 use crate::lan_api::DeviceColor;
 use crate::opt_env_var;
@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const HASS_REGISTER_DELAY: tokio::time::Duration = tokio::time::Duration::from_secs(15);
+const MUSIC_PALETTE_ENV_VAR: &str = "GOVEE_MUSIC_PALETTE";
 
 #[derive(clap::Parser, Debug)]
 pub struct HassArguments {
@@ -259,9 +260,11 @@ struct MusicPaletteCommand {
 }
 
 fn default_music_sensitivity() -> u8 {
-    // What the Govee app uses when untouched, and what the Platform API
-    // path hardcodes today
-    100
+    crate::platform_api::DEFAULT_MUSIC_SENSITIVITY
+}
+
+fn music_palette_enabled(value: Option<&str>) -> bool {
+    value == Some("true")
 }
 
 /// `gv2mqtt/<id>/set-music-palette` with a JSON payload like
@@ -275,9 +278,8 @@ async fn mqtt_set_music_palette(
     Params(IdParameter { id }): Params<IdParameter>,
     State(state): State<StateHandle>,
 ) -> anyhow::Result<()> {
-    let enabled = std::env::var("GOVEE_MUSIC_PALETTE")
-        .map(|v| v == "true")
-        .unwrap_or(false);
+    let configured = std::env::var(MUSIC_PALETTE_ENV_VAR).ok();
+    let enabled = music_palette_enabled(configured.as_deref());
     anyhow::ensure!(
         enabled,
         "set-music-palette is opt-in: set GOVEE_MUSIC_PALETTE=true to enable it"
@@ -452,13 +454,12 @@ async fn mqtt_light_command(
 
         if let Some(effect) = &command.effect {
             state
-                .device_set_scene(&device, effect)
+                .device_set_scene_with_music_color(&device, effect, command.color)
                 .await
                 .context("mqtt_light_command: state.device_set_scene")?;
-            // It doesn't make sense to vary color properties
-            // at the same time as the scene properties, so
-            // ignore those.
-            // Brightness, set above, is ok.
+            // A Music effect can carry one RGB colour in the same Platform API
+            // struct; its presence disables autoColor. Ordinary scenes still
+            // ignore colour and temperature, as before. Brightness is okay.
             return Ok(());
         }
 
@@ -713,7 +714,7 @@ async fn run_mqtt_loop(
             .await?;
         router
             .route(
-                "gv2mqtt/:id/set-music-sensitivity",
+                MUSIC_SENSITIVITY_COMMAND_ROUTE,
                 crate::hass_mqtt::number::mqtt_music_sensitivity_command,
             )
             .await?;
@@ -883,6 +884,10 @@ pub fn camel_case_to_space_separated(camel: &str) -> String {
 mod tests {
     use super::*;
     use crate::hass_mqtt::instance::EntityInstance;
+    use crate::platform_api::{
+        DeviceCapability, DeviceCapabilityKind, DeviceParameters, EnumOption,
+    };
+    use std::collections::HashMap;
 
     #[test]
     fn test_camel_case_ascii() {
@@ -975,7 +980,6 @@ mod tests {
     /// Assistant UI that silently does nothing.
     #[test]
     fn addon_music_palette_option_is_wired_to_the_env_var_the_bridge_reads() {
-        const ENV_VAR: &str = "GOVEE_MUSIC_PALETTE";
         const OPTION: &str = "music_palette";
         const CONFIG: &str = include_str!("../../addon/config.yaml");
         const RUN_SH: &str = include_str!("../../addon/run.sh");
@@ -990,17 +994,19 @@ mod tests {
             "addon/run.sh must read the {OPTION} option"
         );
         assert!(
-            RUN_SH.contains(&format!("export {ENV_VAR}=\"$(bashio::config {OPTION})\"")),
-            "addon/run.sh must export {OPTION} as {ENV_VAR}"
+            RUN_SH.contains(&format!(
+                "{MUSIC_PALETTE_ENV_VAR}=\"$(bashio::config {OPTION})\""
+            )),
+            "addon/run.sh must read {OPTION} into {MUSIC_PALETTE_ENV_VAR}"
+        );
+        assert!(
+            RUN_SH.contains(&format!("export {MUSIC_PALETTE_ENV_VAR}")),
+            "addon/run.sh must export {MUSIC_PALETTE_ENV_VAR}"
         );
         assert!(
             TRANSLATIONS.contains(&format!("{OPTION}:")),
             "addon/translations/en.yaml must label {OPTION}, or the add-on \
              config page shows a bare key"
-        );
-        assert!(
-            include_str!("hass.rs").contains(&format!("std::env::var(\"{ENV_VAR}\")")),
-            "the handler must read {ENV_VAR}, the name run.sh exports"
         );
     }
 
@@ -1008,108 +1014,128 @@ mod tests {
     /// the add-on toggle OFF exports `GOVEE_MUSIC_PALETTE=false` rather than
     /// leaving the variable unset. Anything but the exact string "true" has to
     /// keep the reverse-engineered LAN palette path disabled.
-    #[tokio::test]
-    async fn music_palette_topic_requires_the_env_var_to_be_exactly_true() {
-        const ENV_VAR: &str = "GOVEE_MUSIC_PALETTE";
-        let previous = std::env::var(ENV_VAR).ok();
-        let state: StateHandle = Arc::new(crate::service::state::State::new());
-
+    #[test]
+    fn music_palette_topic_requires_the_env_var_to_be_exactly_true() {
         for off in ["false", "False", "TRUE", "1", "yes", ""] {
-            std::env::set_var(ENV_VAR, off);
-            let err = mqtt_set_music_palette(
-                Payload("{}".to_string()),
-                Params(IdParameter {
-                    id: "no-such-device".to_string(),
-                }),
-                State(state.clone()),
-            )
-            .await
-            .expect_err("must refuse while opted out");
             assert!(
-                err.to_string().contains("opt-in"),
-                "{off:?} must not enable the topic: {err:#}"
+                !music_palette_enabled(Some(off)),
+                "{off:?} must not enable the topic"
             );
         }
-
-        std::env::remove_var(ENV_VAR);
-        let err = mqtt_set_music_palette(
-            Payload("{}".to_string()),
-            Params(IdParameter {
-                id: "no-such-device".to_string(),
-            }),
-            State(state.clone()),
-        )
-        .await
-        .expect_err("must refuse while unset");
-        assert!(err.to_string().contains("opt-in"), "{err:#}");
-
-        // ...and "true" gets past the gate: the next failure is the payload,
-        // not the opt-in check.
-        std::env::set_var(ENV_VAR, "true");
-        let err = mqtt_set_music_palette(
-            Payload("not json".to_string()),
-            Params(IdParameter {
-                id: "no-such-device".to_string(),
-            }),
-            State(state.clone()),
-        )
-        .await
-        .expect_err("an unparseable payload still fails");
-        assert!(
-            !err.to_string().contains("opt-in"),
-            "GOVEE_MUSIC_PALETTE=true must enable the topic: {err:#}"
-        );
-        assert!(
-            format!("{err:#}").contains("parsing set-music-palette payload"),
-            "{err:#}"
-        );
-
-        match previous {
-            Some(value) => std::env::set_var(ENV_VAR, value),
-            None => std::env::remove_var(ENV_VAR),
-        }
+        assert!(!music_palette_enabled(None));
+        assert!(music_palette_enabled(Some("true")));
     }
 
-    /// The state-report half of the slider. `HassClient` wraps a private
-    /// `Client` and has no constructor, so this is the only module that can
-    /// build one; the client is deliberately never connected, which makes the
-    /// gate observable: the branches that report nothing return `Ok` without
-    /// touching the broker, and the branch that does report fails on it.
     #[tokio::test]
-    async fn music_sensitivity_reports_nothing_until_the_user_picks_a_value() {
-        const ID: &str = "AA:BB:CC:DD:EE:FF:11:22";
+    async fn music_effect_with_rgb_disables_auto_color_on_the_wire() {
+        use crate::platform_api::test::{capture_server, live_path_guard, music_device};
+
+        let _serialized = live_path_guard();
+        let (base_url, captured) = capture_server();
+        let info = music_device();
         let state: StateHandle = Arc::new(crate::service::state::State::new());
-        let device = ServiceDevice::new("H607C", ID);
+        state
+            .set_platform_client(crate::platform_api::GoveeApiClient::new_for_test(
+                "test-key", base_url,
+            ))
+            .await;
         {
-            let _canonical = state.device_mut("H607C", ID).await;
+            let mut device = state.device_mut(&info.sku, &info.device).await;
+            device.set_http_device_info(info.clone());
+            device.set_music_sensitivity(42);
         }
 
-        let entity = crate::hass_mqtt::number::MusicSensitivityNumber::new(&device, &state);
-        let client = HassClient {
-            client: Client::with_auto_id().expect("mosquitto client"),
+        let before = captured.lock().unwrap_or_else(|e| e.into_inner()).len();
+        mqtt_light_command(
+            Payload(
+                serde_json::json!({
+                    "state": "ON",
+                    "effect": "Music: Rhythm",
+                    "color": {"r": 0x12, "g": 0x34, "b": 0x56},
+                })
+                .to_string(),
+            ),
+            Params(IdParameter {
+                id: info.device.clone(),
+            }),
+            State(state),
+        )
+        .await
+        .expect("the HA light command reaches the capture server");
+
+        let sent = captured.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(sent.len(), before + 1, "exactly one request");
+        let value = &sent[before]["payload"]["capability"]["value"];
+        assert_eq!(value["sensitivity"], 42);
+        assert_eq!(value["autoColor"], 0);
+        assert_eq!(value["rgb"], 0x123456);
+    }
+
+    #[tokio::test]
+    async fn ordinary_effect_still_ignores_rgb_in_the_same_command() {
+        use crate::platform_api::test::{capture_server, live_path_guard};
+
+        let _serialized = live_path_guard();
+        let (base_url, captured) = capture_server();
+        let info = crate::platform_api::HttpDeviceInfo {
+            sku: "H9999".to_string(),
+            device: "AA:BB:CC:DD:EE:FF:11:22".to_string(),
+            device_name: "Ordinary Scene Test".to_string(),
+            device_type: DeviceType::Light,
+            capabilities: vec![DeviceCapability {
+                kind: DeviceCapabilityKind::Mode,
+                instance: "lightScene".to_string(),
+                parameters: Some(DeviceParameters::Enum {
+                    options: vec![EnumOption {
+                        name: "Aurora".to_string(),
+                        value: serde_json::json!(7),
+                        extras: HashMap::new(),
+                    }],
+                }),
+                alarm_type: None,
+                event_state: None,
+            }],
         };
 
-        // Govee cannot be asked what the light's sensitivity is, so before the
-        // user picks one there is nothing truthful to publish.
-        tokio::time::timeout(Duration::from_secs(5), entity.notify_state(&client))
-            .await
-            .expect("notify must not block")
-            .expect("an unreported preference must not be an error");
-
+        let state: StateHandle = Arc::new(crate::service::state::State::new());
         state
-            .device_mut("H607C", ID)
-            .await
-            .set_music_sensitivity(60);
+            .set_platform_client(crate::platform_api::GoveeApiClient::new_for_test(
+                "test-key", base_url,
+            ))
+            .await;
+        {
+            state
+                .device_mut(&info.sku, &info.device)
+                .await
+                .set_http_device_info(info.clone());
+        }
 
-        // Now it does publish -- and the only reason this fails is that the
-        // client above was never connected to a broker.
-        let reported = tokio::time::timeout(Duration::from_secs(5), entity.notify_state(&client))
-            .await
-            .expect("notify must not block");
-        assert!(
-            reported.is_err(),
-            "a stored preference must be published to the state topic"
-        );
+        let before = captured.lock().unwrap_or_else(|e| e.into_inner()).len();
+        mqtt_light_command(
+            Payload(
+                serde_json::json!({
+                    "state": "ON",
+                    "effect": "Aurora",
+                    "color": {"r": 0x12, "g": 0x34, "b": 0x56},
+                })
+                .to_string(),
+            ),
+            Params(IdParameter {
+                id: info.device.clone(),
+            }),
+            State(state),
+        )
+        .await
+        .expect("the ordinary effect reaches the capture server");
+
+        let sent = captured.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(sent.len(), before + 1, "exactly one request");
+        let capability = &sent[before]["payload"]["capability"];
+        assert_eq!(capability["instance"], "lightScene");
+        assert_eq!(capability["value"], 7);
+        assert!(capability["value"].get("rgb").is_none());
+        assert!(capability["value"].get("autoColor").is_none());
+        assert!(capability["value"].get("sensitivity").is_none());
     }
 
     /// A device that vanished from the state map between discovery and the

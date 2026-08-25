@@ -189,8 +189,7 @@ pub async fn enumerate_entities_for_device(
                     entities.add(CapabilitySwitch::new(d, state, cap).await?);
                 }
                 DeviceCapabilityKind::MusicSetting
-                    if cap.instance.eq_ignore_ascii_case("musicMode")
-                        && !d.avoid_platform_api() =>
+                    if cap.has_music_mode_options() && !d.avoid_platform_api() =>
                 {
                     // Styles already ship as `Music: <name>` light effects; the
                     // only thing HA cannot reach is the sensitivity parameter.
@@ -245,20 +244,20 @@ pub async fn enumerate_entities_for_device(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::platform_api::HttpDeviceInfo;
+    use crate::platform_api::{DeviceParameters, HttpDeviceInfo};
     use crate::service::state::{SceneCatalogCache, State};
     use std::sync::Arc;
 
     const DEVICE_ID: &str = "AA:BB:CC:DD:EE:FF:11:22";
 
-    fn capability(kind: DeviceCapabilityKind, instance: &str) -> DeviceCapability {
-        DeviceCapability {
-            kind,
-            instance: instance.to_string(),
-            parameters: None,
-            alarm_type: None,
-            event_state: None,
-        }
+    fn music_mode_capability(instance: &str) -> DeviceCapability {
+        let info = crate::platform_api::test::music_device();
+        let mut capability = info
+            .capability_by_instance("musicMode")
+            .cloned()
+            .expect("fixture has a usable musicMode capability");
+        capability.instance = instance.to_string();
+        capability
     }
 
     fn device_with_capabilities(sku: &str, capabilities: Vec<DeviceCapability>) -> ServiceDevice {
@@ -304,7 +303,9 @@ mod test {
         let without = entity_count(&device_with_capabilities("H9999", vec![])).await;
         let with = entity_count(&device_with_capabilities(
             "H9999",
-            vec![capability(DeviceCapabilityKind::MusicSetting, "musicMode")],
+            // Platform responses are not guaranteed to preserve casing; the
+            // production match is deliberately case-insensitive.
+            vec![music_mode_capability("MusicMode")],
         ))
         .await;
 
@@ -324,11 +325,55 @@ mod test {
         let without = entity_count(&device_with_capabilities("H9999", vec![])).await;
         let with = entity_count(&device_with_capabilities(
             "H9999",
-            vec![capability(DeviceCapabilityKind::MusicSetting, "musicScene")],
+            vec![music_mode_capability("musicScene")],
         ))
         .await;
 
         assert_eq!(with, without, "only the musicMode instance is actionable");
+    }
+
+    #[tokio::test]
+    async fn unusable_music_mode_metadata_does_not_publish_the_slider() {
+        let without = entity_count(&device_with_capabilities("H9999", vec![])).await;
+
+        let mut missing_parameters = music_mode_capability("musicMode");
+        missing_parameters.parameters = None;
+
+        let mut empty_options = music_mode_capability("musicMode");
+        let Some(DeviceParameters::Struct { fields }) = &mut empty_options.parameters else {
+            panic!("fixture musicMode parameters must be a struct");
+        };
+        let field = fields
+            .iter_mut()
+            .find(|field| field.field_name == "musicMode")
+            .expect("fixture has the musicMode field");
+        let DeviceParameters::Enum { options } = &mut field.field_type else {
+            panic!("fixture musicMode field must be an enum");
+        };
+        options.clear();
+
+        let mut non_numeric_options = music_mode_capability("musicMode");
+        let Some(DeviceParameters::Struct { fields }) = &mut non_numeric_options.parameters else {
+            panic!("fixture musicMode parameters must be a struct");
+        };
+        let field = fields
+            .iter_mut()
+            .find(|field| field.field_name == "musicMode")
+            .expect("fixture has the musicMode field");
+        let DeviceParameters::Enum { options } = &mut field.field_type else {
+            panic!("fixture musicMode field must be an enum");
+        };
+        for option in options {
+            option.value = serde_json::json!("not-a-numeric-mode");
+        }
+
+        for capability in [missing_parameters, empty_options, non_numeric_options] {
+            let with = entity_count(&device_with_capabilities("H9999", vec![capability])).await;
+            assert_eq!(
+                with, without,
+                "a capability with no selectable styles must not add a dead slider"
+            );
+        }
     }
 
     /// Devices quirked off the Platform API take the LAN scene path, which
@@ -336,10 +381,7 @@ mod test {
     /// value that never reaches the device. H6141 is `with_broken_platform`.
     #[tokio::test]
     async fn broken_platform_quirks_do_not_publish_the_slider() {
-        let quirked = device_with_capabilities(
-            "H6141",
-            vec![capability(DeviceCapabilityKind::MusicSetting, "musicMode")],
-        );
+        let quirked = device_with_capabilities("H6141", vec![music_mode_capability("musicMode")]);
         assert!(
             quirked.avoid_platform_api(),
             "H6141 must still be quirked off the Platform API, or this test \

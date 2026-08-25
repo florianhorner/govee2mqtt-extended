@@ -17,6 +17,25 @@ This feature closes the gap: a command topic that programs music mode with
 an arbitrary palette by speaking the device's internal protocol over LAN
 (`ptReal` frames on UDP port 4003).
 
+## Platform API controls
+
+Platform-backed lights already expose each style as a `Music: <style>` effect
+and a **Music Sensitivity** number in Home Assistant. To select the Platform
+API's one fixed colour, include `rgb_color` with the effect:
+
+```yaml
+service: light.turn_on
+target:
+  entity_id: light.your_govee
+data:
+  effect: "Music: Rhythm"
+  rgb_color: [18, 52, 86]
+```
+
+The colour makes the bridge send `autoColor: 0`; omitting it sends
+`autoColor: 1` and lets the device choose colours. This path needs no opt-in,
+but it carries only one colour. Use the LAN command below for a real palette.
+
 ## Enabling it (opt-in)
 
 The topic only acts when the bridge runs with:

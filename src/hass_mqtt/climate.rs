@@ -113,6 +113,7 @@ impl TargetTemperatureEntity {
                     icon: Some("mdi:thermometer".to_string()),
                 },
                 state_topic: Some(state_topic),
+                payload_reset: None,
                 command_topic,
                 min: Some(constraints.min.value().floor() as f32),
                 max: Some(constraints.max.value().ceil() as f32),
