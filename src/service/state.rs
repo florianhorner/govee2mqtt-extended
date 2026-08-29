@@ -17,7 +17,9 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{
+    MappedMutexGuard, Mutex, MutexGuard, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore,
+};
 use tokio::time::{sleep, Duration};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -46,6 +48,7 @@ pub struct SceneCatalogEntry {
 pub struct State {
     devices_by_id: Mutex<HashMap<String, Device>>,
     semaphore_by_id: Mutex<HashMap<String, Arc<Semaphore>>>,
+    music_sensitivity_publish_by_id: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     lan_client: Mutex<Option<LanClient>>,
     platform_client: Mutex<Option<GoveeApiClient>>,
     undoc_client: Mutex<Option<GoveeUndocumentedApi>>,
@@ -141,6 +144,24 @@ impl State {
             .await
             .acquire_owned()
             .await?)
+    }
+
+    /// Order sensitivity state publications without holding the device-control
+    /// semaphore across broker I/O. These are distinct invariants: hardware
+    /// commands need mutual exclusion, while state echoes need newest-last
+    /// publication order.
+    pub(crate) async fn lock_music_sensitivity_publication(
+        &self,
+        device_id: &str,
+    ) -> OwnedMutexGuard<()> {
+        let lock = self
+            .music_sensitivity_publish_by_id
+            .lock()
+            .await
+            .entry(device_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        lock.lock_owned().await
     }
 
     pub async fn resolve_device_read_only(self: &Arc<Self>, label: &str) -> anyhow::Result<Device> {

@@ -11,6 +11,7 @@ use mosquitto_rs::router::{Params, Payload, State};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::ops::Range;
+use std::sync::Arc;
 
 pub const MUSIC_SENSITIVITY_COMMAND_ROUTE: &str = "gv2mqtt/:id/set-music-sensitivity";
 const MUSIC_SENSITIVITY_RESET_PAYLOAD: &str = "None";
@@ -221,7 +222,7 @@ fn music_sensitivity_state_topic(device: &ServiceDevice) -> String {
 }
 
 #[async_trait]
-trait MusicSensitivityPublisher: Sync {
+trait MusicSensitivityPublisher: Send + Sync {
     async fn publish_music_sensitivity(&self, topic: &str, value: &str) -> anyhow::Result<()>;
 }
 
@@ -246,7 +247,7 @@ impl MusicSensitivityNumber {
     pub fn new(device: &ServiceDevice, state: &StateHandle) -> Self {
         let id = topic_safe_id(device);
         // Built once: the discovery payload tells HA which topic to subscribe
-        // to, and `notify_value` publishes through that same config field.
+        // to, and notifications publish through that same config field.
         let state_topic = music_sensitivity_state_topic(device);
         Self {
             number: NumberConfig {
@@ -273,54 +274,20 @@ impl MusicSensitivityNumber {
         }
     }
 
-    async fn notify_value<P: MusicSensitivityPublisher>(
-        &self,
-        publisher: &P,
-        value: u8,
-    ) -> anyhow::Result<()> {
-        publish_music_sensitivity_value(
-            publisher,
-            self.number
-                .state_topic
-                .as_deref()
-                .ok_or_else(|| anyhow!("number has no state_topic"))?,
-            value,
-        )
-        .await
-    }
-
     async fn notify_state_with<P: MusicSensitivityPublisher>(
         &self,
         publisher: &P,
     ) -> anyhow::Result<()> {
-        let Some(value) = self
-            .state
-            .device_music_sensitivity_value(&self.device_id)
-            .await
-        else {
-            log::warn!(
-                "Device {} not found in state, skipping notify",
-                self.device_id
-            );
-            return Ok(());
-        };
-
-        match value {
-            Some(value) => self.notify_value(publisher, value).await?,
-            None => {
-                publisher
-                    .publish_music_sensitivity(
-                        self.number
-                            .state_topic
-                            .as_deref()
-                            .ok_or_else(|| anyhow!("number has no state_topic"))?,
-                        MUSIC_SENSITIVITY_RESET_PAYLOAD,
-                    )
-                    .await?;
-            }
-        }
-
-        Ok(())
+        publish_current_music_sensitivity_with(
+            &self.state,
+            &self.device_id,
+            self.number
+                .state_topic
+                .as_deref()
+                .ok_or_else(|| anyhow!("number has no state_topic"))?,
+            publisher,
+        )
+        .await
     }
 }
 
@@ -347,6 +314,114 @@ fn parse_music_sensitivity(value: &str) -> anyhow::Result<u8> {
     Ok(parsed.round().clamp(0.0, 100.0) as u8)
 }
 
+async fn publish_current_music_sensitivity_with<P: MusicSensitivityPublisher>(
+    state: &StateHandle,
+    device_id: &str,
+    state_topic: &str,
+    publisher: &P,
+) -> anyhow::Result<()> {
+    // Read after acquiring the publication lock. A notifier that started with
+    // an old value may publish first, but the slider echo waiting behind it then
+    // re-reads canonical state and necessarily publishes the newest value last.
+    let _publication = state.lock_music_sensitivity_publication(device_id).await;
+    let Some(value) = state.device_music_sensitivity_value(device_id).await else {
+        log::warn!("Device {device_id} not found in state, skipping notify");
+        return Ok(());
+    };
+
+    match value {
+        Some(value) => publish_music_sensitivity_value(publisher, state_topic, value).await,
+        None => {
+            publisher
+                .publish_music_sensitivity(state_topic, MUSIC_SENSITIVITY_RESET_PAYLOAD)
+                .await
+        }
+    }
+}
+
+async fn store_music_sensitivity(
+    state: &StateHandle,
+    device: &ServiceDevice,
+    value: u8,
+) -> anyhow::Result<()> {
+    // Share the device's control semaphore without scheduling a device poll:
+    // preferences send no device command, but still need ordering against a
+    // concurrent scene selection and other slider writes.
+    let permit = state.acquire_device_update_permit(device).await?;
+    log::info!(
+        "Storing music sensitivity {value} for {device}; \
+         it applies on the next Music: effect"
+    );
+    {
+        state
+            .device_mut(&device.sku, &device.id)
+            .await
+            .set_music_sensitivity(value);
+    }
+    drop(permit);
+
+    Ok(())
+}
+
+fn spawn_music_sensitivity_echo_with_hook<
+    P: MusicSensitivityPublisher + 'static,
+    H: FnOnce() + Send + 'static,
+>(
+    state: StateHandle,
+    device: &ServiceDevice,
+    publisher: Arc<P>,
+    before_publish: H,
+) -> tokio::task::JoinHandle<()> {
+    let device_id = device.id.clone();
+    let state_topic = music_sensitivity_state_topic(device);
+    tokio::spawn(async move {
+        before_publish();
+        if let Err(error) = publish_current_music_sensitivity_with(
+            &state,
+            &device_id,
+            &state_topic,
+            publisher.as_ref(),
+        )
+        .await
+        {
+            log::error!(
+                "Unable to publish music sensitivity state for device {device_id}: {error:#}"
+            );
+        }
+    })
+}
+
+async fn handle_music_sensitivity_command_with<P: MusicSensitivityPublisher + 'static>(
+    state: &StateHandle,
+    id: &str,
+    value: &str,
+    publisher: Option<Arc<P>>,
+) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
+    handle_music_sensitivity_command_with_hook(state, id, value, publisher, || {}).await
+}
+
+async fn handle_music_sensitivity_command_with_hook<
+    P: MusicSensitivityPublisher + 'static,
+    H: FnOnce() + Send + 'static,
+>(
+    state: &StateHandle,
+    id: &str,
+    value: &str,
+    publisher: Option<Arc<P>>,
+    before_publish: H,
+) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
+    let device = state.resolve_device_read_only(id).await?;
+    let clamped = parse_music_sensitivity(value)?;
+    store_music_sensitivity(state, &device, clamped).await?;
+
+    // Do not keep this device's FIFO dispatch lane behind broker I/O. The
+    // publication lock orders background notifications, and each task re-reads
+    // canonical state after acquiring it, so the newest value is still last.
+    Ok(publisher.map(|publisher| {
+        spawn_music_sensitivity_echo_with_hook(state.clone(), &device, publisher, before_publish)
+    }))
+}
+
 pub async fn mqtt_music_sensitivity_command(
     // `Payload<String>` + explicit parse, like `mqtt_set_temperature`: HA sends
     // integers, but a hand-published "55.0" would fail `Payload<i64>` before the
@@ -359,29 +434,12 @@ pub async fn mqtt_music_sensitivity_command(
     // nothing. Taking the control coordinator would hold the per-device permit
     // and schedule a `poll_after_control` Platform API request 5s after every
     // slider move.
-    let device = state.resolve_device_read_only(&id).await?;
-    let clamped = parse_music_sensitivity(&value)?;
-    // Share the device's control semaphore without scheduling a device poll:
-    // preferences send no device command, but still need ordering against a
-    // concurrent scene selection and other slider writes.
-    let _permit = state.acquire_device_update_permit(&device).await?;
-    log::info!(
-        "Storing music sensitivity {clamped} for {device}; \
-         it applies on the next Music: effect"
-    );
-    {
-        state
-            .device_mut(&device.sku, &device.id)
-            .await
-            .set_music_sensitivity(clamped);
-    }
     // A preference update only changes this entity. Publishing it directly
     // avoids rebuilding and notifying every entity for the device.
-    if let Some(client) = state.get_hass_client().await {
-        publish_music_sensitivity_value(&client, &music_sensitivity_state_topic(&device), clamped)
-            .await?;
-    }
-    Ok(())
+    let client = state.get_hass_client().await.map(Arc::new);
+    handle_music_sensitivity_command_with(&state, &id, &value, client)
+        .await
+        .map(|_echo| ())
 }
 
 #[cfg(test)]
@@ -416,6 +474,56 @@ mod test {
             _value: &str,
         ) -> anyhow::Result<()> {
             anyhow::bail!("synthetic publish failure")
+        }
+    }
+
+    struct BlockingFirstPublisher {
+        messages: std::sync::Mutex<Vec<(String, String)>>,
+        first_gate: std::sync::Mutex<
+            Option<(
+                tokio::sync::oneshot::Sender<()>,
+                tokio::sync::oneshot::Receiver<()>,
+            )>,
+        >,
+    }
+
+    impl BlockingFirstPublisher {
+        fn new() -> (
+            Self,
+            tokio::sync::oneshot::Receiver<()>,
+            tokio::sync::oneshot::Sender<()>,
+        ) {
+            let (first_started_tx, first_started_rx) = tokio::sync::oneshot::channel();
+            let (release_first_tx, release_first_rx) = tokio::sync::oneshot::channel();
+            (
+                Self {
+                    messages: std::sync::Mutex::new(vec![]),
+                    first_gate: std::sync::Mutex::new(Some((first_started_tx, release_first_rx))),
+                },
+                first_started_rx,
+                release_first_tx,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl MusicSensitivityPublisher for BlockingFirstPublisher {
+        async fn publish_music_sensitivity(&self, topic: &str, value: &str) -> anyhow::Result<()> {
+            let first_gate = self
+                .first_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            if let Some((started, release)) = first_gate {
+                let _ = started.send(());
+                let _ = release.await;
+            }
+
+            self.messages
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push((topic.to_string(), value.to_string()));
+            Ok(())
         }
     }
 
@@ -590,6 +698,135 @@ mod test {
                     "60".to_string(),
                 ),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_notify_cannot_publish_after_a_newer_slider_echo() {
+        let state = state_with_device().await;
+        let device = stored_sensitivity(&state).await;
+        let entity = MusicSensitivityNumber::new(&device, &state);
+        let (publisher, first_started, release_first) = BlockingFirstPublisher::new();
+        let publisher = Arc::new(publisher);
+
+        let notify_publisher = publisher.clone();
+        let notify =
+            tokio::spawn(async move { entity.notify_state_with(notify_publisher.as_ref()).await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), first_started)
+            .await
+            .expect("the old notification reaches its publish")
+            .expect("the old notification reports startup");
+
+        let (echo_attempted_tx, echo_attempted_rx) = tokio::sync::oneshot::channel();
+        let mut echo = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            handle_music_sensitivity_command_with_hook(
+                &state,
+                &device.id,
+                "73",
+                Some(publisher.clone()),
+                move || {
+                    let _ = echo_attempted_tx.send(());
+                },
+            ),
+        )
+        .await
+        .expect("the slider handler must not await broker publication")
+        .expect("the slider command stores its value")
+        .expect("a configured publisher schedules an echo");
+        assert_eq!(
+            stored_sensitivity(&state).await.music_sensitivity_value(),
+            Some(73),
+            "the handler must return after storing while the old publication is blocked"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), echo_attempted_rx)
+            .await
+            .expect("the background echo reaches the publication boundary")
+            .expect("the background echo reports its attempt");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut echo)
+                .await
+                .is_err(),
+            "the newer slider echo must wait until the old notification publishes"
+        );
+
+        let current_device = stored_sensitivity(&state).await;
+        let update_permit = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            state.acquire_device_update_permit(&current_device),
+        )
+        .await
+        .expect("broker publication must not block device controls")
+        .expect("the device update permit remains available");
+        drop(update_permit);
+
+        let _ = release_first.send(());
+        tokio::time::timeout(std::time::Duration::from_secs(1), notify)
+            .await
+            .expect("the old notification completes after release")
+            .expect("the notification task does not panic")
+            .expect("the old notification publishes successfully");
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut echo)
+            .await
+            .expect("the slider proceeds after the notification")
+            .expect("the slider echo task does not panic");
+
+        let messages = publisher
+            .messages
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(
+            messages
+                .iter()
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            vec![MUSIC_SENSITIVITY_RESET_PAYLOAD, "73"],
+            "the final MQTT state must be the newest sensitivity"
+        );
+        assert_eq!(
+            stored_sensitivity(&state).await.music_sensitivity_value(),
+            Some(73)
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_echo_reads_sensitivity_only_after_acquiring_publication_lock() {
+        let state = state_with_device().await;
+        let device = stored_sensitivity(&state).await;
+        let publisher = CapturingPublisher::default();
+        let publication = state.lock_music_sensitivity_publication(&device.id).await;
+        let state_topic = music_sensitivity_state_topic(&device);
+
+        let echo =
+            publish_current_music_sensitivity_with(&state, &device.id, &state_topic, &publisher);
+        tokio::pin!(echo);
+        tokio::select! {
+            biased;
+            result = &mut echo => {
+                panic!("the echo bypassed the held publication lock: {result:?}");
+            }
+            _ = tokio::task::yield_now() => {}
+        }
+
+        store_music_sensitivity(&state, &device, 73)
+            .await
+            .expect("the newer sensitivity is stored while the echo waits");
+        drop(publication);
+        tokio::time::timeout(std::time::Duration::from_secs(1), echo)
+            .await
+            .expect("the queued echo proceeds after lock release")
+            .expect("the queued echo publishes successfully");
+
+        assert_eq!(
+            publisher
+                .messages
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .iter()
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["73"],
+            "the queued echo must read the new value after acquiring the lock"
         );
     }
 
