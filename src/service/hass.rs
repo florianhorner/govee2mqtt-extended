@@ -15,11 +15,148 @@ use async_channel::Receiver;
 use mosquitto_rs::router::{MqttRouter, Params, Payload, State};
 use mosquitto_rs::{Client, Event, QoS};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 const HASS_REGISTER_DELAY: tokio::time::Duration = tokio::time::Duration::from_secs(15);
 const MUSIC_PALETTE_ENV_VAR: &str = "GOVEE_MUSIC_PALETTE";
+
+type MqttDispatchTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+/// Reserve MQTT command order before the command futures are spawned.
+///
+/// The device control semaphore prevents overlapping hardware requests, but tasks
+/// spawned from consecutive broker messages can reach that semaphore out of order.
+/// A small queue per normalized device id preserves broker arrival order without
+/// making a slow device block commands for every other device.
+#[derive(Default)]
+struct MqttDispatchQueues {
+    by_device: HashMap<String, tokio::sync::mpsc::UnboundedSender<MqttDispatchTask>>,
+}
+
+impl MqttDispatchQueues {
+    async fn enqueue_boxed(&mut self, topic: &str, state: &StateHandle, task: MqttDispatchTask) {
+        let Some(device_key) = mqtt_device_dispatch_key(state, topic).await else {
+            tokio::spawn(task);
+            return;
+        };
+
+        let sender = self
+            .by_device
+            .entry(device_key.clone())
+            .or_insert_with(|| start_mqtt_dispatch_queue(device_key.clone()))
+            .clone();
+
+        if let Err(error) = sender.send(task) {
+            // The worker only exits when all senders are dropped, so this is a
+            // shutdown/recovery path. Restart the lane rather than violating
+            // device ordering with an independent fallback task.
+            self.by_device.remove(&device_key);
+            log::error!(
+                "MQTT dispatch queue for device {device_key} closed unexpectedly; \
+                 restarting it"
+            );
+            let replacement = start_mqtt_dispatch_queue(device_key.clone());
+            match replacement.send(error.0) {
+                Ok(()) => {
+                    self.by_device.insert(device_key, replacement);
+                }
+                Err(_) => {
+                    log::error!(
+                        "Replacement MQTT dispatch queue for device {device_key} \
+                         also closed; dropping the current message"
+                    );
+                }
+            }
+        }
+    }
+}
+
+struct MqttDispatchRequest {
+    topic: String,
+    task: MqttDispatchTask,
+}
+
+fn start_mqtt_dispatch_scheduler(
+    state: StateHandle,
+) -> tokio::sync::mpsc::UnboundedSender<MqttDispatchRequest> {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(run_mqtt_dispatch_scheduler(state, receiver));
+    sender
+}
+
+async fn run_mqtt_dispatch_scheduler(
+    state: StateHandle,
+    mut receiver: tokio::sync::mpsc::UnboundedReceiver<MqttDispatchRequest>,
+) {
+    let mut queues = MqttDispatchQueues::default();
+    while let Some(request) = receiver.recv().await {
+        queues
+            .enqueue_boxed(&request.topic, &state, request.task)
+            .await;
+    }
+}
+
+fn start_mqtt_dispatch_queue(
+    device_key: String,
+) -> tokio::sync::mpsc::UnboundedSender<MqttDispatchTask> {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(run_mqtt_dispatch_queue(device_key, receiver));
+    sender
+}
+
+async fn run_mqtt_dispatch_queue(
+    device_key: String,
+    mut receiver: tokio::sync::mpsc::UnboundedReceiver<MqttDispatchTask>,
+) {
+    while let Some(task) = receiver.recv().await {
+        // Isolate panics to the current command so one bad handler cannot drop
+        // every later command already queued for this device.
+        if let Err(error) = tokio::spawn(task).await {
+            log::error!("MQTT dispatch task for device {device_key} panicked: {error}");
+        }
+    }
+}
+
+fn mqtt_device_dispatch_label(topic: &str) -> Option<&str> {
+    let segments: Vec<_> = topic.split('/').collect();
+    let device_id = match segments.as_slice() {
+        ["gv2mqtt", "light", id, "command"]
+        | ["gv2mqtt", "light", id, "command", _]
+        | ["gv2mqtt", "switch", id, "command", _]
+        | ["gv2mqtt", "number", id, "command", _, _]
+        | ["gv2mqtt", "humidifier", id, "set-mode"]
+        | ["gv2mqtt", "humidifier", id, "set-target"]
+        | ["gv2mqtt", id, "request-platform-data"]
+        | ["gv2mqtt", id, "scene-next"]
+        | ["gv2mqtt", id, "scene-prev"]
+        | ["gv2mqtt", id, "set-work-mode"]
+        | ["gv2mqtt", id, "set-music-sensitivity"]
+        | ["gv2mqtt", id, "set-temperature", _, _]
+        | ["gv2mqtt", id, "set-mode-scene"]
+        | ["gv2mqtt", id, "set-music-palette"] => id,
+        _ => return None,
+    };
+
+    (!device_id.is_empty()).then_some(*device_id)
+}
+
+async fn mqtt_device_dispatch_key(state: &StateHandle, topic: &str) -> Option<String> {
+    let label = mqtt_device_dispatch_label(topic)?;
+    let device = state.resolve_device(label).await?;
+
+    let normalized: String = device
+        .id
+        .chars()
+        .filter(|character| *character != ':' && *character != ' ')
+        .map(|character| character.to_ascii_lowercase())
+        .collect();
+
+    (!normalized.is_empty()).then_some(normalized)
+}
 
 #[derive(clap::Parser, Debug)]
 pub struct HassArguments {
@@ -751,17 +888,27 @@ async fn run_mqtt_loop(
 
     let mut router = rebuild_router(&client, &state).await?;
     let mut need_rebuild = false;
+    // Canonical device lookup needs the async state mutex. Keep it in a FIFO
+    // scheduler task so the broker event loop can continue draining reconnect
+    // events while a state mutation temporarily owns that mutex.
+    let dispatch_scheduler = start_mqtt_dispatch_scheduler(state.clone());
 
     while let Ok(event) = subscriber.recv().await {
         match event {
             Event::Message(msg) => {
                 let router = router.clone();
-                let state = state.clone();
-                tokio::spawn(async move {
-                    if let Err(err) = router.dispatch(msg.clone(), state.clone()).await {
-                        log::error!("While dispatching {msg:?}: {err:#}");
-                    }
-                });
+                let dispatch_state = state.clone();
+                let topic = msg.topic.clone();
+                dispatch_scheduler
+                    .send(MqttDispatchRequest {
+                        topic,
+                        task: Box::pin(async move {
+                            if let Err(err) = router.dispatch(msg.clone(), dispatch_state).await {
+                                log::error!("While dispatching {msg:?}: {err:#}");
+                            }
+                        }),
+                    })
+                    .map_err(|_| anyhow::anyhow!("MQTT dispatch scheduler stopped"))?;
             }
             Event::Disconnected(reason) => {
                 log::warn!("MQTT disconnected with reason={reason}");
@@ -887,7 +1034,6 @@ mod tests {
     use crate::platform_api::{
         DeviceCapability, DeviceCapabilityKind, DeviceParameters, EnumOption,
     };
-    use std::collections::HashMap;
 
     #[test]
     fn test_camel_case_ascii() {
@@ -1024,6 +1170,314 @@ mod tests {
         }
         assert!(!music_palette_enabled(None));
         assert!(music_palette_enabled(Some("true")));
+    }
+
+    #[tokio::test]
+    async fn mqtt_dispatch_keys_align_all_device_topic_layouts() {
+        const DEVICE_ID: &str = "AA:BB:CC:DD:EE:FF:11:22";
+        const DEVICE_IP: &str = "192.0.2.44";
+        let state: StateHandle = Arc::new(crate::service::state::State::new());
+        let mut info = crate::platform_api::test::music_device();
+        info.sku = "H9999".to_string();
+        info.device = DEVICE_ID.to_string();
+        info.device_name = "Dispatch Test Light".to_string();
+        {
+            let mut device = state.device_mut(&info.sku, &info.device).await;
+            device.set_http_device_info(info);
+            device.set_lan_device(crate::lan_api::LanDevice {
+                ip: std::net::IpAddr::from([192, 0, 2, 44]),
+                device: DEVICE_ID.to_string(),
+                sku: "H9999".to_string(),
+                ble_version_hard: String::new(),
+                ble_version_soft: String::new(),
+                wifi_version_hard: String::new(),
+                wifi_version_soft: String::new(),
+            });
+        }
+
+        let expected = Some("aabbccddeeff1122".to_string());
+        for topic in [
+            "gv2mqtt/AA:BB:CC:DD:EE:FF:11:22/request-platform-data",
+            "gv2mqtt/AA:BB:CC:DD:EE:FF:11:22/scene-next",
+            "gv2mqtt/AA:BB:CC:DD:EE:FF:11:22/scene-prev",
+            "gv2mqtt/AA:BB:CC:DD:EE:FF:11:22/set-work-mode",
+            "gv2mqtt/AA:BB:CC:DD:EE:FF:11:22/set-music-sensitivity",
+            "gv2mqtt/AA:BB:CC:DD:EE:FF:11:22/set-temperature/manual/C",
+            "gv2mqtt/AA:BB:CC:DD:EE:FF:11:22/set-mode-scene",
+            "gv2mqtt/AA:BB:CC:DD:EE:FF:11:22/set-music-palette",
+            "gv2mqtt/light/AABBCCDDEEFF1122/command",
+            "gv2mqtt/light/AABBCCDDEEFF1122/command/3",
+            "gv2mqtt/switch/AABBCCDDEEFF1122/command/powerSwitch",
+            "gv2mqtt/number/AABBCCDDEEFF1122/command/manual/1",
+            "gv2mqtt/humidifier/AABBCCDDEEFF1122/set-mode",
+            "gv2mqtt/humidifier/AABBCCDDEEFF1122/set-target",
+        ] {
+            assert_eq!(
+                mqtt_device_dispatch_key(&state, topic).await,
+                expected,
+                "topic {topic} must join the same per-device queue"
+            );
+        }
+
+        for alias in [
+            DEVICE_ID,
+            "AABBCCDDEEFF1122",
+            "Dispatch Test Light",
+            "H9999_1122",
+            DEVICE_IP,
+        ] {
+            let topic = format!("gv2mqtt/{alias}/set-music-sensitivity");
+            assert_eq!(
+                mqtt_device_dispatch_key(&state, &topic).await,
+                expected,
+                "alias {alias} must resolve to the canonical device queue"
+            );
+        }
+
+        for topic in [
+            "homeassistant/status",
+            "gv2mqtt/AABBCCDDEEFF1122/status",
+            "gv2mqtt/availability",
+            "gv2mqtt/oneclick",
+            "gv2mqtt/purge-caches",
+        ] {
+            assert_eq!(
+                mqtt_device_dispatch_key(&state, topic).await,
+                None,
+                "global topic {topic} must not be serialized behind a device"
+            );
+        }
+
+        let mut queues = MqttDispatchQueues::default();
+        let (unknown_done_tx, unknown_done_rx) = tokio::sync::oneshot::channel();
+        queues
+            .enqueue_boxed(
+                "gv2mqtt/not-a-device/set-music-sensitivity",
+                &state,
+                Box::pin(async move {
+                    let _ = unknown_done_tx.send(());
+                }),
+            )
+            .await;
+        assert!(
+            queues.by_device.is_empty(),
+            "unknown ids must not retain dispatch workers"
+        );
+        tokio::time::timeout(Duration::from_secs(1), unknown_done_rx)
+            .await
+            .expect("an unknown-id command is still dispatched")
+            .expect("the unknown-id command reports completion");
+    }
+
+    #[tokio::test]
+    async fn mqtt_dispatch_queue_keeps_devices_independent() {
+        let state: StateHandle = Arc::new(crate::service::state::State::new());
+        drop(state.device_mut("H0001", "device-a").await);
+        drop(state.device_mut("H0002", "device-b").await);
+        let scheduler = start_mqtt_dispatch_scheduler(state);
+        let (first_started_tx, first_started_rx) = tokio::sync::oneshot::channel();
+        let (release_first_tx, release_first_rx) = tokio::sync::oneshot::channel();
+        let (same_device_tx, mut same_device_rx) = tokio::sync::oneshot::channel();
+        let (other_device_tx, other_device_rx) = tokio::sync::oneshot::channel();
+
+        assert!(
+            scheduler
+                .send(MqttDispatchRequest {
+                    topic: "gv2mqtt/device-a/set-music-sensitivity".to_string(),
+                    task: Box::pin(async move {
+                        let _ = first_started_tx.send(());
+                        let _ = release_first_rx.await;
+                    }),
+                })
+                .is_ok(),
+            "the dispatch scheduler accepts the first device-a command"
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), first_started_rx)
+            .await
+            .expect("the first device-a command starts")
+            .expect("the first device-a command reports startup");
+        assert!(
+            scheduler
+                .send(MqttDispatchRequest {
+                    topic: "gv2mqtt/light/device-a/command".to_string(),
+                    task: Box::pin(async move {
+                        let _ = same_device_tx.send(());
+                    }),
+                })
+                .is_ok(),
+            "the dispatch scheduler accepts the second device-a command"
+        );
+        assert!(
+            scheduler
+                .send(MqttDispatchRequest {
+                    topic: "gv2mqtt/light/device-b/command".to_string(),
+                    task: Box::pin(async move {
+                        let _ = other_device_tx.send(());
+                    }),
+                })
+                .is_ok(),
+            "the dispatch scheduler accepts the device-b command"
+        );
+        tokio::time::timeout(Duration::from_secs(1), other_device_rx)
+            .await
+            .expect("device-b must not wait for device-a")
+            .expect("the device-b command completes");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut same_device_rx)
+                .await
+                .is_err(),
+            "the second device-a command must wait in FIFO order"
+        );
+
+        let _ = release_first_tx.send(());
+        tokio::time::timeout(Duration::from_secs(1), same_device_rx)
+            .await
+            .expect("the queued device-a command proceeds after release")
+            .expect("the queued device-a command completes");
+    }
+
+    #[tokio::test]
+    async fn mqtt_dispatch_queue_survives_a_handler_panic() {
+        let state: StateHandle = Arc::new(crate::service::state::State::new());
+        drop(state.device_mut("H0001", "device-a").await);
+        let scheduler = start_mqtt_dispatch_scheduler(state);
+        let (after_panic_tx, after_panic_rx) = tokio::sync::oneshot::channel();
+
+        assert!(
+            scheduler
+                .send(MqttDispatchRequest {
+                    topic: "gv2mqtt/device-a/set-music-sensitivity".to_string(),
+                    task: Box::pin(async move {
+                        panic!("synthetic handler panic");
+                    }),
+                })
+                .is_ok(),
+            "the scheduler accepts the panicking command"
+        );
+        assert!(
+            scheduler
+                .send(MqttDispatchRequest {
+                    topic: "gv2mqtt/light/device-a/command".to_string(),
+                    task: Box::pin(async move {
+                        let _ = after_panic_tx.send(());
+                    }),
+                })
+                .is_ok(),
+            "the scheduler accepts the command after the panic"
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), after_panic_rx)
+            .await
+            .expect("the device lane continues after a handler panic")
+            .expect("the command after the panic reports completion");
+    }
+
+    #[tokio::test]
+    async fn mqtt_dispatch_applies_sensitivity_before_the_next_music_effect() {
+        use crate::platform_api::test::{capture_server, live_path_guard, music_device};
+
+        let _serialized = live_path_guard();
+        let (base_url, captured) = capture_server();
+        let info = music_device();
+        let state: StateHandle = Arc::new(crate::service::state::State::new());
+        state
+            .set_platform_client(crate::platform_api::GoveeApiClient::new_for_test(
+                "test-key", base_url,
+            ))
+            .await;
+        {
+            state
+                .device_mut(&info.sku, &info.device)
+                .await
+                .set_http_device_info(info.clone());
+        }
+
+        let device = state
+            .device_by_id(&info.device)
+            .await
+            .expect("the music device is in state");
+        let topic_id = topic_safe_id(&device);
+        let before = captured
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len();
+        let (release_sensitivity_tx, release_sensitivity_rx) = tokio::sync::oneshot::channel();
+        let (sensitivity_started_tx, sensitivity_started_rx) = tokio::sync::oneshot::channel();
+        let (effect_done_tx, mut effect_done_rx) = tokio::sync::oneshot::channel();
+        let scheduler = start_mqtt_dispatch_scheduler(state.clone());
+
+        let sensitivity_state = state.clone();
+        let sensitivity_id = topic_id.clone();
+        assert!(
+            scheduler
+                .send(MqttDispatchRequest {
+                    topic: format!("gv2mqtt/{topic_id}/set-music-sensitivity"),
+                    task: Box::pin(async move {
+                        let _ = sensitivity_started_tx.send(());
+                        let _ = release_sensitivity_rx.await;
+                        crate::hass_mqtt::number::mqtt_music_sensitivity_command(
+                            Payload("30".to_string()),
+                            Params(IdParameter { id: sensitivity_id }),
+                            State(sensitivity_state),
+                        )
+                        .await
+                        .expect("the queued sensitivity command succeeds");
+                    }),
+                })
+                .is_ok(),
+            "the scheduler accepts the sensitivity command"
+        );
+        tokio::time::timeout(Duration::from_secs(1), sensitivity_started_rx)
+            .await
+            .expect("the sensitivity command starts")
+            .expect("the sensitivity command reports startup");
+
+        let effect_state = state.clone();
+        let effect_id = topic_id.clone();
+        assert!(
+            scheduler
+                .send(MqttDispatchRequest {
+                    topic: format!("gv2mqtt/light/{topic_id}/command"),
+                    task: Box::pin(async move {
+                        let result = mqtt_light_command(
+                            Payload(
+                                serde_json::json!({
+                                    "state": "ON",
+                                    "effect": "Music: Rhythm",
+                                })
+                                .to_string(),
+                            ),
+                            Params(IdParameter { id: effect_id }),
+                            State(effect_state),
+                        )
+                        .await;
+                        let _ = effect_done_tx.send(result);
+                    }),
+                })
+                .is_ok(),
+            "the scheduler accepts the Music effect command"
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut effect_done_rx)
+                .await
+                .is_err(),
+            "the effect must wait for the earlier sensitivity command"
+        );
+        let _ = release_sensitivity_tx.send(());
+        tokio::time::timeout(Duration::from_secs(1), effect_done_rx)
+            .await
+            .expect("the Music effect proceeds after sensitivity is stored")
+            .expect("the effect worker reports completion")
+            .expect("the Music effect reaches the capture server");
+
+        let sent = captured.lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(sent.len(), before + 1, "exactly one Platform request");
+        assert_eq!(
+            sent[before]["payload"]["capability"]["value"]["sensitivity"], 30,
+            "the next Music effect must carry the preceding slider value"
+        );
     }
 
     #[tokio::test]
