@@ -339,24 +339,52 @@ async fn publish_current_music_sensitivity_with<P: MusicSensitivityPublisher>(
     }
 }
 
+/// What the command topic was asked to do. Home Assistant publishes
+/// `payload_reset` to the *command* topic (not the state topic) when a number
+/// entity is reset, so the handler has to accept it alongside real values.
+#[derive(Debug, PartialEq, Eq)]
+enum MusicSensitivityCommand {
+    Set(u8),
+    Clear,
+}
+
+fn parse_music_sensitivity_command(value: &str) -> anyhow::Result<MusicSensitivityCommand> {
+    if value.trim() == MUSIC_SENSITIVITY_RESET_PAYLOAD {
+        return Ok(MusicSensitivityCommand::Clear);
+    }
+    parse_music_sensitivity(value).map(MusicSensitivityCommand::Set)
+}
+
 async fn store_music_sensitivity(
     state: &StateHandle,
     device: &ServiceDevice,
-    value: u8,
+    command: MusicSensitivityCommand,
 ) -> anyhow::Result<()> {
     // Share the device's control semaphore without scheduling a device poll:
     // preferences send no device command, but still need ordering against a
     // concurrent scene selection and other slider writes.
     let permit = state.acquire_device_update_permit(device).await?;
-    log::info!(
-        "Storing music sensitivity {value} for {device}; \
-         it applies on the next Music: effect"
-    );
-    {
-        state
-            .device_mut(&device.sku, &device.id)
-            .await
-            .set_music_sensitivity(value);
+    match command {
+        MusicSensitivityCommand::Set(value) => {
+            log::info!(
+                "Storing music sensitivity {value} for {device}; \
+                 it applies on the next Music: effect"
+            );
+            state
+                .device_mut(&device.sku, &device.id)
+                .await
+                .set_music_sensitivity(value);
+        }
+        MusicSensitivityCommand::Clear => {
+            log::info!(
+                "Clearing the stored music sensitivity for {device}; \
+                 the next Music: effect uses the default"
+            );
+            state
+                .device_mut(&device.sku, &device.id)
+                .await
+                .clear_music_sensitivity();
+        }
     }
     drop(permit);
 
@@ -411,8 +439,8 @@ async fn handle_music_sensitivity_command_with_hook<
     before_publish: H,
 ) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
     let device = state.resolve_device_read_only(id).await?;
-    let clamped = parse_music_sensitivity(value)?;
-    store_music_sensitivity(state, &device, clamped).await?;
+    let command = parse_music_sensitivity_command(value)?;
+    store_music_sensitivity(state, &device, command).await?;
 
     // Do not keep this device's FIFO dispatch lane behind broker I/O. The
     // publication lock orders background notifications, and each task re-reads
@@ -657,6 +685,75 @@ mod test {
         assert_eq!(device.music_sensitivity_value(), Some(55));
     }
 
+    /// The discovery payload advertises `payload_reset`, and Home Assistant
+    /// publishes that payload to the *command* topic — not the state topic —
+    /// when the number is reset. Parsing it as a number would reject the very
+    /// value we told HA to send, leaving the preference stuck forever.
+    #[tokio::test]
+    async fn the_advertised_reset_payload_clears_the_stored_preference() {
+        let state = state_with_device().await;
+        state
+            .device_mut(SKU, DEVICE_ID)
+            .await
+            .set_music_sensitivity(73);
+        assert_eq!(
+            stored_sensitivity(&state).await.music_sensitivity_value(),
+            Some(73)
+        );
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            mqtt_music_sensitivity_command(
+                Payload(MUSIC_SENSITIVITY_RESET_PAYLOAD.to_string()),
+                Params(IdParameter {
+                    id: DEVICE_ID.to_string(),
+                }),
+                State(state.clone()),
+            ),
+        )
+        .await
+        .expect("the reset must release its device locks")
+        .expect("the payload we advertise in discovery must be accepted");
+
+        let device = stored_sensitivity(&state).await;
+        assert_eq!(
+            device.music_sensitivity_value(),
+            None,
+            "a reset returns the entity to unknown, not to a number"
+        );
+        assert_eq!(
+            device.music_sensitivity(),
+            crate::platform_api::DEFAULT_MUSIC_SENSITIVITY,
+            "the next Music: effect falls back to the historical default"
+        );
+    }
+
+    /// The reset payload is matched exactly; it must not become an accidental
+    /// escape hatch for every unparseable payload.
+    #[test]
+    fn only_the_exact_reset_payload_clears_the_preference() {
+        assert_eq!(
+            parse_music_sensitivity_command(MUSIC_SENSITIVITY_RESET_PAYLOAD).unwrap(),
+            MusicSensitivityCommand::Clear
+        );
+        // HA publishes a bare payload, but a hand-written `mqtt.publish` can
+        // carry trailing whitespace; the numeric path already trims.
+        assert_eq!(
+            parse_music_sensitivity_command(" None ").unwrap(),
+            MusicSensitivityCommand::Clear
+        );
+        assert_eq!(
+            parse_music_sensitivity_command("55").unwrap(),
+            MusicSensitivityCommand::Set(55)
+        );
+        for rejected in ["none", "NONE", "null", "", "unknown"] {
+            assert!(
+                parse_music_sensitivity_command(rejected).is_err(),
+                "{rejected:?} is not the advertised reset payload and is not a number"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn sensitivity_state_echo_has_the_exact_topic_and_payload() {
         let state = state_with_device().await;
@@ -808,7 +905,7 @@ mod test {
             _ = tokio::task::yield_now() => {}
         }
 
-        store_music_sensitivity(&state, &device, 73)
+        store_music_sensitivity(&state, &device, MusicSensitivityCommand::Set(73))
             .await
             .expect("the newer sensitivity is stored while the echo waits");
         drop(publication);
