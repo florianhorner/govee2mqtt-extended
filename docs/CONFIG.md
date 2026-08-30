@@ -210,5 +210,23 @@ With `rgb_color`, the bridge sends `autoColor: 0` plus the packed RGB value.
 Without it, the bridge preserves the historical `autoColor: 1`, so the device
 chooses colours. The Platform API supports only this one colour, not a palette.
 
+Note that Home Assistant can supply `rgb_color` without you asking for it.
+Restoring a scene, or any script that replays a light's captured attributes,
+sends the whole attribute set — so a snapshot taken while the light was in a
+`Music:` effect replays `effect` *and* `rgb_color` together, which pins the
+colour and stops the automatic cycling. Ordinary (non-`Music:`) scenes ignore
+colour in the same command, exactly as before. To restore a cycling music
+effect, send `effect` on its own.
+
+### MQTT topics
+
+The number entity is the supported interface; these are the topics behind it,
+for driving the bridge directly over MQTT rather than through Home Assistant.
+
+|Topic|Direction|Payload|
+|-----|---------|-------|
+|`gv2mqtt/<id>/set-music-sensitivity`|command|`0`-`100`, or `None` to clear the stored value. Decimals round, out-of-range values clamp.|
+|`gv2mqtt/<id>/notify-music-sensitivity`|state|The stored value, or `None` when nothing has been set yet.|
+
 The LAN palette frames carry their own sensitivity byte, which is a different
 setting from the Platform API one the number entity writes.

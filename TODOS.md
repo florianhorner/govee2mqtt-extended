@@ -162,3 +162,63 @@ decision, not just an oversight.
 open) in this exact region — do this after #52 lands to build on its final shape instead of
 conflicting with it mid-flight.
 **Effort:** Small-medium.
+
+## `lan_carry_over_preserves_iot_mode_observation_time` is flaky
+**What:** `service::device::test::lan_carry_over_preserves_iot_mode_observation_time` failed once
+in roughly twenty `cargo test --all --all-features` runs and then passed 15/15 consecutive reruns
+and in isolation. The assertion that fires was not captured, so the mechanism below is a
+hypothesis, not a confirmed diagnosis.
+**Why:** `Device::device_state()` (`src/service/device.rs`) collects the LAN, HTTP and IoT
+projections, runs `candidates.sort_by_key(|a| a.updated)` and pops the last one. `sort_by_key` is
+stable, so when two projections carry the *same* `updated` instant the original vector order
+decides the winner, and IoT is pushed last. The test calls `set_iot_device_status` immediately
+followed by `set_lan_device_status`; if both `Utc::now()` reads land on one instant, `device_state()`
+returns the IoT projection and `assert_eq!(state.source, "LAN API")` fails.
+**Pros:** If the hypothesis holds, this is a real product-level ambiguity, not just a test bug —
+on a timestamp tie the bridge silently prefers a stale IoT projection over a fresh LAN poll.
+Breaking the tie explicitly (prefer LAN > HTTP > IoT on equal `updated`) fixes both.
+**Cons:** Confirming it needs a deterministic repro — inject the timestamps rather than reading the
+wall clock, or assert the tie-break directly with hand-stamped `updated` values. Guessing at the
+fix without that repro risks papering over a different race.
+**Context:** Pre-existing on `origin/main`; neither the test nor `device_state()` is touched by
+`feat/music-sensitivity-and-palette-wiring`. Found while running its gates (2026-08-29).
+**Effort:** Small.
+
+## Nothing asserts the MQTT router's route table
+**What:** `rebuild_router` (`src/service/hass.rs`) registers 17 routes and is called only from
+`run_mqtt_loop`. No test constructs it, so deleting any single `.route(...)` registration leaves
+the whole suite green while the corresponding entity becomes inert in production — Home Assistant
+still renders the control, and CI still passes.
+**Why:** Verified by mutation during pre-merge review: removing the
+`gv2mqtt/:id/set-music-sensitivity` registration entirely left 238/238 tests passing. The test that
+looks like it covers this, `command_and_state_topics_match_the_registered_mqtt_route`, never reads
+`rebuild_router`; it round-trips `MusicSensitivityNumber::new`'s own `replacen` against the same
+constant, so it cannot fail independently.
+**Pros:** Closes the gap for all 17 routes at once, not just the new one. This is the single
+highest-leverage missing test in the crate: it is the only layer where a whole feature can vanish
+without a red build.
+**Cons:** Not reachable from a plain unit test. `MqttRouter::route()` calls `client.subscribe()`,
+which needs a live broker, so this needs either an integration test against a Mosquitto instance in
+CI, or extracting the pattern list into a pure value that both the registration and the test read.
+The latter is awkward because each route carries a differently-typed handler.
+**Context:** Pre-existing — all 16 routes on `origin/main` have the same exposure; the music
+sensitivity branch adds the 17th. Not introduced by that branch, so it was not fixed there.
+**Effort:** Medium.
+
+## `GOVEE_DISABLE_EFFECTS` leaves a live but useless sensitivity slider
+**What:** `src/hass_mqtt/light.rs` empties the effect list when `GOVEE_DISABLE_EFFECTS=true` (and
+filters it via `GOVEE_ALLOWED_EFFECTS`), but the Music Sensitivity guard in
+`src/hass_mqtt/enumerator.rs` only checks `has_music_mode_options()` and `avoid_platform_api()`.
+With effects disabled there is no `Music:` effect to select, so the slider is writable and stores a
+value that can never be applied.
+**Why:** Same failure the existing guard was written to prevent (a control that silently does
+nothing), reached through a different door. Found during pre-merge review.
+**Pros:** A one-condition fix makes the entity's presence honest in every configuration.
+**Cons:** Not actually one condition. `GOVEE_ALLOWED_EFFECTS` can filter out every `Music:` entry
+while leaving others, so a correct guard has to inspect the resolved effect list rather than the
+env var. It also has to account for the scene next/prev buttons, which bypass the filter and can
+still reach a Music effect — so with those in play the slider is not strictly dead.
+**Context:** `light.rs` effect-list construction vs the `MusicSetting` arm in `enumerator.rs`.
+Deliberately not fixed alongside the feature: it is a new conditional that needs its own tests and
+interacts with scene cycling.
+**Effort:** Small-medium.
