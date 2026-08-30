@@ -1,3 +1,14 @@
+// Every handler here returns `Result<Response, Response>`, the idiomatic axum
+// shape: the error arm is an already-rendered HTTP response, not an error value
+// waiting to be formatted. `result_large_err` measures that arm against a
+// 128-byte budget and flags all 13 handlers. Boxing an `axum::response::Response`
+// to satisfy it would add an allocation and a deref to every request path while
+// changing nothing a user can observe, so the lint is allowed for this module.
+//
+// The lint began firing when CI's `dtolnay/rust-toolchain@stable` rolled from
+// 1.94 to 1.98; the code it flags is unchanged and predates that.
+#![allow(clippy::result_large_err)]
+
 use crate::service::coordinator::Coordinator;
 use crate::service::device::{Device, DeviceState};
 use crate::service::state::StateHandle;
