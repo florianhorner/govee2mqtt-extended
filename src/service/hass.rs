@@ -1135,19 +1135,40 @@ mod tests {
             CONFIG.contains(&format!("{OPTION}: \"bool?\"")),
             "addon/config.yaml must declare {OPTION} as an optional bool"
         );
+        // Match against live shell only. `contains` on the raw file is
+        // satisfied by a commented-out block, so the whole wiring could be
+        // deleted with a `#` and this test would still pass.
+        let live: Vec<&str> = RUN_SH
+            .lines()
+            .map(|line| line.split('#').next().unwrap_or("").trim_end())
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        let live_contains =
+            |needle: &str| -> bool { live.iter().any(|line| line.contains(needle)) };
+
         assert!(
-            RUN_SH.contains(&format!("bashio::config.has_value {OPTION}")),
-            "addon/run.sh must read the {OPTION} option"
+            live_contains(&format!("bashio::config.has_value {OPTION}")),
+            "addon/run.sh must read the {OPTION} option in live shell, not a comment"
         );
         assert!(
-            RUN_SH.contains(&format!(
+            live_contains(&format!(
                 "{MUSIC_PALETTE_ENV_VAR}=\"$(bashio::config {OPTION})\""
             )),
             "addon/run.sh must read {OPTION} into {MUSIC_PALETTE_ENV_VAR}"
         );
+        let export_at = live
+            .iter()
+            .position(|line| line.contains(&format!("export {MUSIC_PALETTE_ENV_VAR}")))
+            .expect("addon/run.sh must export {MUSIC_PALETTE_ENV_VAR} in live shell");
+        // An export placed after the bridge launches never reaches it.
+        let launch_at = live
+            .iter()
+            .position(|line| line.contains("exec ") || line.contains("govee serve"))
+            .expect("addon/run.sh must launch the bridge");
         assert!(
-            RUN_SH.contains(&format!("export {MUSIC_PALETTE_ENV_VAR}")),
-            "addon/run.sh must export {MUSIC_PALETTE_ENV_VAR}"
+            export_at < launch_at,
+            "addon/run.sh must export {MUSIC_PALETTE_ENV_VAR} before launching the bridge \
+             (export at line {export_at}, launch at line {launch_at} of live shell)"
         );
         assert!(
             TRANSLATIONS.contains(&format!("{OPTION}:")),
