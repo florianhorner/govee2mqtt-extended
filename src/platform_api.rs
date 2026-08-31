@@ -1001,17 +1001,31 @@ impl DeviceCapability {
     /// so incomplete metadata cannot publish a slider that controls nothing.
     pub fn has_music_mode_options(&self) -> bool {
         self.music_mode_options()
-            .map(|options| options.iter().any(|option| option.value.is_i64()))
+            .map(|options| {
+                options
+                    .iter()
+                    .any(|option| enum_option_u32(&option.value).is_some())
+            })
             .unwrap_or(false)
     }
 
     pub fn music_mode_parameter_by_name(&self, name: &str) -> Option<u32> {
         self.music_mode_options()?
             .iter()
-            .find(|option| option.name == name && option.value.is_i64())
-            .and_then(|option| option.value.as_i64())
-            .map(|value| value as u32)
+            .find(|option| option.name == name)
+            .and_then(|option| enum_option_u32(&option.value))
     }
+}
+
+/// A Govee enum option's `value` as a `u32`, or `None` when it is absent,
+/// non-integral, or outside the range the wire format can carry.
+///
+/// The unchecked `as u32` this replaces wrapped silently: a `-1` in malformed
+/// capability metadata became 4294967295, and 4294967296 became 0. Discovery
+/// then published a control that looked actionable and sent a value Govee
+/// rejects. `as_u64` rejects negatives before the width check does the rest.
+fn enum_option_u32(value: &JsonValue) -> Option<u32> {
+    u32::try_from(value.as_u64()?).ok()
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -1044,8 +1058,8 @@ impl DeviceParameters {
         match self {
             DeviceParameters::Enum { options } => options
                 .iter()
-                .find(|e| e.name == name && e.value.is_i64())
-                .map(|e| e.value.as_i64().expect("i64") as u32),
+                .find(|e| e.name == name)
+                .and_then(|e| enum_option_u32(&e.value)),
             _ => None,
         }
     }
@@ -1504,6 +1518,58 @@ pub(crate) mod test {
         assert!(
             !payload["musicMode"].is_null(),
             "the style must resolve to its enum value: {payload}"
+        );
+    }
+
+    /// The wire format carries `musicMode` as a u32. The unchecked cast this
+    /// replaces turned -1 into 4294967295 and 4294967296 into 0, so malformed
+    /// metadata could publish an actionable control that sends a value Govee
+    /// rejects. Boundaries are asserted on both sides of the u32 range.
+    #[test]
+    fn enum_option_values_outside_u32_are_rejected_not_wrapped() {
+        use serde_json::json;
+
+        assert_eq!(enum_option_u32(&json!(0)), Some(0));
+        assert_eq!(enum_option_u32(&json!(1)), Some(1));
+        assert_eq!(enum_option_u32(&json!(4294967295u64)), Some(u32::MAX));
+
+        // -1 wrapped to u32::MAX under `as u32`; 4294967296 wrapped to 0.
+        assert_eq!(enum_option_u32(&json!(-1)), None);
+        assert_eq!(enum_option_u32(&json!(4294967296u64)), None);
+
+        // Non-integral values were already excluded and must stay excluded.
+        assert_eq!(enum_option_u32(&json!("4")), None);
+        assert_eq!(enum_option_u32(&json!(1.5)), None);
+        assert_eq!(enum_option_u32(&json!(null)), None);
+    }
+
+    /// The discovery predicate and the lookup must agree. If `has_music_mode_options`
+    /// accepted a value the lookup then rejects, discovery publishes a slider whose
+    /// every write fails.
+    #[test]
+    fn music_mode_predicate_and_lookup_agree_on_out_of_range_values() {
+        use serde_json::json;
+
+        let mut cap = test::music_device()
+            .capability_by_instance("musicMode")
+            .cloned()
+            .expect("fixture has a musicMode capability");
+
+        if let Some(DeviceParameters::Struct { fields }) = &mut cap.parameters {
+            for field in fields.iter_mut() {
+                if field.field_name == "musicMode" {
+                    if let DeviceParameters::Enum { options } = &mut field.field_type {
+                        for option in options.iter_mut() {
+                            option.value = json!(-1);
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            !cap.has_music_mode_options(),
+            "a capability whose only values are out of range offers nothing to select"
         );
     }
 
