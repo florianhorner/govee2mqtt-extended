@@ -472,15 +472,6 @@ impl Device {
         self.music_sensitivity = Some(value.min(100));
     }
 
-    /// Forget the stored preference, returning the entity to "unknown" and the
-    /// next `Music:` effect to the historical default. This is the command-side
-    /// half of the entity's `payload_reset`: Home Assistant publishes that
-    /// payload to the *command* topic, so without this the bridge would
-    /// advertise a reset it then rejected as a non-numeric value.
-    pub fn clear_music_sensitivity(&mut self) {
-        self.music_sensitivity = None;
-    }
-
     /// Clears the remembered scene if the device reports the light powered off.
     /// "Off" is an unambiguous, non-animating signal that no scene is playing, so it
     /// recovers the common case where the light is turned off outside the bridge
