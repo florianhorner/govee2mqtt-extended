@@ -225,8 +225,8 @@ for driving the bridge directly over MQTT rather than through Home Assistant.
 
 |Topic|Direction|Payload|
 |-----|---------|-------|
-|`gv2mqtt/<id>/set-music-sensitivity`|command|`0`-`100`, or `None` to clear the stored value. Decimals round, out-of-range values clamp.|
-|`gv2mqtt/<id>/notify-music-sensitivity`|state|The stored value, or `None` when nothing has been set yet.|
+|`gv2mqtt/<id>/set-music-sensitivity`|command|`0`-`100`. Decimals round, out-of-range values clamp.|
+|`gv2mqtt/<id>/notify-music-sensitivity`|state|The stored value, or `None` when nothing has been set yet. `None` is the entity's `payload_reset`, which Home Assistant reads on this topic to show the number as unknown.|
 
 The LAN palette frames carry their own sensitivity byte, which is a different
 setting from the Platform API one the number entity writes.

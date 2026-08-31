@@ -1,10 +1,11 @@
 # Local verification log: #39 Step A Platform music settings + review-comment remediation
 # base: 67f5ae027790beb826a778344549566ee41a9d2b
-# source/config/docs diff SHA-256 (this proof log and TODOS.md excluded): eeb07f8252f81433dcf12c3b00cbb9c3ba8d72bbc0f541f36927c901640dd024
-# That hash, not a commit id, is what binds the hardware run below to the
-# shipped source; it is stable across the commit that adds this file.
-# date: 2026-08-30 (gates re-run after the pre-merge review fixes)
-# host: macOS 26.5.1 (25F80), rustc 1.94.1 (e408947bf 2026-03-25)
+# source/config/docs diff SHA-256 (this proof log and TODOS.md excluded): 7a7e7e22c83a95dc397519bac781db6c4b2c18c2e390bcca9e84e621b723e935
+# That hash binds the LOCAL GATES below to the shipped source, and is stable
+# across the commit that adds this file. It does NOT bind the hardware run,
+# which was made at an earlier revision; see "Not covered here".
+# date: 2026-09-01 (gates re-run on the CI toolchain after review corrections)
+# host: macOS 26.5.1 (25F80), rustc 1.98.0 (88d9e12ae 2026-08-18)
 # live Govee account or hardware: H60B0 TESTED; LAN palette and deployed add-on NOT TESTED
 
 ## Prescribed local gates
@@ -113,16 +114,24 @@ nothing else building or testing at the same time.
 ## Pre-merge review
 
 This diff was reviewed for concurrency correctness, test coverage, and doc
-accuracy. Nothing blocking. Two defects were found and fixed here:
+accuracy, then again by the PR review bots. Nothing blocking. Corrections:
 
-- The entity advertised `payload_reset: "None"` while the command handler
-  parsed every payload as a number, so Home Assistant could never reset it.
-  Found while fact-checking a doc line that claimed the command topic accepted
-  the reset payload.
-- The add-on wiring guard matched raw file text, so commenting out the whole
-  `music_palette` block in run.sh left it green. Both fixes ship with a
-  mutation-verified regression test: reverting each fix makes exactly one named
-  test fail.
+- Fixed: the add-on wiring guard matched raw file text, so commenting out the
+  whole `music_palette` block in run.sh left it green. Ships with a
+  mutation-verified regression test.
+- Fixed: `has_music_mode_options` accepted any `i64` and the lookup then cast it
+  with `as u32`, so a `-1` in malformed capability metadata became 4294967295
+  and 4294967296 became 0. Discovery could publish an actionable slider that
+  sends a value Govee rejects. Both the predicate and both lookups now share one
+  checked conversion; boundaries are asserted at -1, 0, u32::MAX and u32::MAX+1.
+- Withdrawn: an earlier commit in this branch claimed Home Assistant publishes
+  `payload_reset` to the *command* topic, and added a handler branch for it.
+  That premise was wrong. HA documents `payload_reset` as "a special payload
+  that resets the state to `unknown` when received on the `state_topic`" — it is
+  read on the state topic and never sent to the command topic. Publishing `None`
+  on the state topic, which this bridge already did, was correct as written. The
+  commit was reverted; a test that only proved the invented behaviour went with
+  it.
 
 Deferred with reasons in TODOS.md: no test asserts the MQTT router's route
 table (pre-existing, affects all 17 routes, needs a broker or a refactor), and
@@ -140,19 +149,11 @@ confirmed an aggressive music-reactive blink.
 
 That run was made at source hash `9c7471fd2579e92f1eb5c21409c5102d`
 `c2ba335487835a73362c77a75d0f072e`, which is NOT the hash at the top of this
-file. Two commits landed afterwards, from the pre-merge review:
-
-  - `fix(music): accept the reset payload we advertise to Home Assistant`
-  - `test(addon): match run.sh wiring against live shell, not comments`
-
-The second touches only a test. The first adds a new branch to the sensitivity
-command path for the exact payload `None`. The numeric path the hardware run
-exercised (5 and 95) is behaviourally unchanged: `parse_music_sensitivity` is
-untouched, and the new enum's `Set` arm performs the same store under the same
-device permit. So the hardware evidence still covers the numeric
-path it actually tested, and covers nothing about the reset branch, which has
-been verified only in tests. Do not read the current header hash as hardware-
-bound; it binds the local gates above.
+file. What landed after it: a test-only change to the add-on wiring guard, a
+checked integer conversion in the Platform API enum helpers, and the revert
+described above. None of them touch `parse_music_sensitivity` or the store path,
+so the numeric path the hardware run exercised (5 and 95) is behaviourally
+unchanged. The header hash binds the local gates, not this run.
 
 The reverse-engineered `set-music-palette` LAN command and a deployed Home
 Assistant add-on image were not exercised. The visible difference between
