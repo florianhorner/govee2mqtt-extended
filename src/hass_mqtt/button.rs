@@ -124,6 +124,38 @@ impl ButtonConfig {
         }
     }
 
+    /// Clears the stored music sensitivity, returning the entity to unknown and
+    /// the next `Music:` effect to the Platform API default.
+    ///
+    /// A button, not a payload on the number's command topic. Home Assistant
+    /// reads `payload_reset` on the *state* topic and never publishes it to the
+    /// command topic, so a number entity offers no way to reach "unset" from the
+    /// UI. A button is the affordance HA can actually drive.
+    pub fn clear_music_sensitivity_for_device(device: &ServiceDevice) -> Self {
+        let unique_id = format!(
+            "gv2mqtt-{id}-clear-music-sensitivity",
+            id = topic_safe_id(device)
+        );
+        let command_topic = format!(
+            "gv2mqtt/{id}/clear-music-sensitivity",
+            id = topic_safe_id(device)
+        );
+        Self {
+            base: EntityConfig {
+                availability_topic: availability_topic(),
+                name: Some("Clear Music Sensitivity".to_string()),
+                entity_category: Some("config".to_string()),
+                origin: Origin::default(),
+                device: Device::for_device(device),
+                unique_id,
+                device_class: None,
+                icon: Some("mdi:music-note-off".to_string()),
+            },
+            command_topic,
+            payload_press: None,
+        }
+    }
+
     pub fn scene_prev_for_device(device: &ServiceDevice) -> Self {
         let unique_id = format!("gv2mqtt-{id}-scene-prev", id = topic_safe_id(device));
         let command_topic = format!("gv2mqtt/{id}/scene-prev", id = topic_safe_id(device));

@@ -194,6 +194,13 @@ unknown until you set it again, and a `Music:` effect selected in the meantime
 uses the default of 100. Govee offers no way to read the current sensitivity
 back from a light, so the bridge cannot recover it.
 
+A **Clear Music Sensitivity** button ships alongside the slider and forgets the
+stored value, putting the entity back to unknown and the next `Music:` effect
+back on the default. It is a button rather than something you write to the
+slider because Home Assistant reads a number's `payload_reset` on the state
+topic and never publishes it to the command topic, so a number entity on its own
+offers no way back to unknown.
+
 The Platform API also accepts one fixed music colour. Send it together with the
 effect through Home Assistant's normal light service:
 
@@ -226,6 +233,7 @@ for driving the bridge directly over MQTT rather than through Home Assistant.
 |Topic|Direction|Payload|
 |-----|---------|-------|
 |`gv2mqtt/<id>/set-music-sensitivity`|command|`0`-`100`. Decimals round, out-of-range values clamp.|
+|`gv2mqtt/<id>/clear-music-sensitivity`|command|Any payload. Forgets the stored value; the next `Music:` effect uses the default of 100.|
 |`gv2mqtt/<id>/notify-music-sensitivity`|state|The stored value, or `None` when nothing has been set yet. `None` is the entity's `payload_reset`, which Home Assistant reads on this topic to show the number as unknown.|
 
 The LAN palette frames carry their own sensitivity byte, which is a different

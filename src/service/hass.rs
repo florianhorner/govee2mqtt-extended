@@ -2,7 +2,9 @@ use crate::hass_mqtt::climate::mqtt_set_temperature;
 use crate::hass_mqtt::enumerator::{enumerate_all_entites, enumerate_entities_for_device};
 use crate::hass_mqtt::humidifier::{mqtt_device_set_work_mode, mqtt_humidifier_set_target};
 use crate::hass_mqtt::instance::EntityList;
-use crate::hass_mqtt::number::{mqtt_number_command, MUSIC_SENSITIVITY_COMMAND_ROUTE};
+use crate::hass_mqtt::number::{
+    mqtt_number_command, MUSIC_SENSITIVITY_CLEAR_ROUTE, MUSIC_SENSITIVITY_COMMAND_ROUTE,
+};
 use crate::hass_mqtt::select::mqtt_set_mode_scene;
 use crate::lan_api::DeviceColor;
 use crate::opt_env_var;
@@ -135,6 +137,7 @@ fn mqtt_device_dispatch_label(topic: &str) -> Option<&str> {
         | ["gv2mqtt", id, "scene-prev"]
         | ["gv2mqtt", id, "set-work-mode"]
         | ["gv2mqtt", id, "set-music-sensitivity"]
+        | ["gv2mqtt", id, "clear-music-sensitivity"]
         | ["gv2mqtt", id, "set-temperature", _, _]
         | ["gv2mqtt", id, "set-mode-scene"]
         | ["gv2mqtt", id, "set-music-palette"] => id,
@@ -857,6 +860,12 @@ async fn run_mqtt_loop(
             .await?;
         router
             .route(
+                MUSIC_SENSITIVITY_CLEAR_ROUTE,
+                crate::hass_mqtt::number::mqtt_clear_music_sensitivity_command,
+            )
+            .await?;
+        router
+            .route(
                 "gv2mqtt/humidifier/:id/set-target",
                 mqtt_humidifier_set_target,
             )
@@ -1223,6 +1232,7 @@ mod tests {
             "gv2mqtt/AA:BB:CC:DD:EE:FF:11:22/scene-prev",
             "gv2mqtt/AA:BB:CC:DD:EE:FF:11:22/set-work-mode",
             "gv2mqtt/AA:BB:CC:DD:EE:FF:11:22/set-music-sensitivity",
+            "gv2mqtt/AA:BB:CC:DD:EE:FF:11:22/clear-music-sensitivity",
             "gv2mqtt/AA:BB:CC:DD:EE:FF:11:22/set-temperature/manual/C",
             "gv2mqtt/AA:BB:CC:DD:EE:FF:11:22/set-mode-scene",
             "gv2mqtt/AA:BB:CC:DD:EE:FF:11:22/set-music-palette",

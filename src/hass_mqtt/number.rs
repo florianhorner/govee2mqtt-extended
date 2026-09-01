@@ -14,6 +14,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 pub const MUSIC_SENSITIVITY_COMMAND_ROUTE: &str = "gv2mqtt/:id/set-music-sensitivity";
+pub const MUSIC_SENSITIVITY_CLEAR_ROUTE: &str = "gv2mqtt/:id/clear-music-sensitivity";
 const MUSIC_SENSITIVITY_RESET_PAYLOAD: &str = "None";
 
 #[derive(Serialize, Clone, Debug)]
@@ -422,6 +423,45 @@ async fn handle_music_sensitivity_command_with_hook<
     }))
 }
 
+async fn clear_music_sensitivity(
+    state: &StateHandle,
+    device: &ServiceDevice,
+) -> anyhow::Result<()> {
+    // Same permit the slider write takes, so a clear cannot interleave with a
+    // concurrent store and leave the two disagreeing about the stored value.
+    let permit = state.acquire_device_update_permit(device).await?;
+    log::info!(
+        "Clearing the stored music sensitivity for {device}; \
+         the next Music: effect uses the default"
+    );
+    state
+        .device_mut(&device.sku, &device.id)
+        .await
+        .clear_music_sensitivity();
+    drop(permit);
+
+    Ok(())
+}
+
+/// Button press: forget the stored sensitivity and echo the reset to Home
+/// Assistant. A button rather than a payload on the number's command topic,
+/// because HA reads `payload_reset` on the *state* topic and never publishes it
+/// to the command topic, so a number alone offers no route back to "unknown".
+pub async fn mqtt_clear_music_sensitivity_command(
+    Params(IdParameter { id }): Params<IdParameter>,
+    State(state): State<StateHandle>,
+) -> anyhow::Result<()> {
+    let device = state.resolve_device_read_only(&id).await?;
+    clear_music_sensitivity(&state, &device).await?;
+
+    if let Some(client) = state.get_hass_client().await {
+        let client = Arc::new(client);
+        spawn_music_sensitivity_echo_with_hook(state.clone(), &device, client, || {});
+    }
+
+    Ok(())
+}
+
 pub async fn mqtt_music_sensitivity_command(
     // `Payload<String>` + explicit parse, like `mqtt_set_temperature`: HA sends
     // integers, but a hand-published "55.0" would fail `Payload<i64>` before the
@@ -628,6 +668,104 @@ mod test {
         assert!(
             json.get("device_class").is_none(),
             "a percent preference has no HA device class: {json}"
+        );
+    }
+
+    /// The button exists because Home Assistant cannot drive a number entity
+    /// back to "unknown": it reads `payload_reset` on the state topic and never
+    /// publishes it to the command topic. Pressing clear must therefore restore
+    /// both the unset marker and the default the next Music: effect will send.
+    #[tokio::test]
+    async fn clear_button_returns_the_preference_to_unset() {
+        let state = state_with_device().await;
+        state
+            .device_mut(SKU, DEVICE_ID)
+            .await
+            .set_music_sensitivity(73);
+        assert_eq!(
+            stored_sensitivity(&state).await.music_sensitivity_value(),
+            Some(73)
+        );
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            mqtt_clear_music_sensitivity_command(
+                Params(IdParameter {
+                    id: DEVICE_ID.to_string(),
+                }),
+                State(state.clone()),
+            ),
+        )
+        .await
+        .expect("the clear must release its device locks")
+        .expect("clearing must not fail without a hass client");
+
+        let device = stored_sensitivity(&state).await;
+        assert_eq!(
+            device.music_sensitivity_value(),
+            None,
+            "a clear returns the entity to unknown, not to a number"
+        );
+        assert_eq!(
+            device.music_sensitivity(),
+            crate::platform_api::DEFAULT_MUSIC_SENSITIVITY,
+            "the next Music: effect falls back to the historical default"
+        );
+    }
+
+    /// A clear publishes the reset sentinel on the state topic, which is the
+    /// only place Home Assistant reads it.
+    #[tokio::test]
+    async fn clear_echoes_the_reset_sentinel_on_the_state_topic() {
+        let state = state_with_device().await;
+        let device = stored_sensitivity(&state).await;
+        state
+            .device_mut(SKU, DEVICE_ID)
+            .await
+            .set_music_sensitivity(73);
+
+        let publisher = CapturingPublisher::default();
+        clear_music_sensitivity(&state, &device)
+            .await
+            .expect("the clear stores");
+        publish_current_music_sensitivity_with(
+            &state,
+            &device.id,
+            &music_sensitivity_state_topic(&device),
+            &publisher,
+        )
+        .await
+        .expect("the echo publishes");
+
+        let messages = publisher
+            .messages
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(
+            messages.as_slice(),
+            &[(
+                music_sensitivity_state_topic(&device),
+                MUSIC_SENSITIVITY_RESET_PAYLOAD.to_string()
+            )]
+        );
+    }
+
+    /// The button's command topic must be the route the bridge actually
+    /// registers. Nothing else ties the two together, so a rename in either
+    /// place would leave a button in Home Assistant that reaches no handler.
+    #[test]
+    fn clear_button_topic_matches_the_registered_route() {
+        let device = test_device();
+        let button =
+            crate::hass_mqtt::button::ButtonConfig::clear_music_sensitivity_for_device(&device);
+        let id = topic_safe_id(&device);
+        assert_eq!(
+            button.command_topic,
+            format!("gv2mqtt/{id}/clear-music-sensitivity")
+        );
+        assert_eq!(
+            button.command_topic.replacen(&id, ":id", 1),
+            MUSIC_SENSITIVITY_CLEAR_ROUTE
         );
     }
 

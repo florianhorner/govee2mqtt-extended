@@ -472,6 +472,15 @@ impl Device {
         self.music_sensitivity = Some(value.min(100));
     }
 
+    /// Forget the stored preference, returning the entity to "unknown" and the
+    /// next `Music:` effect to the historical default. Driven by the Clear
+    /// Music Sensitivity button; Home Assistant cannot reach "unset" through a
+    /// number entity, because it reads `payload_reset` on the state topic and
+    /// never publishes it to the command topic.
+    pub fn clear_music_sensitivity(&mut self) {
+        self.music_sensitivity = None;
+    }
+
     /// Clears the remembered scene if the device reports the light powered off.
     /// "Off" is an unambiguous, non-animating signal that no scene is playing, so it
     /// recovers the common case where the light is turned off outside the bridge

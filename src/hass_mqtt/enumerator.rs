@@ -200,6 +200,10 @@ pub async fn enumerate_entities_for_device(
                     // the LAN path, which cannot carry sensitivity — publishing
                     // the entity there would echo a value that never applies.
                     entities.add(MusicSensitivityNumber::new(d, state));
+                    // Paired with the slider, under the same guard: HA cannot
+                    // return a number to "unknown" on its own, so the button is
+                    // the only way back to the Platform API default.
+                    entities.add(ButtonConfig::clear_music_sensitivity_for_device(d));
                 }
 
                 DeviceCapabilityKind::ColorSetting
@@ -292,8 +296,10 @@ mod test {
         entities.len()
     }
 
-    /// A Platform-API device that advertises `musicMode` gains exactly one
-    /// extra entity: the sensitivity slider. Measured as a delta against the
+    /// A Platform-API device that advertises `musicMode` gains exactly two
+    /// extra entities: the sensitivity slider and the button that clears it.
+    /// They ship together on purpose, because Home Assistant cannot return a
+    /// number entity to "unknown" on its own. Measured as a delta against the
     /// same device without the capability, so unrelated entity additions to
     /// the enumerator do not make this test lie.
     #[tokio::test]
@@ -311,8 +317,8 @@ mod test {
 
         assert_eq!(
             with,
-            without + 1,
-            "musicMode must add exactly the Music Sensitivity number"
+            without + 2,
+            "musicMode must add the Music Sensitivity number and its clear button"
         );
     }
 
