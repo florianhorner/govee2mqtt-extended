@@ -1,6 +1,6 @@
 # Local verification log: #39 Step A Platform music settings + review-comment remediation
 # base: 67f5ae027790beb826a778344549566ee41a9d2b
-# source/config/docs diff SHA-256 (this proof log and TODOS.md excluded): 7a7e7e22c83a95dc397519bac781db6c4b2c18c2e390bcca9e84e621b723e935
+# source/config/docs diff SHA-256 (this proof log and TODOS.md excluded): 1249e24963eed06a2b7af1b13b3fd8df9f31f59e8da1a80ec7e3350e287608aa
 # That hash binds the LOCAL GATES below to the shipped source, and is stable
 # across the commit that adds this file. It does NOT bind the hardware run,
 # which was made at an earlier revision; see "Not covered here".
@@ -15,11 +15,11 @@
 BUILD: OK
 
 ### cargo test --all -- --show-output
-test result: ok. 239 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.84s
+test result: ok. 242 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.84s
 TESTS: OK
 
 ### cargo test --all --all-features -- --show-output
-test result: ok. 240 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.84s
+test result: ok. 243 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.84s
 ALL-FEATURE TESTS: OK (see "Known flake" below)
 
 ### cargo clippy --all -- -D warnings
@@ -124,6 +124,11 @@ accuracy, then again by the PR review bots. Nothing blocking. Corrections:
   and 4294967296 became 0. Discovery could publish an actionable slider that
   sends a value Govee rejects. Both the predicate and both lookups now share one
   checked conversion; boundaries are asserted at -1, 0, u32::MAX and u32::MAX+1.
+- Added: a Clear Music Sensitivity button. Once a value was stored there was no
+  way to unset it, which the withdrawn commit below was reaching for through the
+  wrong mechanism. The button is enumerated under the slider's guard, shares the
+  device's FIFO dispatch lane and update permit, and echoes the reset sentinel on
+  the state topic.
 - Withdrawn: an earlier commit in this branch claimed Home Assistant publishes
   `payload_reset` to the *command* topic, and added a handler branch for it.
   That premise was wrong. HA documents `payload_reset` as "a special payload
