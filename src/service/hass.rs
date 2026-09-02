@@ -1,10 +1,15 @@
 use crate::hass_mqtt::climate::mqtt_set_temperature;
+use crate::hass_mqtt::command_routes::{
+    device_id_segment, HUMIDIFIER_SET_MODE_ROUTE, HUMIDIFIER_SET_TARGET_ROUTE, LIGHT_COMMAND_ROUTE,
+    LIGHT_SEGMENT_COMMAND_ROUTE, MUSIC_SENSITIVITY_CLEAR_ROUTE, MUSIC_SENSITIVITY_COMMAND_ROUTE,
+    NUMBER_COMMAND_ROUTE, ONECLICK_ROUTE, PURGE_CACHES_ROUTE, REQUEST_PLATFORM_DATA_ROUTE,
+    SCENE_NEXT_ROUTE, SCENE_PREV_ROUTE, SET_MODE_SCENE_ROUTE, SET_MUSIC_PALETTE_ROUTE,
+    SET_TEMPERATURE_ROUTE, SET_WORK_MODE_ROUTE, SWITCH_COMMAND_ROUTE,
+};
 use crate::hass_mqtt::enumerator::{enumerate_all_entites, enumerate_entities_for_device};
 use crate::hass_mqtt::humidifier::{mqtt_device_set_work_mode, mqtt_humidifier_set_target};
 use crate::hass_mqtt::instance::EntityList;
-use crate::hass_mqtt::number::{
-    mqtt_number_command, MUSIC_SENSITIVITY_CLEAR_ROUTE, MUSIC_SENSITIVITY_COMMAND_ROUTE,
-};
+use crate::hass_mqtt::number::mqtt_number_command;
 use crate::hass_mqtt::select::mqtt_set_mode_scene;
 use crate::lan_api::DeviceColor;
 use crate::opt_env_var;
@@ -124,27 +129,7 @@ async fn run_mqtt_dispatch_queue(
 }
 
 fn mqtt_device_dispatch_label(topic: &str) -> Option<&str> {
-    let segments: Vec<_> = topic.split('/').collect();
-    let device_id = match segments.as_slice() {
-        ["gv2mqtt", "light", id, "command"]
-        | ["gv2mqtt", "light", id, "command", _]
-        | ["gv2mqtt", "switch", id, "command", _]
-        | ["gv2mqtt", "number", id, "command", _, _]
-        | ["gv2mqtt", "humidifier", id, "set-mode"]
-        | ["gv2mqtt", "humidifier", id, "set-target"]
-        | ["gv2mqtt", id, "request-platform-data"]
-        | ["gv2mqtt", id, "scene-next"]
-        | ["gv2mqtt", id, "scene-prev"]
-        | ["gv2mqtt", id, "set-work-mode"]
-        | ["gv2mqtt", id, "set-music-sensitivity"]
-        | ["gv2mqtt", id, "clear-music-sensitivity"]
-        | ["gv2mqtt", id, "set-temperature", _, _]
-        | ["gv2mqtt", id, "set-mode-scene"]
-        | ["gv2mqtt", id, "set-music-palette"] => id,
-        _ => return None,
-    };
-
-    (!device_id.is_empty()).then_some(*device_id)
+    device_id_segment(topic)
 }
 
 async fn mqtt_device_dispatch_key(state: &StateHandle, topic: &str) -> Option<String> {
@@ -379,11 +364,11 @@ pub fn availability_topic() -> String {
 }
 
 pub fn oneclick_topic() -> String {
-    "gv2mqtt/oneclick".to_string()
+    ONECLICK_ROUTE.to_string()
 }
 
 pub fn purge_cache_topic() -> String {
-    "gv2mqtt/purge-caches".to_string()
+    PURGE_CACHES_ROUTE.to_string()
 }
 
 #[derive(Deserialize)]
@@ -814,43 +799,30 @@ async fn run_mqtt_loop(
             .await?;
 
         router
-            .route("gv2mqtt/light/:id/command", mqtt_light_command)
+            .route(LIGHT_COMMAND_ROUTE, mqtt_light_command)
             .await?;
         router
-            .route(
-                "gv2mqtt/light/:id/command/:segment",
-                mqtt_light_segment_command,
-            )
+            .route(LIGHT_SEGMENT_COMMAND_ROUTE, mqtt_light_segment_command)
             .await?;
         router
-            .route("gv2mqtt/switch/:id/command/:instance", mqtt_switch_command)
+            .route(SWITCH_COMMAND_ROUTE, mqtt_switch_command)
             .await?;
 
-        router.route(oneclick_topic(), mqtt_oneclick).await?;
-        router.route(purge_cache_topic(), mqtt_purge_caches).await?;
+        router.route(ONECLICK_ROUTE, mqtt_oneclick).await?;
+        router.route(PURGE_CACHES_ROUTE, mqtt_purge_caches).await?;
         router
-            .route(
-                "gv2mqtt/:id/request-platform-data",
-                mqtt_request_platform_data,
-            )
+            .route(REQUEST_PLATFORM_DATA_ROUTE, mqtt_request_platform_data)
+            .await?;
+        router.route(SCENE_NEXT_ROUTE, mqtt_scene_next).await?;
+        router.route(SCENE_PREV_ROUTE, mqtt_scene_prev).await?;
+        router
+            .route(NUMBER_COMMAND_ROUTE, mqtt_number_command)
             .await?;
         router
-            .route("gv2mqtt/:id/scene-next", mqtt_scene_next)
+            .route(HUMIDIFIER_SET_MODE_ROUTE, mqtt_device_set_work_mode)
             .await?;
         router
-            .route("gv2mqtt/:id/scene-prev", mqtt_scene_prev)
-            .await?;
-        router
-            .route(
-                "gv2mqtt/number/:id/command/:mode_name/:work_mode",
-                mqtt_number_command,
-            )
-            .await?;
-        router
-            .route("gv2mqtt/humidifier/:id/set-mode", mqtt_device_set_work_mode)
-            .await?;
-        router
-            .route("gv2mqtt/:id/set-work-mode", mqtt_device_set_work_mode)
+            .route(SET_WORK_MODE_ROUTE, mqtt_device_set_work_mode)
             .await?;
         router
             .route(
@@ -865,22 +837,16 @@ async fn run_mqtt_loop(
             )
             .await?;
         router
-            .route(
-                "gv2mqtt/humidifier/:id/set-target",
-                mqtt_humidifier_set_target,
-            )
+            .route(HUMIDIFIER_SET_TARGET_ROUTE, mqtt_humidifier_set_target)
             .await?;
         router
-            .route(
-                "gv2mqtt/:id/set-temperature/:instance/:units",
-                mqtt_set_temperature,
-            )
+            .route(SET_TEMPERATURE_ROUTE, mqtt_set_temperature)
             .await?;
         router
-            .route("gv2mqtt/:id/set-mode-scene", mqtt_set_mode_scene)
+            .route(SET_MODE_SCENE_ROUTE, mqtt_set_mode_scene)
             .await?;
         router
-            .route("gv2mqtt/:id/set-music-palette", mqtt_set_music_palette)
+            .route(SET_MUSIC_PALETTE_ROUTE, mqtt_set_music_palette)
             .await?;
 
         tokio::time::sleep(HASS_REGISTER_DELAY).await;

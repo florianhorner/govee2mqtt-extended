@@ -1,4 +1,7 @@
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
+use crate::hass_mqtt::command_routes::{
+    instantiate_route, SET_MODE_SCENE_ROUTE, SET_WORK_MODE_ROUTE,
+};
 use crate::hass_mqtt::instance::{publish_entity_config, EntityInstance};
 use crate::hass_mqtt::work_mode::ParsedWorkMode;
 use crate::service::device::Device as ServiceDevice;
@@ -33,10 +36,11 @@ pub struct WorkModeSelect {
 
 impl WorkModeSelect {
     pub fn new(device: &ServiceDevice, work_modes: &ParsedWorkMode, state: &StateHandle) -> Self {
-        let command_topic = format!("gv2mqtt/{id}/set-work-mode", id = topic_safe_id(device),);
-        let state_topic = format!("gv2mqtt/{id}/notify-work-mode", id = topic_safe_id(device));
+        let id = topic_safe_id(device);
+        let command_topic = instantiate_route(SET_WORK_MODE_ROUTE, &[("id", &id)]);
+        let state_topic = format!("gv2mqtt/{id}/notify-work-mode");
         let availability_topic = availability_topic();
-        let unique_id = format!("gv2mqtt-{id}-workMode", id = topic_safe_id(device),);
+        let unique_id = format!("gv2mqtt-{id}-workMode");
 
         Self {
             select: SelectConfig {
@@ -114,10 +118,11 @@ impl SceneModeSelect {
             return Ok(None);
         }
 
-        let command_topic = format!("gv2mqtt/{id}/set-mode-scene", id = topic_safe_id(device));
-        let state_topic = format!("gv2mqtt/{id}/notify-mode-scene", id = topic_safe_id(device));
+        let id = topic_safe_id(device);
+        let command_topic = instantiate_route(SET_MODE_SCENE_ROUTE, &[("id", &id)]);
+        let state_topic = format!("gv2mqtt/{id}/notify-mode-scene");
         let availability_topic = availability_topic();
-        let unique_id = format!("gv2mqtt-{id}-mode-scene", id = topic_safe_id(device));
+        let unique_id = format!("gv2mqtt-{id}-mode-scene");
 
         Ok(Some(Self {
             select: SelectConfig {

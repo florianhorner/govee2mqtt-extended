@@ -1,5 +1,8 @@
 use crate::ble::TargetHumidity;
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
+use crate::hass_mqtt::command_routes::{
+    instantiate_route, HUMIDIFIER_SET_MODE_ROUTE, HUMIDIFIER_SET_TARGET_ROUTE, SWITCH_COMMAND_ROUTE,
+};
 use crate::hass_mqtt::instance::{publish_entity_config, EntityInstance};
 use crate::hass_mqtt::work_mode::ParsedWorkMode;
 use crate::platform_api::{DeviceParameters, DeviceType, IntegerRange};
@@ -66,31 +69,21 @@ impl Humidifier {
 
         // command_topic controls the power state; just route it to
         // the general power switch handler
-        let command_topic = format!(
-            "gv2mqtt/switch/{id}/command/powerSwitch",
-            id = topic_safe_id(device)
+        let id = topic_safe_id(device);
+        let command_topic = instantiate_route(
+            SWITCH_COMMAND_ROUTE,
+            &[("id", &id), ("instance", "powerSwitch")],
         );
 
-        let target_humidity_command_topic = format!(
-            "gv2mqtt/humidifier/{id}/set-target",
-            id = topic_safe_id(device)
-        );
-        let target_humidity_state_topic = format!(
-            "gv2mqtt/humidifier/{id}/notify-target",
-            id = topic_safe_id(device)
-        );
-        let state_topic = format!("gv2mqtt/humidifier/{id}/state", id = topic_safe_id(device));
+        let target_humidity_command_topic =
+            instantiate_route(HUMIDIFIER_SET_TARGET_ROUTE, &[("id", &id)]);
+        let target_humidity_state_topic = format!("gv2mqtt/humidifier/{id}/notify-target");
+        let state_topic = format!("gv2mqtt/humidifier/{id}/state");
 
-        let mode_command_topic = format!(
-            "gv2mqtt/humidifier/{id}/set-mode",
-            id = topic_safe_id(device)
-        );
-        let mode_state_topic = format!(
-            "gv2mqtt/humidifier/{id}/notify-mode",
-            id = topic_safe_id(device)
-        );
+        let mode_command_topic = instantiate_route(HUMIDIFIER_SET_MODE_ROUTE, &[("id", &id)]);
+        let mode_state_topic = format!("gv2mqtt/humidifier/{id}/notify-mode");
 
-        let unique_id = format!("gv2mqtt-{id}-humidifier", id = topic_safe_id(device),);
+        let unique_id = format!("gv2mqtt-{id}-humidifier");
 
         let mut min_humidity = None;
         let mut max_humidity = None;

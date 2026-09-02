@@ -1,4 +1,5 @@
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
+use crate::hass_mqtt::command_routes::{instantiate_route, SET_TEMPERATURE_ROUTE};
 use crate::hass_mqtt::instance::EntityInstance;
 use crate::hass_mqtt::number::NumberConfig;
 use crate::platform_api::{DeviceCapability, DeviceParameters};
@@ -90,15 +91,14 @@ impl TargetTemperatureEntity {
         );
 
         let name = "Target Temperature".to_string();
-        let command_topic = format!(
-            "gv2mqtt/{id}/set-temperature/{inst}/{units}",
-            id = topic_safe_id(device),
-            inst = topic_safe_string(&instance.instance)
+        let id = topic_safe_id(device);
+        let inst = topic_safe_string(&instance.instance);
+        let units_label = units.to_string();
+        let command_topic = instantiate_route(
+            SET_TEMPERATURE_ROUTE,
+            &[("id", &id), ("instance", &inst), ("units", &units_label)],
         );
-        let state_topic = format!(
-            "gv2mqtt/{id}/advise-set-temperature",
-            id = topic_safe_id(device),
-        );
+        let state_topic = format!("gv2mqtt/{id}/advise-set-temperature");
 
         Ok(Self {
             number: NumberConfig {

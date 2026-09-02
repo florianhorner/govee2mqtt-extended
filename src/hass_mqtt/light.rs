@@ -1,4 +1,7 @@
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
+use crate::hass_mqtt::command_routes::{
+    instantiate_route, LIGHT_COMMAND_ROUTE, LIGHT_SEGMENT_COMMAND_ROUTE,
+};
 use crate::hass_mqtt::instance::{publish_entity_config, EntityInstance};
 use crate::platform_api::DeviceType;
 use crate::service::device::Device as ServiceDevice;
@@ -136,12 +139,16 @@ impl DeviceLight {
         let quirk = device.resolve_quirk();
         let device_type = device.device_type();
 
+        let id = topic_safe_id(device);
         let command_topic = match segment {
-            None => format!("gv2mqtt/light/{id}/command", id = topic_safe_id(device)),
-            Some(seg) => format!(
-                "gv2mqtt/light/{id}/command/{seg}",
-                id = topic_safe_id(device)
-            ),
+            None => instantiate_route(LIGHT_COMMAND_ROUTE, &[("id", &id)]),
+            Some(seg) => {
+                let seg = seg.to_string();
+                instantiate_route(
+                    LIGHT_SEGMENT_COMMAND_ROUTE,
+                    &[("id", &id), ("segment", &seg)],
+                )
+            }
         };
 
         let icon = match segment {
@@ -157,7 +164,6 @@ impl DeviceLight {
         let availability_topic = availability_topic();
         let unique_id = format!(
             "gv2mqtt-{id}{seg}",
-            id = topic_safe_id(device),
             seg = segment.map(|n| format!("-{n}")).unwrap_or_default()
         );
 

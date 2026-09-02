@@ -1,0 +1,72 @@
+== HA command-route parity — local checks 2026-09-02T22:44:16Z ==
+base: origin/main
+host: Darwin 25.5.0
+rustc: rustc 1.98.0 (88d9e12ae 2026-08-18)
+Govee device hardware: NOT TESTED
+Govee cloud API: NOT REACHED (source-level + in-process tests only)
+
+## cargo +stable build --all
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/warsaw-v3)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.28s
+BUILD: OK
+
+## cargo +stable test --all -- --show-output
+    undoc_api::test::oversized_response_bodies_are_truncated_before_logging
+    undoc_api::test::plain_anyhow_error_does_not_downcast_to_no_cache_error
+    undoc_api::test::raw_request_error_still_yields_the_2fa_message
+    undoc_api::test::rejected_configured_code_allows_one_fresh_request_for_454_and_455
+    undoc_api::test::repeated_454_retries_request_one_code_per_account
+    undoc_api::test::statuses_other_than_454_do_not_request_a_code
+    undoc_api::test::unknown_delivery_outcome_claims_the_suppression_window
+    undoc_api::test::unrelated_no_cache_error_is_not_classified_as_two_factor
+    undoc_api::test::verification_body_cap_counts_accumulated_bytes
+    undoc_api::test::verification_body_is_withheld_from_logged_errors_by_default
+    undoc_api::test::verification_cache_key_ignores_email_case
+    undoc_api::test::verification_request_has_expected_endpoint_client_id_and_body
+    undoc_api::test::verification_response_accepts_api_status_200
+    undoc_api::test::verification_response_rejects_missing_or_non_numeric_api_status
+    undoc_api::test::verification_response_rejects_non_200_api_status
+    undoc_api::test::with_code_empty_string_does_not_set_code_field
+    undoc_api::test::with_code_normalizes_input
+
+test result: ok. 251 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.84s
+
+
+## cargo +stable test --all --all-features -- --show-output
+    undoc_api::test::verification_response_accepts_api_status_200
+    undoc_api::test::verification_response_rejects_missing_or_non_numeric_api_status
+    undoc_api::test::verification_response_rejects_non_200_api_status
+    undoc_api::test::with_code_empty_string_does_not_set_code_field
+    undoc_api::test::with_code_normalizes_input
+
+test result: ok. 252 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.83s
+
+
+## cargo +stable clippy --all -- -D warnings
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/warsaw-v3)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.36s
+CLIPPY: OK
+
+## cargo +stable clippy --all --all-features -- -D warnings
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/warsaw-v3)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.08s
+CLIPPY ALL-FEATURES: OK
+
+## cargo +stable fmt --all -- --check
+Warning: can't set `imports_granularity = Module`, unstable features are only available in nightly channel.
+Warning: can't set `imports_granularity = Module`, unstable features are only available in nightly channel.
+FMT: OK
+
+## python3 -m unittest scripts/test_live_2fa.py
+......................
+----------------------------------------------------------------------
+Ran 22 tests in 0.023s
+
+OK
+
+New tests:
+- hass_mqtt::command_routes::test::advertised_command_topics_are_not_raw_format_strings
+- hass_mqtt::command_routes::test::rebuild_router_registers_exactly_the_command_route_inventory
+- hass_mqtt::command_routes::test::instantiate_route_callers_use_registered_consts
+- hass_mqtt::command_routes::test::every_device_scoped_route_exposes_its_id_segment
+- hass_mqtt::command_routes::test::live_rust_drops_commented_out_routes

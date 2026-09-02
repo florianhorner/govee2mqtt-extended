@@ -1,4 +1,5 @@
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
+use crate::hass_mqtt::command_routes::{instantiate_route, SWITCH_COMMAND_ROUTE};
 use crate::hass_mqtt::instance::{publish_entity_config, EntityInstance};
 use crate::platform_api::DeviceCapability;
 use crate::service::device::Device as ServiceDevice;
@@ -24,18 +25,14 @@ impl SwitchConfig {
         device: &ServiceDevice,
         instance: &DeviceCapability,
     ) -> anyhow::Result<Self> {
-        let command_topic = format!(
-            "gv2mqtt/switch/{id}/command/{inst}",
-            id = topic_safe_id(device),
-            inst = instance.instance
+        let id = topic_safe_id(device);
+        let command_topic = instantiate_route(
+            SWITCH_COMMAND_ROUTE,
+            &[("id", &id), ("instance", &instance.instance)],
         );
         let state_topic = switch_instance_state_topic(device, &instance.instance);
         let availability_topic = availability_topic();
-        let unique_id = format!(
-            "gv2mqtt-{id}-{inst}",
-            id = topic_safe_id(device),
-            inst = instance.instance
-        );
+        let unique_id = format!("gv2mqtt-{id}-{inst}", inst = instance.instance);
 
         Ok(Self {
             base: EntityConfig {

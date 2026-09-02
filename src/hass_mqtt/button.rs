@@ -1,4 +1,8 @@
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
+use crate::hass_mqtt::command_routes::{
+    instantiate_route, MUSIC_SENSITIVITY_CLEAR_ROUTE, NUMBER_COMMAND_ROUTE,
+    REQUEST_PLATFORM_DATA_ROUTE, SCENE_NEXT_ROUTE, SCENE_PREV_ROUTE, SWITCH_COMMAND_ROUTE,
+};
 use crate::hass_mqtt::instance::{publish_entity_config, EntityInstance};
 use crate::platform_api::DeviceCapability;
 use crate::service::device::Device as ServiceDevice;
@@ -25,17 +29,13 @@ impl ButtonConfig {
         device: &ServiceDevice,
         instance: &DeviceCapability,
     ) -> anyhow::Result<Self> {
-        let command_topic = format!(
-            "gv2mqtt/switch/{id}/command/{inst}",
-            id = topic_safe_id(device),
-            inst = instance.instance
+        let id = topic_safe_id(device);
+        let command_topic = instantiate_route(
+            SWITCH_COMMAND_ROUTE,
+            &[("id", &id), ("instance", &instance.instance)],
         );
         let availability_topic = availability_topic();
-        let unique_id = format!(
-            "gv2mqtt-{id}-{inst}",
-            id = topic_safe_id(device),
-            inst = instance.instance
-        );
+        let unique_id = format!("gv2mqtt-{id}-{inst}", inst = instance.instance);
 
         Ok(Self {
             base: EntityConfig {
@@ -79,15 +79,13 @@ impl ButtonConfig {
         mode_num: i64,
         value: i64,
     ) -> Self {
-        let unique_id = format!(
-            "gv2mqtt-{id}-preset-{mode}-{mode_num}-{value}",
-            id = topic_safe_id(device),
-            mode = topic_safe_string(mode_name),
-        );
-        let command_topic = format!(
-            "gv2mqtt/number/{id}/command/{mode}/{mode_num}",
-            id = topic_safe_id(device),
-            mode = topic_safe_string(mode_name),
+        let id = topic_safe_id(device);
+        let mode = topic_safe_string(mode_name);
+        let mode_num = mode_num.to_string();
+        let unique_id = format!("gv2mqtt-{id}-preset-{mode}-{mode_num}-{value}",);
+        let command_topic = instantiate_route(
+            NUMBER_COMMAND_ROUTE,
+            &[("id", &id), ("mode_name", &mode), ("work_mode", &mode_num)],
         );
         Self {
             base: EntityConfig {
@@ -106,8 +104,9 @@ impl ButtonConfig {
     }
 
     pub fn scene_next_for_device(device: &ServiceDevice) -> Self {
-        let unique_id = format!("gv2mqtt-{id}-scene-next", id = topic_safe_id(device));
-        let command_topic = format!("gv2mqtt/{id}/scene-next", id = topic_safe_id(device));
+        let id = topic_safe_id(device);
+        let unique_id = format!("gv2mqtt-{id}-scene-next");
+        let command_topic = instantiate_route(SCENE_NEXT_ROUTE, &[("id", &id)]);
         Self {
             base: EntityConfig {
                 availability_topic: availability_topic(),
@@ -132,14 +131,9 @@ impl ButtonConfig {
     /// command topic, so a number entity offers no way to reach "unset" from the
     /// UI. A button is the affordance HA can actually drive.
     pub fn clear_music_sensitivity_for_device(device: &ServiceDevice) -> Self {
-        let unique_id = format!(
-            "gv2mqtt-{id}-clear-music-sensitivity",
-            id = topic_safe_id(device)
-        );
-        let command_topic = format!(
-            "gv2mqtt/{id}/clear-music-sensitivity",
-            id = topic_safe_id(device)
-        );
+        let id = topic_safe_id(device);
+        let unique_id = format!("gv2mqtt-{id}-clear-music-sensitivity");
+        let command_topic = instantiate_route(MUSIC_SENSITIVITY_CLEAR_ROUTE, &[("id", &id)]);
         Self {
             base: EntityConfig {
                 availability_topic: availability_topic(),
@@ -157,8 +151,9 @@ impl ButtonConfig {
     }
 
     pub fn scene_prev_for_device(device: &ServiceDevice) -> Self {
-        let unique_id = format!("gv2mqtt-{id}-scene-prev", id = topic_safe_id(device));
-        let command_topic = format!("gv2mqtt/{id}/scene-prev", id = topic_safe_id(device));
+        let id = topic_safe_id(device);
+        let unique_id = format!("gv2mqtt-{id}-scene-prev");
+        let command_topic = instantiate_route(SCENE_PREV_ROUTE, &[("id", &id)]);
         Self {
             base: EntityConfig {
                 availability_topic: availability_topic(),
@@ -176,14 +171,9 @@ impl ButtonConfig {
     }
 
     pub fn request_platform_data_for_device(device: &ServiceDevice) -> Self {
-        let unique_id = format!(
-            "gv2mqtt-{id}-request-platform-data",
-            id = topic_safe_id(device)
-        );
-        let command_topic = format!(
-            "gv2mqtt/{id}/request-platform-data",
-            id = topic_safe_id(device)
-        );
+        let id = topic_safe_id(device);
+        let unique_id = format!("gv2mqtt-{id}-request-platform-data");
+        let command_topic = instantiate_route(REQUEST_PLATFORM_DATA_ROUTE, &[("id", &id)]);
         Self {
             base: EntityConfig {
                 availability_topic: availability_topic(),

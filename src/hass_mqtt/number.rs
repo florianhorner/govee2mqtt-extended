@@ -1,4 +1,7 @@
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
+use crate::hass_mqtt::command_routes::{
+    instantiate_route, MUSIC_SENSITIVITY_COMMAND_ROUTE, NUMBER_COMMAND_ROUTE,
+};
 use crate::hass_mqtt::instance::{publish_entity_config, EntityInstance};
 use crate::service::device::Device as ServiceDevice;
 use crate::service::hass::{
@@ -13,8 +16,6 @@ use serde_json::Value as JsonValue;
 use std::ops::Range;
 use std::sync::Arc;
 
-pub const MUSIC_SENSITIVITY_COMMAND_ROUTE: &str = "gv2mqtt/:id/set-music-sensitivity";
-pub const MUSIC_SENSITIVITY_CLEAR_ROUTE: &str = "gv2mqtt/:id/clear-music-sensitivity";
 const MUSIC_SENSITIVITY_RESET_PAYLOAD: &str = "None";
 
 #[derive(Serialize, Clone, Debug)]
@@ -70,27 +71,20 @@ impl WorkModeNumber {
         work_mode: JsonValue,
         range: Option<Range<i64>>,
     ) -> Self {
-        let command_topic = format!(
-            "gv2mqtt/number/{id}/command/{mode}/{mode_num}",
-            id = topic_safe_id(device),
-            mode = topic_safe_string(mode_name),
-            mode_num = work_mode
-                .as_i64()
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "work-mode-was-not-int".to_string()),
+        let id = topic_safe_id(device);
+        let mode = topic_safe_string(mode_name);
+        let mode_num = work_mode
+            .as_i64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "work-mode-was-not-int".to_string());
+        let command_topic = instantiate_route(
+            NUMBER_COMMAND_ROUTE,
+            &[("id", &id), ("mode_name", &mode), ("work_mode", &mode_num)],
         );
-        let state_topic = format!(
-            "gv2mqtt/number/{id}/state/{mode}",
-            id = topic_safe_id(device),
-            mode = topic_safe_string(mode_name)
-        );
+        let state_topic = format!("gv2mqtt/number/{id}/state/{mode}");
 
         let availability_topic = availability_topic();
-        let unique_id = format!(
-            "gv2mqtt-{id}-{mode}-number",
-            id = topic_safe_id(device),
-            mode = topic_safe_string(mode_name),
-        );
+        let unique_id = format!("gv2mqtt-{id}-{mode}-number");
 
         Self {
             number: NumberConfig {
@@ -262,7 +256,7 @@ impl MusicSensitivityNumber {
                     entity_category: Some("config".to_string()),
                     icon: Some("mdi:music-note".to_string()),
                 },
-                command_topic: MUSIC_SENSITIVITY_COMMAND_ROUTE.replacen(":id", &id, 1),
+                command_topic: instantiate_route(MUSIC_SENSITIVITY_COMMAND_ROUTE, &[("id", &id)]),
                 state_topic: Some(state_topic),
                 payload_reset: Some(MUSIC_SENSITIVITY_RESET_PAYLOAD),
                 min: Some(0.),
@@ -485,6 +479,7 @@ pub async fn mqtt_music_sensitivity_command(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::hass_mqtt::command_routes::MUSIC_SENSITIVITY_CLEAR_ROUTE;
     use crate::service::state::State as ServiceState;
     use std::sync::Arc;
 
