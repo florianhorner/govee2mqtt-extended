@@ -1,0 +1,16 @@
+# Mutation proof (GREEN): registration-site if reverted
+# Expected: mqtt_command_routes_register_even_when_music_palette_is_off passes
+
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/nairobi-v2)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.22s
+     Running unittests src/main.rs (target/debug/deps/govee-9d5efbfc1c54196e)
+
+running 1 test
+test service::hass::tests::mqtt_command_routes_register_even_when_music_palette_is_off ... ok
+
+successes:
+
+successes:
+    service::hass::tests::mqtt_command_routes_register_even_when_music_palette_is_off
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 243 filtered out; finished in 0.00s

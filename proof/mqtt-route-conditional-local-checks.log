@@ -1,0 +1,1068 @@
+# Local verification: unconditional MQTT command route registration
+# parent: 571e39210b6f7e8a66af4abc60c5a35928853770
+# date: 2026-09-02
+# host: macOS, rustc 1.98.0 (cargo +stable)
+# hardware: not applicable (test-only change)
+
+## Prescribed local gates
+
+=== build ===
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/nairobi-v2)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.59s
+=== clippy ===
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/nairobi-v2)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.09s
+=== clippy all-features ===
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/nairobi-v2)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 14.48s
+=== test ===
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/nairobi-v2)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.06s
+     Running unittests src/main.rs (target/debug/deps/govee-9d5efbfc1c54196e)
+
+running 244 tests
+test ble::test::music_palette_rejects_bad_input ... ok
+test ble::test::music_palette_seven_colours_spills_into_tail ... ok
+test ble::test::music_palette_four_colours ... ok
+test ble::test::scene_command ... ok
+test ble::test::music_palette_is_registered_for_generic_lights ... ok
+test ble::test::packet_manager ... ok
+test ble::test::basic_round_trip ... ok
+test cache::test::corrupt_cache_diagnostic_withholds_serialized_value ... ok
+test hass_mqtt::light::test::empty_supported_color_modes_is_omitted ... ok
+test hass_mqtt::number::test::clear_button_topic_matches_the_registered_route ... ok
+test hass_mqtt::light::test::non_empty_supported_color_modes_is_serialized ... ok
+test hass_mqtt::number::test::command_and_state_topics_match_the_registered_mqtt_route ... ok
+test hass_mqtt::number::test::clear_button_returns_the_preference_to_unset ... ok
+test hass_mqtt::number::test::music_sensitivity_discovery_payload_carries_the_slider_bounds ... ok
+test hass_mqtt::number::test::music_sensitivity_entity_is_a_config_percent_slider ... ok
+test hass_mqtt::number::test::clear_echoes_the_reset_sentinel_on_the_state_topic ... ok
+test hass_mqtt::number::test::queued_echo_reads_sensitivity_only_after_acquiring_publication_lock ... ok
+test hass_mqtt::number::test::sensitivity_state_echo_has_the_exact_topic_and_payload ... ok
+test hass_mqtt::number::test::sensitivity_state_is_unknown_until_the_user_sets_it ... ok
+test hass_mqtt::number::test::sensitivity_state_echo_propagates_publish_failures ... ok
+test hass_mqtt::number::test::slider_write_for_an_unknown_device_errors_without_creating_one ... ok
+test hass_mqtt::number::test::slider_write_rejects_non_finite_and_non_numeric_payloads ... ok
+test hass_mqtt::number::test::slider_write_clamps_payloads_outside_the_govee_range ... ok
+test hass_mqtt::number::test::slider_write_rounds_fractional_payloads ... ok
+test hass_mqtt::number::test::slider_write_resolves_the_topic_safe_id_from_the_command_topic ... ok
+test hass_mqtt::number::test::slider_write_stores_the_preference ... ok
+test hass_mqtt::number::test::unset_sensitivity_reset_propagates_publish_failures ... ok
+test hass_mqtt::work_mode::test::test_issue100 ... ok
+test hass_mqtt::work_mode::test::test_work_mode_parser ... ok
+test hass_mqtt::work_mode::test::test_work_mode_parser2 ... ok
+test hass_mqtt::work_mode::test::test_work_mode_parser3 ... ok
+test hass_mqtt::work_mode::test::test_work_mode_parser4 ... ok
+test lan_api::tests::absurd_attempts_value_cannot_exhaust_memory ... ok
+test lan_api::tests::absurd_cooldown_is_clamped_to_cap ... ok
+test lan_api::tests::below_threshold_stays_closed ... ok
+test lan_api::tests::config_plumbing_cli_and_env_precedence ... ok
+test lan_api::tests::cooldown_below_floor_is_clamped ... ok
+test lan_api::tests::cooldown_doubling_caps_at_900s ... ok
+test hass_mqtt::enumerator::test::music_mode_capability_publishes_the_sensitivity_slider ... ok
+test hass_mqtt::enumerator::test::broken_platform_quirks_do_not_publish_the_slider ... ok
+test lan_api::tests::cooldown_expiry_grants_exactly_one_probe ... ok
+test lan_api::tests::default_schedule_doubles_from_350ms ... ok
+test lan_api::tests::initial_backoff_above_cap_is_clamped ... ok
+test lan_api::tests::distinct_ips_are_independent ... ok
+test lan_api::tests::nth_consecutive_failure_opens ... ok
+test lan_api::tests::open_refuses_before_cooldown_expiry ... ok
+test lan_api::tests::packet_from_open_device_grants_early_probe ... ok
+test hass_mqtt::enumerator::test::other_music_setting_instances_publish_nothing ... ok
+test lan_api::tests::probe_expiry_covers_large_query_schedules ... ok
+test lan_api::tests::probe_failure_reopens_with_doubled_cooldown ... ok
+test lan_api::tests::probe_success_closes_and_resets ... ok
+test lan_api::tests::scan_reply_does_not_reset_failure_counter ... ok
+test lan_api::tests::scan_reply_during_half_open_probe_is_ignored ... ok
+test lan_api::tests::schedule_budget_fits_under_confirm_poll_deadline ... ok
+test lan_api::tests::schedule_caps_backoff_growth ... ok
+test lan_api::tests::schedule_single_attempt ... ok
+test lan_api::tests::schedule_zero_attempts_clamps_to_one ... ok
+test lan_api::tests::stale_probe_self_heals ... ok
+test lan_api::tests::threshold_zero_disables_breaker ... ok
+test lan_api::tests::ungated_failures_count_while_open ... ok
+test lan_api::tests::zero_backoff_is_floored ... ok
+test music::test::hex_colors_parse_with_and_without_hash ... ok
+test music::test::profile_lookup_is_per_sku_and_case_insensitive ... ok
+test music::test::styles_listing_matches_table ... ok
+test platform_api::test::embedded_http_failure_retains_unknown_numeric_status ... ok
+test platform_api::test::enum_option_values_outside_u32_are_rejected_not_wrapped ... ok
+test platform_api::test::enum_repr ... ok
+test platform_api::test::authenticated_http_failure_chains_withhold_body_and_url_secrets ... ok
+test cache::test::caches_ok_value_so_future_runs_only_once ... ok
+test platform_api::test::from_json_error_withholds_nested_rejected_value ... ok
+test platform_api::test::from_json_error_withholds_top_level_rejected_value ... ok
+test cache::test::no_cache_error_skips_negative_cache_so_future_re_executes ... ok
+test cache::test::no_cache_error_message_propagates_and_downcast_survives ... ok
+test cache::test::expired_cached_error_returns_the_current_failure ... ok
+test cache::test::negative_cache_never_persists_or_replays_error_details ... ok
+test cache::test::fresh_legacy_cached_error_is_removed_before_recomputation ... ok
+test cache::test::plain_err_writes_negative_cache_so_future_runs_only_once ... ok
+test cache::test::malformed_cached_value_is_removed_before_no_cache_error ... ok
+test cache::test::failed_refresh_reuses_only_a_stale_success ... ok
+test cache::test::fresh_ok_entry_is_returned_without_running_future ... ok
+test cache::test::expired_legacy_cached_error_is_removed_before_no_cache_error ... ok
+test hass_mqtt::enumerator::test::unusable_music_mode_metadata_does_not_publish_the_slider ... ok
+test platform_api::test::music_payload_is_none_when_the_capability_has_no_music_mode_field ... ok
+test platform_api::test::music_mode_predicate_and_lookup_agree_on_out_of_range_values ... ok
+test platform_api::test::music_payload_carries_the_requested_sensitivity ... ok
+test platform_api::test::empty_scene_never_reaches_the_wire ... ok
+test platform_api::test::music_payload_clamps_rgb_to_the_platform_range ... ok
+test platform_api::test::request_ids_are_unique_uuids ... ok
+test platform_api::test::test_api_base_is_scoped_to_one_client ... ok
+test platform_api::test::get_device_state ... ok
+test platform_api::test::get_device_scenes ... ok
+test platform_api::test::list_devices ... ok
+test rest_api::test::list_appliances ... ok
+test rest_api::test::list_devices ... ok
+test sensitive::test::json_error_diagnostic_does_not_quote_the_rejected_value ... ok
+test sensitive::test::sensitive_body_is_withheld_by_default ... ok
+test sensitive::test::request_url_omits_credentials_query_and_fragment ... ok
+test platform_api::test::music_payload_clamps_out_of_range_sensitivity ... ok
+test platform_api::test::music_payload_defaults_match_the_previous_hardcode ... ok
+test service::device::test::active_scene_round_trips ... ok
+test service::device::test::iot_mode_carries_over_into_newer_lan_projection ... ok
+test sensitive::test::sensitive_body_opt_in_is_unicode_safe_and_capped ... ok
+test service::device::test::iot_status_mode_reaches_device_state ... ok
+test service::device::test::lan_carry_over_preserves_iot_mode_observation_time ... ok
+test service::device::test::music_sensitivity_defaults_without_asserting_device_state ... ok
+test platform_api::test::music_payload_is_none_for_an_unknown_style ... ok
+test service::device::test::music_sensitivity_round_trips_and_clamps ... ok
+test service::device::test::name_compute ... ok
+test service::device::test::no_iot_report_means_no_mode_and_no_timestamp ... ok
+test service::device::test::platform_projection_preserves_iot_mode_observation_time ... ok
+test service::device::test::powered_off_poll_clears_active_scene_even_with_newer_cached_source ... ok
+test service::device::test::powered_off_poll_clears_active_scene ... ok
+test service::device::test::status_poll_does_not_clear_active_scene ... ok
+test service::hass::tests::mqtt_route_handlers_match_their_patterns ... ok
+test service::hass::tests::addon_music_palette_option_is_wired_to_the_env_var_the_bridge_reads ... ok
+test service::hass::tests::mqtt_command_routes_register_even_when_music_palette_is_off ... ok
+test service::hass::tests::music_palette_topic_requires_the_env_var_to_be_exactly_true ... ok
+test service::hass::tests::test_camel_case_ascii ... ok
+test service::hass::tests::test_camel_case_chinese_no_panic ... ok
+test platform_api::test::music_payload_omits_rgb_and_keeps_auto_color_by_default ... ok
+test service::hass::tests::test_camel_case_emoji ... ok
+test service::hass::tests::test_camel_case_empty ... ok
+test service::hass::tests::test_scene_cycle_case_insensitive ... ok
+test service::hass::tests::test_scene_cycle_next_from_middle ... ok
+test service::hass::tests::test_scene_cycle_next_wraps_last_to_first ... ok
+test service::hass::tests::test_scene_cycle_no_active_scene_next ... ok
+test service::hass::tests::test_scene_cycle_no_active_scene_prev ... ok
+test service::hass::tests::music_sensitivity_notify_skips_a_device_that_left_the_state_map ... ok
+test service::hass::tests::test_scene_cycle_prev_from_middle ... ok
+test service::hass::tests::test_scene_cycle_prev_wraps_first_to_last ... ok
+test service::hass::tests::test_scene_cycle_single_scene ... ok
+test service::hass::tests::test_scene_cycle_unknown_scene_treated_as_no_active ... ok
+test service::iot::test::missing_mode_parses_as_none ... ok
+test service::iot::test::mode_less_packet_keeps_mode_observation_time_pinned ... ok
+test service::quirks::test::h60b0_is_a_lan_capable_floor_lamp ... ok
+test service::iot::test::parses_top_level_mode_from_status_push ... ok
+test service::hass::tests::mqtt_dispatch_queue_survives_a_handler_panic ... ok
+test service::http::test_build_router ... ok
+test service::state::tests::test_clear_scene_catalogs_drops_cached_catalog ... ok
+test platform_api::test::music_payload_uses_a_single_rgb_and_disables_auto_color ... ok
+test service::state::tests::test_enrich_scene_names_uses_platform_spine_with_undoc_media ... ok
+test service::state::tests::test_scene_catalog_entry_hint_empty_string_convention ... ok
+test service::state::tests::test_scene_catalog_category_serde_round_trip ... ok
+test service::state::tests::test_scene_catalog_entry_hint_serde_round_trip ... ok
+test service::state::tests::test_scene_catalog_reads_canonical_cache_for_stale_clone ... ok
+test service::state::tests::test_scene_catalog_refreshes_when_platform_metadata_arrives ... ok
+test service::state::tests::test_sort_and_dedup_scenes_case_insensitive_order ... ok
+test service::state::tests::test_sort_and_dedup_scenes ... ok
+test service::state::tests::test_sort_and_dedup_scenes_empty ... ok
+test service::state::tests::test_state_device_mut_creates_device ... ok
+test service::state::tests::test_state_devices_empty_by_default ... ok
+test service::state::tests::test_state_hass_disco_prefix_default_empty ... ok
+test service::state::tests::test_state_hass_disco_prefix_round_trip ... ok
+test platform_api::test::list_devices_issue4 ... ok
+test platform_api::test::list_devices_2 ... ok
+test service::state::tests::test_state_temperature_scale_default ... ok
+test service::state::tests::test_state_temperature_scale_round_trip ... ok
+test temperature::test::display ... ok
+test temperature::test::parsing ... ok
+test temperature::test::value_conversion ... ok
+test undoc_api::test::api_client_threads_2fa_code_into_login_body ... ok
+test undoc_api::test::api_client_normalizes_2fa_code_with_whitespace ... ok
+test undoc_api::test::api_client_with_no_2fa_code_omits_code_field ... ok
+test undoc_api::test::build_2fa_error_454_messages_differ_by_code_state ... ok
+test undoc_api::test::build_2fa_error_454_no_code_confirms_email_request ... ok
+test undoc_api::test::build_2fa_error_454_with_code_mentions_expired ... ok
+test undoc_api::test::build_2fa_error_455_mentions_invalid_or_expired ... ok
+test undoc_api::test::build_2fa_error_does_not_leak_email_or_response_body ... ok
+test undoc_api::test::build_2fa_error_results_downcast_to_no_cache_error_via_anyhow ... ok
+test undoc_api::test::build_2fa_error_returns_none_for_success_status ... ok
+test undoc_api::test::build_2fa_error_returns_none_for_unrelated_status ... ok
+test service::hass::tests::mqtt_dispatch_keys_align_all_device_topic_layouts ... ok
+test undoc_api::test::classify_200 ... ok
+test undoc_api::test::classify_454 ... ok
+test undoc_api::test::classify_455 ... ok
+test undoc_api::test::classify_non_json_returns_none ... ok
+test undoc_api::test::classify_missing_status_returns_none ... ok
+test undoc_api::test::code_is_cleared_after_successful_login_impl ... ok
+test undoc_api::test::embedded_json_error_withholds_rejected_string_value ... ok
+test undoc_api::test::http_400_classifies_as_plain_error ... ok
+test undoc_api::test::http_403_classifies_as_plain_error_for_short_negative_caching ... ok
+test undoc_api::test::http_499_classifies_as_plain_error_just_below_5xx_boundary ... ok
+test undoc_api::test::http_500_classifies_as_no_cache_error ... ok
+test undoc_api::test::http_503_classifies_as_no_cache_error ... ok
+test undoc_api::test::http_599_classifies_as_no_cache_error ... ok
+test undoc_api::test::http_error_message_propagates_through_classify ... ok
+test undoc_api::test::http_failure_message_withholds_the_response_body ... ok
+test undoc_api::test::configured_code_paths_do_not_request_another_code ... ok
+test undoc_api::test::failed_verification_request_still_reports_actionable_2fa_guidance ... ok
+test undoc_api::test::get_one_click ... ok
+test undoc_api::test::issue36 ... ok
+test undoc_api::test::login_body_cap_covers_declared_and_accumulated_lengths ... ok
+test undoc_api::test::login_body_includes_code_when_set ... ok
+test undoc_api::test::login_body_omits_code_when_explicit_none ... ok
+test undoc_api::test::login_body_omits_code_when_unset ... ok
+test undoc_api::test::get_device_scenes ... ok
+test undoc_api::test::login_http_error_withholds_echoed_credentials_by_default ... ok
+test undoc_api::test::login_http_redaction_preserves_transient_error_classification ... ok
+test undoc_api::test::login_parse_error_withholds_client_tokens_by_default ... ok
+test undoc_api::test::issue_14 ... ok
+test undoc_api::test::light_effect_library ... ok
+test undoc_api::test::login_response_still_parses_when_valid ... ok
+test undoc_api::test::no_cache_error_downcasts_via_anyhow ... ok
+test undoc_api::test::normalize_passes_none_through ... ok
+test undoc_api::test::normalize_strips_surrounding_whitespace ... ok
+test undoc_api::test::normalize_strips_trailing_newline_from_email_paste ... ok
+test undoc_api::test::normalize_treats_empty_string_as_none ... ok
+test undoc_api::test::normalize_treats_whitespace_only_as_none ... ok
+test undoc_api::test::opt_arg_or_env_returns_field_when_set ... ok
+test undoc_api::test::opt_arg_or_env_returns_none_when_neither_set ... ok
+test undoc_api::test::oversized_response_bodies_are_truncated_before_logging ... ok
+test undoc_api::test::plain_anyhow_error_does_not_downcast_to_no_cache_error ... ok
+test undoc_api::test::raw_request_error_still_yields_the_2fa_message ... ok
+test undoc_api::test::rejected_configured_code_allows_one_fresh_request_for_454_and_455 ... ok
+test undoc_api::test::repeated_454_retries_request_one_code_per_account ... ok
+test undoc_api::test::statuses_other_than_454_do_not_request_a_code ... ok
+test undoc_api::test::unknown_delivery_outcome_claims_the_suppression_window ... ok
+test undoc_api::test::unrelated_no_cache_error_is_not_classified_as_two_factor ... ok
+test undoc_api::test::verification_body_cap_counts_accumulated_bytes ... ok
+test undoc_api::test::verification_body_is_withheld_from_logged_errors_by_default ... ok
+test undoc_api::test::verification_cache_key_ignores_email_case ... ok
+test undoc_api::test::verification_request_has_expected_endpoint_client_id_and_body ... ok
+test undoc_api::test::verification_response_accepts_api_status_200 ... ok
+test undoc_api::test::verification_response_rejects_missing_or_non_numeric_api_status ... ok
+test undoc_api::test::verification_response_rejects_non_200_api_status ... ok
+test undoc_api::test::with_code_empty_string_does_not_set_code_field ... ok
+test undoc_api::test::with_code_normalizes_input ... ok
+test undoc_api::test::login_reader_rejects_oversized_declared_5xx_as_no_cache_error ... ok
+test undoc_api::test::login_reader_accepts_chunked_body_at_limit ... ok
+test undoc_api::test::login_reader_rejects_oversized_chunked_5xx_as_no_cache_error ... ok
+test platform_api::test::music_effect_clamps_over_range_sensitivity_on_the_wire ... ok
+test hass_mqtt::number::test::slider_handler_waits_for_the_device_update_permit ... ok
+test platform_api::test::music_effect_sends_the_stored_sensitivity_over_the_wire ... ok
+test undoc_api::test::issue_21 ... ok
+test platform_api::test::plain_set_scene_by_name_still_sends_the_historical_default ... ok
+test service::hass::tests::mqtt_dispatch_queue_keeps_devices_independent ... ok
+test service::state::tests::local_device_updates_share_the_control_semaphore ... ok
+test service::hass::tests::mqtt_dispatch_applies_sensitivity_before_the_next_music_effect ... ok
+test hass_mqtt::number::test::stale_notify_cannot_publish_after_a_newer_slider_echo ... ok
+test service::hass::tests::music_effect_with_rgb_disables_auto_color_on_the_wire ... ok
+test service::hass::tests::ordinary_effect_still_ignores_rgb_in_the_same_command ... ok
+test service::state::tests::device_set_scene_sends_the_freshly_stored_sensitivity ... ok
+test service::state::tests::device_set_scene_uses_snapshot_sensitivity_if_device_left_state ... ok
+test lan_api::tests::loopback_retransmit_bound_and_reply ... ok
+
+successes:
+
+---- ble::test::scene_command stdout ----
+data is:
+a3 00 01 07 02 03 26 00 01 00 0a 02 01 ff 19 01 b4 0a 0a d9
+a3 01 02 c8 14 05 ff ff 00 00 ff ff ff ff ff 00 ff ff 94 12
+a3 02 ff 00 14 01 96 00 00 00 00 23 00 02 0f 05 02 01 ff 0a
+a3 03 14 01 fb 00 00 01 fa 0a 04 04 ff 00 b4 ff 00 47 ff b3
+a3 04 ff e3 ff 00 00 00 00 00 00 00 00 1a 00 00 00 01 02 5d
+a3 05 01 ff 05 01 c8 14 14 02 ee 14 01 00 ff 00 00 00 00 92
+a3 ff 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 5c
+33 05 04 d4 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 e6
+
+---- service::hass::tests::mqtt_dispatch_queue_survives_a_handler_panic stdout ----
+
+thread 'service::hass::tests::mqtt_dispatch_queue_survives_a_handler_panic' (30441420) panicked at src/service/hass.rs:1577:25:
+synthetic handler panic
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+successes:
+    ble::test::basic_round_trip
+    ble::test::music_palette_four_colours
+    ble::test::music_palette_is_registered_for_generic_lights
+    ble::test::music_palette_rejects_bad_input
+    ble::test::music_palette_seven_colours_spills_into_tail
+    ble::test::packet_manager
+    ble::test::scene_command
+    cache::test::caches_ok_value_so_future_runs_only_once
+    cache::test::corrupt_cache_diagnostic_withholds_serialized_value
+    cache::test::expired_cached_error_returns_the_current_failure
+    cache::test::expired_legacy_cached_error_is_removed_before_no_cache_error
+    cache::test::failed_refresh_reuses_only_a_stale_success
+    cache::test::fresh_legacy_cached_error_is_removed_before_recomputation
+    cache::test::fresh_ok_entry_is_returned_without_running_future
+    cache::test::malformed_cached_value_is_removed_before_no_cache_error
+    cache::test::negative_cache_never_persists_or_replays_error_details
+    cache::test::no_cache_error_message_propagates_and_downcast_survives
+    cache::test::no_cache_error_skips_negative_cache_so_future_re_executes
+    cache::test::plain_err_writes_negative_cache_so_future_runs_only_once
+    hass_mqtt::enumerator::test::broken_platform_quirks_do_not_publish_the_slider
+    hass_mqtt::enumerator::test::music_mode_capability_publishes_the_sensitivity_slider
+    hass_mqtt::enumerator::test::other_music_setting_instances_publish_nothing
+    hass_mqtt::enumerator::test::unusable_music_mode_metadata_does_not_publish_the_slider
+    hass_mqtt::light::test::empty_supported_color_modes_is_omitted
+    hass_mqtt::light::test::non_empty_supported_color_modes_is_serialized
+    hass_mqtt::number::test::clear_button_returns_the_preference_to_unset
+    hass_mqtt::number::test::clear_button_topic_matches_the_registered_route
+    hass_mqtt::number::test::clear_echoes_the_reset_sentinel_on_the_state_topic
+    hass_mqtt::number::test::command_and_state_topics_match_the_registered_mqtt_route
+    hass_mqtt::number::test::music_sensitivity_discovery_payload_carries_the_slider_bounds
+    hass_mqtt::number::test::music_sensitivity_entity_is_a_config_percent_slider
+    hass_mqtt::number::test::queued_echo_reads_sensitivity_only_after_acquiring_publication_lock
+    hass_mqtt::number::test::sensitivity_state_echo_has_the_exact_topic_and_payload
+    hass_mqtt::number::test::sensitivity_state_echo_propagates_publish_failures
+    hass_mqtt::number::test::sensitivity_state_is_unknown_until_the_user_sets_it
+    hass_mqtt::number::test::slider_handler_waits_for_the_device_update_permit
+    hass_mqtt::number::test::slider_write_clamps_payloads_outside_the_govee_range
+    hass_mqtt::number::test::slider_write_for_an_unknown_device_errors_without_creating_one
+    hass_mqtt::number::test::slider_write_rejects_non_finite_and_non_numeric_payloads
+    hass_mqtt::number::test::slider_write_resolves_the_topic_safe_id_from_the_command_topic
+    hass_mqtt::number::test::slider_write_rounds_fractional_payloads
+    hass_mqtt::number::test::slider_write_stores_the_preference
+    hass_mqtt::number::test::stale_notify_cannot_publish_after_a_newer_slider_echo
+    hass_mqtt::number::test::unset_sensitivity_reset_propagates_publish_failures
+    hass_mqtt::work_mode::test::test_issue100
+    hass_mqtt::work_mode::test::test_work_mode_parser
+    hass_mqtt::work_mode::test::test_work_mode_parser2
+    hass_mqtt::work_mode::test::test_work_mode_parser3
+    hass_mqtt::work_mode::test::test_work_mode_parser4
+    lan_api::tests::absurd_attempts_value_cannot_exhaust_memory
+    lan_api::tests::absurd_cooldown_is_clamped_to_cap
+    lan_api::tests::below_threshold_stays_closed
+    lan_api::tests::config_plumbing_cli_and_env_precedence
+    lan_api::tests::cooldown_below_floor_is_clamped
+    lan_api::tests::cooldown_doubling_caps_at_900s
+    lan_api::tests::cooldown_expiry_grants_exactly_one_probe
+    lan_api::tests::default_schedule_doubles_from_350ms
+    lan_api::tests::distinct_ips_are_independent
+    lan_api::tests::initial_backoff_above_cap_is_clamped
+    lan_api::tests::loopback_retransmit_bound_and_reply
+    lan_api::tests::nth_consecutive_failure_opens
+    lan_api::tests::open_refuses_before_cooldown_expiry
+    lan_api::tests::packet_from_open_device_grants_early_probe
+    lan_api::tests::probe_expiry_covers_large_query_schedules
+    lan_api::tests::probe_failure_reopens_with_doubled_cooldown
+    lan_api::tests::probe_success_closes_and_resets
+    lan_api::tests::scan_reply_does_not_reset_failure_counter
+    lan_api::tests::scan_reply_during_half_open_probe_is_ignored
+    lan_api::tests::schedule_budget_fits_under_confirm_poll_deadline
+    lan_api::tests::schedule_caps_backoff_growth
+    lan_api::tests::schedule_single_attempt
+    lan_api::tests::schedule_zero_attempts_clamps_to_one
+    lan_api::tests::stale_probe_self_heals
+    lan_api::tests::threshold_zero_disables_breaker
+    lan_api::tests::ungated_failures_count_while_open
+    lan_api::tests::zero_backoff_is_floored
+    music::test::hex_colors_parse_with_and_without_hash
+    music::test::profile_lookup_is_per_sku_and_case_insensitive
+    music::test::styles_listing_matches_table
+    platform_api::test::authenticated_http_failure_chains_withhold_body_and_url_secrets
+    platform_api::test::embedded_http_failure_retains_unknown_numeric_status
+    platform_api::test::empty_scene_never_reaches_the_wire
+    platform_api::test::enum_option_values_outside_u32_are_rejected_not_wrapped
+    platform_api::test::enum_repr
+    platform_api::test::from_json_error_withholds_nested_rejected_value
+    platform_api::test::from_json_error_withholds_top_level_rejected_value
+    platform_api::test::get_device_scenes
+    platform_api::test::get_device_state
+    platform_api::test::list_devices
+    platform_api::test::list_devices_2
+    platform_api::test::list_devices_issue4
+    platform_api::test::music_effect_clamps_over_range_sensitivity_on_the_wire
+    platform_api::test::music_effect_sends_the_stored_sensitivity_over_the_wire
+    platform_api::test::music_mode_predicate_and_lookup_agree_on_out_of_range_values
+    platform_api::test::music_payload_carries_the_requested_sensitivity
+    platform_api::test::music_payload_clamps_out_of_range_sensitivity
+    platform_api::test::music_payload_clamps_rgb_to_the_platform_range
+    platform_api::test::music_payload_defaults_match_the_previous_hardcode
+    platform_api::test::music_payload_is_none_for_an_unknown_style
+    platform_api::test::music_payload_is_none_when_the_capability_has_no_music_mode_field
+    platform_api::test::music_payload_omits_rgb_and_keeps_auto_color_by_default
+    platform_api::test::music_payload_uses_a_single_rgb_and_disables_auto_color
+    platform_api::test::plain_set_scene_by_name_still_sends_the_historical_default
+    platform_api::test::request_ids_are_unique_uuids
+    platform_api::test::test_api_base_is_scoped_to_one_client
+    rest_api::test::list_appliances
+    rest_api::test::list_devices
+    sensitive::test::json_error_diagnostic_does_not_quote_the_rejected_value
+    sensitive::test::request_url_omits_credentials_query_and_fragment
+    sensitive::test::sensitive_body_is_withheld_by_default
+    sensitive::test::sensitive_body_opt_in_is_unicode_safe_and_capped
+    service::device::test::active_scene_round_trips
+    service::device::test::iot_mode_carries_over_into_newer_lan_projection
+    service::device::test::iot_status_mode_reaches_device_state
+    service::device::test::lan_carry_over_preserves_iot_mode_observation_time
+    service::device::test::music_sensitivity_defaults_without_asserting_device_state
+    service::device::test::music_sensitivity_round_trips_and_clamps
+    service::device::test::name_compute
+    service::device::test::no_iot_report_means_no_mode_and_no_timestamp
+    service::device::test::platform_projection_preserves_iot_mode_observation_time
+    service::device::test::powered_off_poll_clears_active_scene
+    service::device::test::powered_off_poll_clears_active_scene_even_with_newer_cached_source
+    service::device::test::status_poll_does_not_clear_active_scene
+    service::hass::tests::addon_music_palette_option_is_wired_to_the_env_var_the_bridge_reads
+    service::hass::tests::mqtt_command_routes_register_even_when_music_palette_is_off
+    service::hass::tests::mqtt_dispatch_applies_sensitivity_before_the_next_music_effect
+    service::hass::tests::mqtt_dispatch_keys_align_all_device_topic_layouts
+    service::hass::tests::mqtt_dispatch_queue_keeps_devices_independent
+    service::hass::tests::mqtt_dispatch_queue_survives_a_handler_panic
+    service::hass::tests::mqtt_route_handlers_match_their_patterns
+    service::hass::tests::music_effect_with_rgb_disables_auto_color_on_the_wire
+    service::hass::tests::music_palette_topic_requires_the_env_var_to_be_exactly_true
+    service::hass::tests::music_sensitivity_notify_skips_a_device_that_left_the_state_map
+    service::hass::tests::ordinary_effect_still_ignores_rgb_in_the_same_command
+    service::hass::tests::test_camel_case_ascii
+    service::hass::tests::test_camel_case_chinese_no_panic
+    service::hass::tests::test_camel_case_emoji
+    service::hass::tests::test_camel_case_empty
+    service::hass::tests::test_scene_cycle_case_insensitive
+    service::hass::tests::test_scene_cycle_next_from_middle
+    service::hass::tests::test_scene_cycle_next_wraps_last_to_first
+    service::hass::tests::test_scene_cycle_no_active_scene_next
+    service::hass::tests::test_scene_cycle_no_active_scene_prev
+    service::hass::tests::test_scene_cycle_prev_from_middle
+    service::hass::tests::test_scene_cycle_prev_wraps_first_to_last
+    service::hass::tests::test_scene_cycle_single_scene
+    service::hass::tests::test_scene_cycle_unknown_scene_treated_as_no_active
+    service::http::test_build_router
+    service::iot::test::missing_mode_parses_as_none
+    service::iot::test::mode_less_packet_keeps_mode_observation_time_pinned
+    service::iot::test::parses_top_level_mode_from_status_push
+    service::quirks::test::h60b0_is_a_lan_capable_floor_lamp
+    service::state::tests::device_set_scene_sends_the_freshly_stored_sensitivity
+    service::state::tests::device_set_scene_uses_snapshot_sensitivity_if_device_left_state
+    service::state::tests::local_device_updates_share_the_control_semaphore
+    service::state::tests::test_clear_scene_catalogs_drops_cached_catalog
+    service::state::tests::test_enrich_scene_names_uses_platform_spine_with_undoc_media
+    service::state::tests::test_scene_catalog_category_serde_round_trip
+    service::state::tests::test_scene_catalog_entry_hint_empty_string_convention
+    service::state::tests::test_scene_catalog_entry_hint_serde_round_trip
+    service::state::tests::test_scene_catalog_reads_canonical_cache_for_stale_clone
+    service::state::tests::test_scene_catalog_refreshes_when_platform_metadata_arrives
+    service::state::tests::test_sort_and_dedup_scenes
+    service::state::tests::test_sort_and_dedup_scenes_case_insensitive_order
+    service::state::tests::test_sort_and_dedup_scenes_empty
+    service::state::tests::test_state_device_mut_creates_device
+    service::state::tests::test_state_devices_empty_by_default
+    service::state::tests::test_state_hass_disco_prefix_default_empty
+    service::state::tests::test_state_hass_disco_prefix_round_trip
+    service::state::tests::test_state_temperature_scale_default
+    service::state::tests::test_state_temperature_scale_round_trip
+    temperature::test::display
+    temperature::test::parsing
+    temperature::test::value_conversion
+    undoc_api::test::api_client_normalizes_2fa_code_with_whitespace
+    undoc_api::test::api_client_threads_2fa_code_into_login_body
+    undoc_api::test::api_client_with_no_2fa_code_omits_code_field
+    undoc_api::test::build_2fa_error_454_messages_differ_by_code_state
+    undoc_api::test::build_2fa_error_454_no_code_confirms_email_request
+    undoc_api::test::build_2fa_error_454_with_code_mentions_expired
+    undoc_api::test::build_2fa_error_455_mentions_invalid_or_expired
+    undoc_api::test::build_2fa_error_does_not_leak_email_or_response_body
+    undoc_api::test::build_2fa_error_results_downcast_to_no_cache_error_via_anyhow
+    undoc_api::test::build_2fa_error_returns_none_for_success_status
+    undoc_api::test::build_2fa_error_returns_none_for_unrelated_status
+    undoc_api::test::classify_200
+    undoc_api::test::classify_454
+    undoc_api::test::classify_455
+    undoc_api::test::classify_missing_status_returns_none
+    undoc_api::test::classify_non_json_returns_none
+    undoc_api::test::code_is_cleared_after_successful_login_impl
+    undoc_api::test::configured_code_paths_do_not_request_another_code
+    undoc_api::test::embedded_json_error_withholds_rejected_string_value
+    undoc_api::test::failed_verification_request_still_reports_actionable_2fa_guidance
+    undoc_api::test::get_device_scenes
+    undoc_api::test::get_one_click
+    undoc_api::test::http_400_classifies_as_plain_error
+    undoc_api::test::http_403_classifies_as_plain_error_for_short_negative_caching
+    undoc_api::test::http_499_classifies_as_plain_error_just_below_5xx_boundary
+    undoc_api::test::http_500_classifies_as_no_cache_error
+    undoc_api::test::http_503_classifies_as_no_cache_error
+    undoc_api::test::http_599_classifies_as_no_cache_error
+    undoc_api::test::http_error_message_propagates_through_classify
+    undoc_api::test::http_failure_message_withholds_the_response_body
+    undoc_api::test::issue36
+    undoc_api::test::issue_14
+    undoc_api::test::issue_21
+    undoc_api::test::light_effect_library
+    undoc_api::test::login_body_cap_covers_declared_and_accumulated_lengths
+    undoc_api::test::login_body_includes_code_when_set
+    undoc_api::test::login_body_omits_code_when_explicit_none
+    undoc_api::test::login_body_omits_code_when_unset
+    undoc_api::test::login_http_error_withholds_echoed_credentials_by_default
+    undoc_api::test::login_http_redaction_preserves_transient_error_classification
+    undoc_api::test::login_parse_error_withholds_client_tokens_by_default
+    undoc_api::test::login_reader_accepts_chunked_body_at_limit
+    undoc_api::test::login_reader_rejects_oversized_chunked_5xx_as_no_cache_error
+    undoc_api::test::login_reader_rejects_oversized_declared_5xx_as_no_cache_error
+    undoc_api::test::login_response_still_parses_when_valid
+    undoc_api::test::no_cache_error_downcasts_via_anyhow
+    undoc_api::test::normalize_passes_none_through
+    undoc_api::test::normalize_strips_surrounding_whitespace
+    undoc_api::test::normalize_strips_trailing_newline_from_email_paste
+    undoc_api::test::normalize_treats_empty_string_as_none
+    undoc_api::test::normalize_treats_whitespace_only_as_none
+    undoc_api::test::opt_arg_or_env_returns_field_when_set
+    undoc_api::test::opt_arg_or_env_returns_none_when_neither_set
+    undoc_api::test::oversized_response_bodies_are_truncated_before_logging
+    undoc_api::test::plain_anyhow_error_does_not_downcast_to_no_cache_error
+    undoc_api::test::raw_request_error_still_yields_the_2fa_message
+    undoc_api::test::rejected_configured_code_allows_one_fresh_request_for_454_and_455
+    undoc_api::test::repeated_454_retries_request_one_code_per_account
+    undoc_api::test::statuses_other_than_454_do_not_request_a_code
+    undoc_api::test::unknown_delivery_outcome_claims_the_suppression_window
+    undoc_api::test::unrelated_no_cache_error_is_not_classified_as_two_factor
+    undoc_api::test::verification_body_cap_counts_accumulated_bytes
+    undoc_api::test::verification_body_is_withheld_from_logged_errors_by_default
+    undoc_api::test::verification_cache_key_ignores_email_case
+    undoc_api::test::verification_request_has_expected_endpoint_client_id_and_body
+    undoc_api::test::verification_response_accepts_api_status_200
+    undoc_api::test::verification_response_rejects_missing_or_non_numeric_api_status
+    undoc_api::test::verification_response_rejects_non_200_api_status
+    undoc_api::test::with_code_empty_string_does_not_set_code_field
+    undoc_api::test::with_code_normalizes_input
+
+test result: ok. 244 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.84s
+
+=== test all-features ===
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/nairobi-v2)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.07s
+     Running unittests src/main.rs (target/debug/deps/govee-c403ab837a6ca447)
+
+running 245 tests
+test ble::test::music_palette_rejects_bad_input ... ok
+test ble::test::music_palette_four_colours ... ok
+test ble::test::scene_command ... ok
+test ble::test::music_palette_seven_colours_spills_into_tail ... ok
+test ble::test::packet_manager ... ok
+test ble::test::basic_round_trip ... ok
+test commands::undoc::test::probe_subcommand_name_matches_the_harness_invocation ... ok
+test ble::test::music_palette_is_registered_for_generic_lights ... ok
+test cache::test::corrupt_cache_diagnostic_withholds_serialized_value ... ok
+test hass_mqtt::light::test::empty_supported_color_modes_is_omitted ... ok
+test hass_mqtt::light::test::non_empty_supported_color_modes_is_serialized ... ok
+test hass_mqtt::number::test::clear_button_topic_matches_the_registered_route ... ok
+test hass_mqtt::number::test::command_and_state_topics_match_the_registered_mqtt_route ... ok
+test hass_mqtt::number::test::clear_button_returns_the_preference_to_unset ... ok
+test hass_mqtt::number::test::music_sensitivity_entity_is_a_config_percent_slider ... ok
+test hass_mqtt::number::test::music_sensitivity_discovery_payload_carries_the_slider_bounds ... ok
+test hass_mqtt::number::test::queued_echo_reads_sensitivity_only_after_acquiring_publication_lock ... ok
+test hass_mqtt::number::test::clear_echoes_the_reset_sentinel_on_the_state_topic ... ok
+test hass_mqtt::number::test::sensitivity_state_echo_has_the_exact_topic_and_payload ... ok
+test hass_mqtt::number::test::sensitivity_state_is_unknown_until_the_user_sets_it ... ok
+test hass_mqtt::number::test::sensitivity_state_echo_propagates_publish_failures ... ok
+test hass_mqtt::number::test::slider_write_for_an_unknown_device_errors_without_creating_one ... ok
+test hass_mqtt::number::test::slider_write_clamps_payloads_outside_the_govee_range ... ok
+test hass_mqtt::number::test::slider_write_rejects_non_finite_and_non_numeric_payloads ... ok
+test hass_mqtt::number::test::slider_write_resolves_the_topic_safe_id_from_the_command_topic ... ok
+test hass_mqtt::number::test::slider_write_rounds_fractional_payloads ... ok
+test hass_mqtt::number::test::slider_write_stores_the_preference ... ok
+test hass_mqtt::number::test::unset_sensitivity_reset_propagates_publish_failures ... ok
+test hass_mqtt::work_mode::test::test_issue100 ... ok
+test hass_mqtt::work_mode::test::test_work_mode_parser ... ok
+test hass_mqtt::work_mode::test::test_work_mode_parser2 ... ok
+test hass_mqtt::work_mode::test::test_work_mode_parser3 ... ok
+test hass_mqtt::work_mode::test::test_work_mode_parser4 ... ok
+test hass_mqtt::enumerator::test::other_music_setting_instances_publish_nothing ... ok
+test lan_api::tests::absurd_attempts_value_cannot_exhaust_memory ... ok
+test hass_mqtt::enumerator::test::music_mode_capability_publishes_the_sensitivity_slider ... ok
+test hass_mqtt::enumerator::test::broken_platform_quirks_do_not_publish_the_slider ... ok
+test lan_api::tests::below_threshold_stays_closed ... ok
+test lan_api::tests::absurd_cooldown_is_clamped_to_cap ... ok
+test lan_api::tests::cooldown_below_floor_is_clamped ... ok
+test lan_api::tests::config_plumbing_cli_and_env_precedence ... ok
+test lan_api::tests::cooldown_doubling_caps_at_900s ... ok
+test lan_api::tests::cooldown_expiry_grants_exactly_one_probe ... ok
+test lan_api::tests::default_schedule_doubles_from_350ms ... ok
+test lan_api::tests::distinct_ips_are_independent ... ok
+test lan_api::tests::initial_backoff_above_cap_is_clamped ... ok
+test lan_api::tests::open_refuses_before_cooldown_expiry ... ok
+test lan_api::tests::nth_consecutive_failure_opens ... ok
+test lan_api::tests::packet_from_open_device_grants_early_probe ... ok
+test lan_api::tests::probe_failure_reopens_with_doubled_cooldown ... ok
+test lan_api::tests::probe_expiry_covers_large_query_schedules ... ok
+test lan_api::tests::probe_success_closes_and_resets ... ok
+test lan_api::tests::scan_reply_does_not_reset_failure_counter ... ok
+test lan_api::tests::scan_reply_during_half_open_probe_is_ignored ... ok
+test lan_api::tests::schedule_budget_fits_under_confirm_poll_deadline ... ok
+test lan_api::tests::schedule_caps_backoff_growth ... ok
+test lan_api::tests::schedule_single_attempt ... ok
+test lan_api::tests::schedule_zero_attempts_clamps_to_one ... ok
+test lan_api::tests::stale_probe_self_heals ... ok
+test lan_api::tests::zero_backoff_is_floored ... ok
+test lan_api::tests::threshold_zero_disables_breaker ... ok
+test lan_api::tests::ungated_failures_count_while_open ... ok
+test music::test::hex_colors_parse_with_and_without_hash ... ok
+test music::test::styles_listing_matches_table ... ok
+test music::test::profile_lookup_is_per_sku_and_case_insensitive ... ok
+test platform_api::test::embedded_http_failure_retains_unknown_numeric_status ... ok
+test platform_api::test::enum_option_values_outside_u32_are_rejected_not_wrapped ... ok
+test platform_api::test::authenticated_http_failure_chains_withhold_body_and_url_secrets ... ok
+test platform_api::test::enum_repr ... ok
+test cache::test::no_cache_error_message_propagates_and_downcast_survives ... ok
+test platform_api::test::from_json_error_withholds_nested_rejected_value ... ok
+test platform_api::test::from_json_error_withholds_top_level_rejected_value ... ok
+test cache::test::no_cache_error_skips_negative_cache_so_future_re_executes ... ok
+test cache::test::plain_err_writes_negative_cache_so_future_runs_only_once ... ok
+test cache::test::expired_cached_error_returns_the_current_failure ... ok
+test platform_api::test::get_device_state ... ok
+test cache::test::failed_refresh_reuses_only_a_stale_success ... ok
+test platform_api::test::get_device_scenes ... ok
+test cache::test::fresh_ok_entry_is_returned_without_running_future ... ok
+test cache::test::caches_ok_value_so_future_runs_only_once ... ok
+test cache::test::fresh_legacy_cached_error_is_removed_before_recomputation ... ok
+test cache::test::expired_legacy_cached_error_is_removed_before_no_cache_error ... ok
+test cache::test::malformed_cached_value_is_removed_before_no_cache_error ... ok
+test platform_api::test::music_payload_is_none_when_the_capability_has_no_music_mode_field ... ok
+test cache::test::negative_cache_never_persists_or_replays_error_details ... ok
+test platform_api::test::list_devices ... ok
+test hass_mqtt::enumerator::test::unusable_music_mode_metadata_does_not_publish_the_slider ... ok
+test platform_api::test::music_mode_predicate_and_lookup_agree_on_out_of_range_values ... ok
+test platform_api::test::empty_scene_never_reaches_the_wire ... ok
+test platform_api::test::test_api_base_is_scoped_to_one_client ... ok
+test platform_api::test::request_ids_are_unique_uuids ... ok
+test sensitive::test::json_error_diagnostic_does_not_quote_the_rejected_value ... ok
+test sensitive::test::request_url_omits_credentials_query_and_fragment ... ok
+test sensitive::test::sensitive_body_is_withheld_by_default ... ok
+test platform_api::test::music_payload_clamps_rgb_to_the_platform_range ... ok
+test platform_api::test::music_payload_defaults_match_the_previous_hardcode ... ok
+test service::device::test::active_scene_round_trips ... ok
+test rest_api::test::list_devices ... ok
+test sensitive::test::sensitive_body_opt_in_is_unicode_safe_and_capped ... ok
+test rest_api::test::list_appliances ... ok
+test service::device::test::iot_mode_carries_over_into_newer_lan_projection ... ok
+test service::device::test::iot_status_mode_reaches_device_state ... ok
+test service::device::test::lan_carry_over_preserves_iot_mode_observation_time ... ok
+test service::device::test::music_sensitivity_defaults_without_asserting_device_state ... ok
+test service::device::test::music_sensitivity_round_trips_and_clamps ... ok
+test platform_api::test::music_payload_uses_a_single_rgb_and_disables_auto_color ... ok
+test service::device::test::name_compute ... ok
+test service::device::test::no_iot_report_means_no_mode_and_no_timestamp ... ok
+test service::device::test::platform_projection_preserves_iot_mode_observation_time ... ok
+test service::device::test::powered_off_poll_clears_active_scene ... ok
+test platform_api::test::music_payload_omits_rgb_and_keeps_auto_color_by_default ... ok
+test platform_api::test::list_devices_2 ... ok
+test service::device::test::powered_off_poll_clears_active_scene_even_with_newer_cached_source ... ok
+test platform_api::test::music_payload_is_none_for_an_unknown_style ... ok
+test service::device::test::status_poll_does_not_clear_active_scene ... ok
+test platform_api::test::music_payload_carries_the_requested_sensitivity ... ok
+test platform_api::test::music_payload_clamps_out_of_range_sensitivity ... ok
+test service::hass::tests::mqtt_command_routes_register_even_when_music_palette_is_off ... ok
+test service::hass::tests::mqtt_route_handlers_match_their_patterns ... ok
+test service::hass::tests::addon_music_palette_option_is_wired_to_the_env_var_the_bridge_reads ... ok
+test service::hass::tests::music_palette_topic_requires_the_env_var_to_be_exactly_true ... ok
+test service::hass::tests::test_camel_case_ascii ... ok
+test service::hass::tests::test_camel_case_chinese_no_panic ... ok
+test service::hass::tests::test_camel_case_emoji ... ok
+test platform_api::test::list_devices_issue4 ... ok
+test service::hass::tests::test_camel_case_empty ... ok
+test service::hass::tests::test_scene_cycle_case_insensitive ... ok
+test service::hass::tests::test_scene_cycle_next_from_middle ... ok
+test service::hass::tests::test_scene_cycle_next_wraps_last_to_first ... ok
+test service::hass::tests::test_scene_cycle_no_active_scene_next ... ok
+test service::hass::tests::test_scene_cycle_no_active_scene_prev ... ok
+test service::hass::tests::test_scene_cycle_prev_from_middle ... ok
+test service::hass::tests::test_scene_cycle_prev_wraps_first_to_last ... ok
+test service::hass::tests::test_scene_cycle_single_scene ... ok
+test service::hass::tests::test_scene_cycle_unknown_scene_treated_as_no_active ... ok
+test service::quirks::test::h60b0_is_a_lan_capable_floor_lamp ... ok
+test service::hass::tests::music_sensitivity_notify_skips_a_device_that_left_the_state_map ... ok
+test service::iot::test::missing_mode_parses_as_none ... ok
+test service::iot::test::parses_top_level_mode_from_status_push ... ok
+test service::iot::test::mode_less_packet_keeps_mode_observation_time_pinned ... ok
+test service::http::test_build_router ... ok
+test service::state::tests::test_clear_scene_catalogs_drops_cached_catalog ... ok
+test service::state::tests::test_scene_catalog_category_serde_round_trip ... ok
+test service::state::tests::test_enrich_scene_names_uses_platform_spine_with_undoc_media ... ok
+test service::state::tests::test_scene_catalog_entry_hint_empty_string_convention ... ok
+test service::state::tests::test_scene_catalog_entry_hint_serde_round_trip ... ok
+test service::state::tests::test_sort_and_dedup_scenes ... ok
+test service::state::tests::test_scene_catalog_reads_canonical_cache_for_stale_clone ... ok
+test service::state::tests::test_scene_catalog_refreshes_when_platform_metadata_arrives ... ok
+test service::state::tests::test_sort_and_dedup_scenes_case_insensitive_order ... ok
+test service::state::tests::test_sort_and_dedup_scenes_empty ... ok
+test service::hass::tests::mqtt_dispatch_queue_survives_a_handler_panic ... ok
+test service::state::tests::test_state_devices_empty_by_default ... ok
+test service::state::tests::test_state_device_mut_creates_device ... ok
+test service::state::tests::test_state_hass_disco_prefix_default_empty ... ok
+test service::state::tests::test_state_hass_disco_prefix_round_trip ... ok
+test temperature::test::display ... ok
+test service::state::tests::test_state_temperature_scale_default ... ok
+test service::state::tests::test_state_temperature_scale_round_trip ... ok
+test temperature::test::parsing ... ok
+test temperature::test::value_conversion ... ok
+test undoc_api::test::api_client_with_no_2fa_code_omits_code_field ... ok
+test undoc_api::test::api_client_normalizes_2fa_code_with_whitespace ... ok
+test undoc_api::test::api_client_threads_2fa_code_into_login_body ... ok
+test undoc_api::test::build_2fa_error_454_messages_differ_by_code_state ... ok
+test undoc_api::test::build_2fa_error_454_no_code_confirms_email_request ... ok
+test undoc_api::test::build_2fa_error_454_with_code_mentions_expired ... ok
+test undoc_api::test::build_2fa_error_455_mentions_invalid_or_expired ... ok
+test undoc_api::test::build_2fa_error_does_not_leak_email_or_response_body ... ok
+test undoc_api::test::build_2fa_error_results_downcast_to_no_cache_error_via_anyhow ... ok
+test undoc_api::test::build_2fa_error_returns_none_for_success_status ... ok
+test undoc_api::test::build_2fa_error_returns_none_for_unrelated_status ... ok
+test undoc_api::test::classify_200 ... ok
+test undoc_api::test::classify_454 ... ok
+test undoc_api::test::classify_455 ... ok
+test service::hass::tests::mqtt_dispatch_keys_align_all_device_topic_layouts ... ok
+test undoc_api::test::classify_missing_status_returns_none ... ok
+test undoc_api::test::classify_non_json_returns_none ... ok
+test undoc_api::test::code_is_cleared_after_successful_login_impl ... ok
+test undoc_api::test::embedded_json_error_withholds_rejected_string_value ... ok
+test undoc_api::test::http_400_classifies_as_plain_error ... ok
+test undoc_api::test::http_403_classifies_as_plain_error_for_short_negative_caching ... ok
+test undoc_api::test::http_499_classifies_as_plain_error_just_below_5xx_boundary ... ok
+test undoc_api::test::http_500_classifies_as_no_cache_error ... ok
+test undoc_api::test::http_503_classifies_as_no_cache_error ... ok
+test undoc_api::test::http_599_classifies_as_no_cache_error ... ok
+test undoc_api::test::http_error_message_propagates_through_classify ... ok
+test undoc_api::test::http_failure_message_withholds_the_response_body ... ok
+test undoc_api::test::configured_code_paths_do_not_request_another_code ... ok
+test undoc_api::test::failed_verification_request_still_reports_actionable_2fa_guidance ... ok
+test undoc_api::test::get_one_click ... ok
+test undoc_api::test::issue36 ... ok
+test undoc_api::test::login_body_cap_covers_declared_and_accumulated_lengths ... ok
+test undoc_api::test::login_body_includes_code_when_set ... ok
+test undoc_api::test::login_body_omits_code_when_explicit_none ... ok
+test undoc_api::test::login_body_omits_code_when_unset ... ok
+test undoc_api::test::get_device_scenes ... ok
+test undoc_api::test::issue_14 ... ok
+test undoc_api::test::login_http_error_withholds_echoed_credentials_by_default ... ok
+test undoc_api::test::login_http_redaction_preserves_transient_error_classification ... ok
+test undoc_api::test::login_parse_error_withholds_client_tokens_by_default ... ok
+test undoc_api::test::light_effect_library ... ok
+test undoc_api::test::login_response_still_parses_when_valid ... ok
+test undoc_api::test::no_cache_error_downcasts_via_anyhow ... ok
+test undoc_api::test::normalize_passes_none_through ... ok
+test undoc_api::test::normalize_strips_surrounding_whitespace ... ok
+test undoc_api::test::normalize_strips_trailing_newline_from_email_paste ... ok
+test undoc_api::test::normalize_treats_empty_string_as_none ... ok
+test undoc_api::test::normalize_treats_whitespace_only_as_none ... ok
+test undoc_api::test::opt_arg_or_env_returns_field_when_set ... ok
+test undoc_api::test::opt_arg_or_env_returns_none_when_neither_set ... ok
+test undoc_api::test::oversized_response_bodies_are_truncated_before_logging ... ok
+test undoc_api::test::plain_anyhow_error_does_not_downcast_to_no_cache_error ... ok
+test undoc_api::test::raw_request_error_still_yields_the_2fa_message ... ok
+test undoc_api::test::rejected_configured_code_allows_one_fresh_request_for_454_and_455 ... ok
+test undoc_api::test::repeated_454_retries_request_one_code_per_account ... ok
+test undoc_api::test::statuses_other_than_454_do_not_request_a_code ... ok
+test undoc_api::test::unknown_delivery_outcome_claims_the_suppression_window ... ok
+test undoc_api::test::unrelated_no_cache_error_is_not_classified_as_two_factor ... ok
+test undoc_api::test::verification_body_cap_counts_accumulated_bytes ... ok
+test undoc_api::test::verification_body_is_withheld_from_logged_errors_by_default ... ok
+test undoc_api::test::verification_cache_key_ignores_email_case ... ok
+test undoc_api::test::verification_request_has_expected_endpoint_client_id_and_body ... ok
+test undoc_api::test::verification_response_accepts_api_status_200 ... ok
+test undoc_api::test::verification_response_rejects_missing_or_non_numeric_api_status ... ok
+test undoc_api::test::verification_response_rejects_non_200_api_status ... ok
+test undoc_api::test::with_code_empty_string_does_not_set_code_field ... ok
+test undoc_api::test::with_code_normalizes_input ... ok
+test undoc_api::test::login_reader_rejects_oversized_declared_5xx_as_no_cache_error ... ok
+test undoc_api::test::login_reader_rejects_oversized_chunked_5xx_as_no_cache_error ... ok
+test platform_api::test::music_effect_clamps_over_range_sensitivity_on_the_wire ... ok
+test undoc_api::test::login_reader_accepts_chunked_body_at_limit ... ok
+test hass_mqtt::number::test::slider_handler_waits_for_the_device_update_permit ... ok
+test undoc_api::test::issue_21 ... ok
+test platform_api::test::music_effect_sends_the_stored_sensitivity_over_the_wire ... ok
+test platform_api::test::plain_set_scene_by_name_still_sends_the_historical_default ... ok
+test service::state::tests::local_device_updates_share_the_control_semaphore ... ok
+test service::hass::tests::mqtt_dispatch_queue_keeps_devices_independent ... ok
+test service::hass::tests::mqtt_dispatch_applies_sensitivity_before_the_next_music_effect ... ok
+test hass_mqtt::number::test::stale_notify_cannot_publish_after_a_newer_slider_echo ... ok
+test service::hass::tests::music_effect_with_rgb_disables_auto_color_on_the_wire ... ok
+test service::hass::tests::ordinary_effect_still_ignores_rgb_in_the_same_command ... ok
+test service::state::tests::device_set_scene_sends_the_freshly_stored_sensitivity ... ok
+test service::state::tests::device_set_scene_uses_snapshot_sensitivity_if_device_left_state ... ok
+test lan_api::tests::loopback_retransmit_bound_and_reply ... ok
+
+successes:
+
+---- ble::test::scene_command stdout ----
+data is:
+a3 00 01 07 02 03 26 00 01 00 0a 02 01 ff 19 01 b4 0a 0a d9
+a3 01 02 c8 14 05 ff ff 00 00 ff ff ff ff ff 00 ff ff 94 12
+a3 02 ff 00 14 01 96 00 00 00 00 23 00 02 0f 05 02 01 ff 0a
+a3 03 14 01 fb 00 00 01 fa 0a 04 04 ff 00 b4 ff 00 47 ff b3
+a3 04 ff e3 ff 00 00 00 00 00 00 00 00 1a 00 00 00 01 02 5d
+a3 05 01 ff 05 01 c8 14 14 02 ee 14 01 00 ff 00 00 00 00 92
+a3 ff 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 5c
+33 05 04 d4 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 e6
+
+---- service::hass::tests::mqtt_dispatch_queue_survives_a_handler_panic stdout ----
+
+thread 'service::hass::tests::mqtt_dispatch_queue_survives_a_handler_panic' (30451212) panicked at src/service/hass.rs:1577:25:
+synthetic handler panic
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+successes:
+    ble::test::basic_round_trip
+    ble::test::music_palette_four_colours
+    ble::test::music_palette_is_registered_for_generic_lights
+    ble::test::music_palette_rejects_bad_input
+    ble::test::music_palette_seven_colours_spills_into_tail
+    ble::test::packet_manager
+    ble::test::scene_command
+    cache::test::caches_ok_value_so_future_runs_only_once
+    cache::test::corrupt_cache_diagnostic_withholds_serialized_value
+    cache::test::expired_cached_error_returns_the_current_failure
+    cache::test::expired_legacy_cached_error_is_removed_before_no_cache_error
+    cache::test::failed_refresh_reuses_only_a_stale_success
+    cache::test::fresh_legacy_cached_error_is_removed_before_recomputation
+    cache::test::fresh_ok_entry_is_returned_without_running_future
+    cache::test::malformed_cached_value_is_removed_before_no_cache_error
+    cache::test::negative_cache_never_persists_or_replays_error_details
+    cache::test::no_cache_error_message_propagates_and_downcast_survives
+    cache::test::no_cache_error_skips_negative_cache_so_future_re_executes
+    cache::test::plain_err_writes_negative_cache_so_future_runs_only_once
+    commands::undoc::test::probe_subcommand_name_matches_the_harness_invocation
+    hass_mqtt::enumerator::test::broken_platform_quirks_do_not_publish_the_slider
+    hass_mqtt::enumerator::test::music_mode_capability_publishes_the_sensitivity_slider
+    hass_mqtt::enumerator::test::other_music_setting_instances_publish_nothing
+    hass_mqtt::enumerator::test::unusable_music_mode_metadata_does_not_publish_the_slider
+    hass_mqtt::light::test::empty_supported_color_modes_is_omitted
+    hass_mqtt::light::test::non_empty_supported_color_modes_is_serialized
+    hass_mqtt::number::test::clear_button_returns_the_preference_to_unset
+    hass_mqtt::number::test::clear_button_topic_matches_the_registered_route
+    hass_mqtt::number::test::clear_echoes_the_reset_sentinel_on_the_state_topic
+    hass_mqtt::number::test::command_and_state_topics_match_the_registered_mqtt_route
+    hass_mqtt::number::test::music_sensitivity_discovery_payload_carries_the_slider_bounds
+    hass_mqtt::number::test::music_sensitivity_entity_is_a_config_percent_slider
+    hass_mqtt::number::test::queued_echo_reads_sensitivity_only_after_acquiring_publication_lock
+    hass_mqtt::number::test::sensitivity_state_echo_has_the_exact_topic_and_payload
+    hass_mqtt::number::test::sensitivity_state_echo_propagates_publish_failures
+    hass_mqtt::number::test::sensitivity_state_is_unknown_until_the_user_sets_it
+    hass_mqtt::number::test::slider_handler_waits_for_the_device_update_permit
+    hass_mqtt::number::test::slider_write_clamps_payloads_outside_the_govee_range
+    hass_mqtt::number::test::slider_write_for_an_unknown_device_errors_without_creating_one
+    hass_mqtt::number::test::slider_write_rejects_non_finite_and_non_numeric_payloads
+    hass_mqtt::number::test::slider_write_resolves_the_topic_safe_id_from_the_command_topic
+    hass_mqtt::number::test::slider_write_rounds_fractional_payloads
+    hass_mqtt::number::test::slider_write_stores_the_preference
+    hass_mqtt::number::test::stale_notify_cannot_publish_after_a_newer_slider_echo
+    hass_mqtt::number::test::unset_sensitivity_reset_propagates_publish_failures
+    hass_mqtt::work_mode::test::test_issue100
+    hass_mqtt::work_mode::test::test_work_mode_parser
+    hass_mqtt::work_mode::test::test_work_mode_parser2
+    hass_mqtt::work_mode::test::test_work_mode_parser3
+    hass_mqtt::work_mode::test::test_work_mode_parser4
+    lan_api::tests::absurd_attempts_value_cannot_exhaust_memory
+    lan_api::tests::absurd_cooldown_is_clamped_to_cap
+    lan_api::tests::below_threshold_stays_closed
+    lan_api::tests::config_plumbing_cli_and_env_precedence
+    lan_api::tests::cooldown_below_floor_is_clamped
+    lan_api::tests::cooldown_doubling_caps_at_900s
+    lan_api::tests::cooldown_expiry_grants_exactly_one_probe
+    lan_api::tests::default_schedule_doubles_from_350ms
+    lan_api::tests::distinct_ips_are_independent
+    lan_api::tests::initial_backoff_above_cap_is_clamped
+    lan_api::tests::loopback_retransmit_bound_and_reply
+    lan_api::tests::nth_consecutive_failure_opens
+    lan_api::tests::open_refuses_before_cooldown_expiry
+    lan_api::tests::packet_from_open_device_grants_early_probe
+    lan_api::tests::probe_expiry_covers_large_query_schedules
+    lan_api::tests::probe_failure_reopens_with_doubled_cooldown
+    lan_api::tests::probe_success_closes_and_resets
+    lan_api::tests::scan_reply_does_not_reset_failure_counter
+    lan_api::tests::scan_reply_during_half_open_probe_is_ignored
+    lan_api::tests::schedule_budget_fits_under_confirm_poll_deadline
+    lan_api::tests::schedule_caps_backoff_growth
+    lan_api::tests::schedule_single_attempt
+    lan_api::tests::schedule_zero_attempts_clamps_to_one
+    lan_api::tests::stale_probe_self_heals
+    lan_api::tests::threshold_zero_disables_breaker
+    lan_api::tests::ungated_failures_count_while_open
+    lan_api::tests::zero_backoff_is_floored
+    music::test::hex_colors_parse_with_and_without_hash
+    music::test::profile_lookup_is_per_sku_and_case_insensitive
+    music::test::styles_listing_matches_table
+    platform_api::test::authenticated_http_failure_chains_withhold_body_and_url_secrets
+    platform_api::test::embedded_http_failure_retains_unknown_numeric_status
+    platform_api::test::empty_scene_never_reaches_the_wire
+    platform_api::test::enum_option_values_outside_u32_are_rejected_not_wrapped
+    platform_api::test::enum_repr
+    platform_api::test::from_json_error_withholds_nested_rejected_value
+    platform_api::test::from_json_error_withholds_top_level_rejected_value
+    platform_api::test::get_device_scenes
+    platform_api::test::get_device_state
+    platform_api::test::list_devices
+    platform_api::test::list_devices_2
+    platform_api::test::list_devices_issue4
+    platform_api::test::music_effect_clamps_over_range_sensitivity_on_the_wire
+    platform_api::test::music_effect_sends_the_stored_sensitivity_over_the_wire
+    platform_api::test::music_mode_predicate_and_lookup_agree_on_out_of_range_values
+    platform_api::test::music_payload_carries_the_requested_sensitivity
+    platform_api::test::music_payload_clamps_out_of_range_sensitivity
+    platform_api::test::music_payload_clamps_rgb_to_the_platform_range
+    platform_api::test::music_payload_defaults_match_the_previous_hardcode
+    platform_api::test::music_payload_is_none_for_an_unknown_style
+    platform_api::test::music_payload_is_none_when_the_capability_has_no_music_mode_field
+    platform_api::test::music_payload_omits_rgb_and_keeps_auto_color_by_default
+    platform_api::test::music_payload_uses_a_single_rgb_and_disables_auto_color
+    platform_api::test::plain_set_scene_by_name_still_sends_the_historical_default
+    platform_api::test::request_ids_are_unique_uuids
+    platform_api::test::test_api_base_is_scoped_to_one_client
+    rest_api::test::list_appliances
+    rest_api::test::list_devices
+    sensitive::test::json_error_diagnostic_does_not_quote_the_rejected_value
+    sensitive::test::request_url_omits_credentials_query_and_fragment
+    sensitive::test::sensitive_body_is_withheld_by_default
+    sensitive::test::sensitive_body_opt_in_is_unicode_safe_and_capped
+    service::device::test::active_scene_round_trips
+    service::device::test::iot_mode_carries_over_into_newer_lan_projection
+    service::device::test::iot_status_mode_reaches_device_state
+    service::device::test::lan_carry_over_preserves_iot_mode_observation_time
+    service::device::test::music_sensitivity_defaults_without_asserting_device_state
+    service::device::test::music_sensitivity_round_trips_and_clamps
+    service::device::test::name_compute
+    service::device::test::no_iot_report_means_no_mode_and_no_timestamp
+    service::device::test::platform_projection_preserves_iot_mode_observation_time
+    service::device::test::powered_off_poll_clears_active_scene
+    service::device::test::powered_off_poll_clears_active_scene_even_with_newer_cached_source
+    service::device::test::status_poll_does_not_clear_active_scene
+    service::hass::tests::addon_music_palette_option_is_wired_to_the_env_var_the_bridge_reads
+    service::hass::tests::mqtt_command_routes_register_even_when_music_palette_is_off
+    service::hass::tests::mqtt_dispatch_applies_sensitivity_before_the_next_music_effect
+    service::hass::tests::mqtt_dispatch_keys_align_all_device_topic_layouts
+    service::hass::tests::mqtt_dispatch_queue_keeps_devices_independent
+    service::hass::tests::mqtt_dispatch_queue_survives_a_handler_panic
+    service::hass::tests::mqtt_route_handlers_match_their_patterns
+    service::hass::tests::music_effect_with_rgb_disables_auto_color_on_the_wire
+    service::hass::tests::music_palette_topic_requires_the_env_var_to_be_exactly_true
+    service::hass::tests::music_sensitivity_notify_skips_a_device_that_left_the_state_map
+    service::hass::tests::ordinary_effect_still_ignores_rgb_in_the_same_command
+    service::hass::tests::test_camel_case_ascii
+    service::hass::tests::test_camel_case_chinese_no_panic
+    service::hass::tests::test_camel_case_emoji
+    service::hass::tests::test_camel_case_empty
+    service::hass::tests::test_scene_cycle_case_insensitive
+    service::hass::tests::test_scene_cycle_next_from_middle
+    service::hass::tests::test_scene_cycle_next_wraps_last_to_first
+    service::hass::tests::test_scene_cycle_no_active_scene_next
+    service::hass::tests::test_scene_cycle_no_active_scene_prev
+    service::hass::tests::test_scene_cycle_prev_from_middle
+    service::hass::tests::test_scene_cycle_prev_wraps_first_to_last
+    service::hass::tests::test_scene_cycle_single_scene
+    service::hass::tests::test_scene_cycle_unknown_scene_treated_as_no_active
+    service::http::test_build_router
+    service::iot::test::missing_mode_parses_as_none
+    service::iot::test::mode_less_packet_keeps_mode_observation_time_pinned
+    service::iot::test::parses_top_level_mode_from_status_push
+    service::quirks::test::h60b0_is_a_lan_capable_floor_lamp
+    service::state::tests::device_set_scene_sends_the_freshly_stored_sensitivity
+    service::state::tests::device_set_scene_uses_snapshot_sensitivity_if_device_left_state
+    service::state::tests::local_device_updates_share_the_control_semaphore
+    service::state::tests::test_clear_scene_catalogs_drops_cached_catalog
+    service::state::tests::test_enrich_scene_names_uses_platform_spine_with_undoc_media
+    service::state::tests::test_scene_catalog_category_serde_round_trip
+    service::state::tests::test_scene_catalog_entry_hint_empty_string_convention
+    service::state::tests::test_scene_catalog_entry_hint_serde_round_trip
+    service::state::tests::test_scene_catalog_reads_canonical_cache_for_stale_clone
+    service::state::tests::test_scene_catalog_refreshes_when_platform_metadata_arrives
+    service::state::tests::test_sort_and_dedup_scenes
+    service::state::tests::test_sort_and_dedup_scenes_case_insensitive_order
+    service::state::tests::test_sort_and_dedup_scenes_empty
+    service::state::tests::test_state_device_mut_creates_device
+    service::state::tests::test_state_devices_empty_by_default
+    service::state::tests::test_state_hass_disco_prefix_default_empty
+    service::state::tests::test_state_hass_disco_prefix_round_trip
+    service::state::tests::test_state_temperature_scale_default
+    service::state::tests::test_state_temperature_scale_round_trip
+    temperature::test::display
+    temperature::test::parsing
+    temperature::test::value_conversion
+    undoc_api::test::api_client_normalizes_2fa_code_with_whitespace
+    undoc_api::test::api_client_threads_2fa_code_into_login_body
+    undoc_api::test::api_client_with_no_2fa_code_omits_code_field
+    undoc_api::test::build_2fa_error_454_messages_differ_by_code_state
+    undoc_api::test::build_2fa_error_454_no_code_confirms_email_request
+    undoc_api::test::build_2fa_error_454_with_code_mentions_expired
+    undoc_api::test::build_2fa_error_455_mentions_invalid_or_expired
+    undoc_api::test::build_2fa_error_does_not_leak_email_or_response_body
+    undoc_api::test::build_2fa_error_results_downcast_to_no_cache_error_via_anyhow
+    undoc_api::test::build_2fa_error_returns_none_for_success_status
+    undoc_api::test::build_2fa_error_returns_none_for_unrelated_status
+    undoc_api::test::classify_200
+    undoc_api::test::classify_454
+    undoc_api::test::classify_455
+    undoc_api::test::classify_missing_status_returns_none
+    undoc_api::test::classify_non_json_returns_none
+    undoc_api::test::code_is_cleared_after_successful_login_impl
+    undoc_api::test::configured_code_paths_do_not_request_another_code
+    undoc_api::test::embedded_json_error_withholds_rejected_string_value
+    undoc_api::test::failed_verification_request_still_reports_actionable_2fa_guidance
+    undoc_api::test::get_device_scenes
+    undoc_api::test::get_one_click
+    undoc_api::test::http_400_classifies_as_plain_error
+    undoc_api::test::http_403_classifies_as_plain_error_for_short_negative_caching
+    undoc_api::test::http_499_classifies_as_plain_error_just_below_5xx_boundary
+    undoc_api::test::http_500_classifies_as_no_cache_error
+    undoc_api::test::http_503_classifies_as_no_cache_error
+    undoc_api::test::http_599_classifies_as_no_cache_error
+    undoc_api::test::http_error_message_propagates_through_classify
+    undoc_api::test::http_failure_message_withholds_the_response_body
+    undoc_api::test::issue36
+    undoc_api::test::issue_14
+    undoc_api::test::issue_21
+    undoc_api::test::light_effect_library
+    undoc_api::test::login_body_cap_covers_declared_and_accumulated_lengths
+    undoc_api::test::login_body_includes_code_when_set
+    undoc_api::test::login_body_omits_code_when_explicit_none
+    undoc_api::test::login_body_omits_code_when_unset
+    undoc_api::test::login_http_error_withholds_echoed_credentials_by_default
+    undoc_api::test::login_http_redaction_preserves_transient_error_classification
+    undoc_api::test::login_parse_error_withholds_client_tokens_by_default
+    undoc_api::test::login_reader_accepts_chunked_body_at_limit
+    undoc_api::test::login_reader_rejects_oversized_chunked_5xx_as_no_cache_error
+    undoc_api::test::login_reader_rejects_oversized_declared_5xx_as_no_cache_error
+    undoc_api::test::login_response_still_parses_when_valid
+    undoc_api::test::no_cache_error_downcasts_via_anyhow
+    undoc_api::test::normalize_passes_none_through
+    undoc_api::test::normalize_strips_surrounding_whitespace
+    undoc_api::test::normalize_strips_trailing_newline_from_email_paste
+    undoc_api::test::normalize_treats_empty_string_as_none
+    undoc_api::test::normalize_treats_whitespace_only_as_none
+    undoc_api::test::opt_arg_or_env_returns_field_when_set
+    undoc_api::test::opt_arg_or_env_returns_none_when_neither_set
+    undoc_api::test::oversized_response_bodies_are_truncated_before_logging
+    undoc_api::test::plain_anyhow_error_does_not_downcast_to_no_cache_error
+    undoc_api::test::raw_request_error_still_yields_the_2fa_message
+    undoc_api::test::rejected_configured_code_allows_one_fresh_request_for_454_and_455
+    undoc_api::test::repeated_454_retries_request_one_code_per_account
+    undoc_api::test::statuses_other_than_454_do_not_request_a_code
+    undoc_api::test::unknown_delivery_outcome_claims_the_suppression_window
+    undoc_api::test::unrelated_no_cache_error_is_not_classified_as_two_factor
+    undoc_api::test::verification_body_cap_counts_accumulated_bytes
+    undoc_api::test::verification_body_is_withheld_from_logged_errors_by_default
+    undoc_api::test::verification_cache_key_ignores_email_case
+    undoc_api::test::verification_request_has_expected_endpoint_client_id_and_body
+    undoc_api::test::verification_response_accepts_api_status_200
+    undoc_api::test::verification_response_rejects_missing_or_non_numeric_api_status
+    undoc_api::test::verification_response_rejects_non_200_api_status
+    undoc_api::test::with_code_empty_string_does_not_set_code_field
+    undoc_api::test::with_code_normalizes_input
+
+test result: ok. 245 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.84s
+
+=== live-2fa harness ===
+......................
+----------------------------------------------------------------------
+Ran 22 tests in 0.024s
+
+OK
+=== fmt ===
+Warning: can't set `imports_granularity = Module`, unstable features are only available in nightly channel.
+Warning: can't set `imports_granularity = Module`, unstable features are only available in nightly channel.
+
+All prescribed gates passed.

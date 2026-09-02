@@ -1,0 +1,33 @@
+# Mutation proof (RED): wrap set-music-palette registration in
+#   if music_palette_enabled(std::env::var(GOVEE_MUSIC_PALETTE).ok().as_deref())
+# Expected: mqtt_command_routes_register_even_when_music_palette_is_off fails
+# Pairing test stays green: the table still lists the route; only bind skips it.
+
+   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/nairobi-v2)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.06s
+     Running unittests src/main.rs (target/debug/deps/govee-9d5efbfc1c54196e)
+
+running 1 test
+test service::hass::tests::mqtt_command_routes_register_even_when_music_palette_is_off ... FAILED
+
+successes:
+
+successes:
+
+failures:
+
+---- service::hass::tests::mqtt_command_routes_register_even_when_music_palette_is_off stdout ----
+
+thread 'service::hass::tests::mqtt_command_routes_register_even_when_music_palette_is_off' (30313099) panicked at src/service/hass.rs:1394:9:
+assertion `left == right` failed: every command route must register even when GOVEE_MUSIC_PALETTE is off; gate the handler, not the subscription
+  left: ["homeassistant/status", "gv2mqtt/light/:id/command", "gv2mqtt/light/:id/command/:segment", "gv2mqtt/switch/:id/command/:instance", "gv2mqtt/oneclick", "gv2mqtt/purge-caches", "gv2mqtt/:id/request-platform-data", "gv2mqtt/:id/scene-next", "gv2mqtt/:id/scene-prev", "gv2mqtt/number/:id/command/:mode_name/:work_mode", "gv2mqtt/humidifier/:id/set-mode", "gv2mqtt/:id/set-work-mode", "gv2mqtt/:id/set-music-sensitivity", "gv2mqtt/:id/clear-music-sensitivity", "gv2mqtt/humidifier/:id/set-target", "gv2mqtt/:id/set-temperature/:instance/:units", "gv2mqtt/:id/set-mode-scene"]
+ right: ["homeassistant/status", "gv2mqtt/light/:id/command", "gv2mqtt/light/:id/command/:segment", "gv2mqtt/switch/:id/command/:instance", "gv2mqtt/oneclick", "gv2mqtt/purge-caches", "gv2mqtt/:id/request-platform-data", "gv2mqtt/:id/scene-next", "gv2mqtt/:id/scene-prev", "gv2mqtt/number/:id/command/:mode_name/:work_mode", "gv2mqtt/humidifier/:id/set-mode", "gv2mqtt/:id/set-work-mode", "gv2mqtt/:id/set-music-sensitivity", "gv2mqtt/:id/clear-music-sensitivity", "gv2mqtt/humidifier/:id/set-target", "gv2mqtt/:id/set-temperature/:instance/:units", "gv2mqtt/:id/set-mode-scene", "gv2mqtt/:id/set-music-palette"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    service::hass::tests::mqtt_command_routes_register_even_when_music_palette_is_off
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 243 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--bin govee`

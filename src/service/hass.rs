@@ -14,7 +14,7 @@ use crate::service::state::StateHandle;
 use crate::temperature::TemperatureScale;
 use anyhow::Context;
 use async_channel::Receiver;
-use mosquitto_rs::router::{MqttRouter, Params, Payload, State};
+use mosquitto_rs::router::{MakeDispatcher, MqttRouter, Params, Payload, State};
 use mosquitto_rs::{Client, Event, QoS};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -25,6 +25,120 @@ use std::time::Duration;
 
 const HASS_REGISTER_DELAY: tokio::time::Duration = tokio::time::Duration::from_secs(15);
 const MUSIC_PALETTE_ENV_VAR: &str = "GOVEE_MUSIC_PALETTE";
+
+/// Placeholder pattern for the Home Assistant birth/status topic.
+/// Resolved at registration time with the configured discovery prefix.
+const HASS_STATUS_ROUTE_PATTERN: &str = "{hass_disco_prefix}/status";
+
+/// Resolve a table pattern to the topic template passed to `MqttRouter::route`.
+fn resolve_mqtt_route_pattern(pattern: &str, disco_prefix: &str) -> String {
+    if pattern == HASS_STATUS_ROUTE_PATTERN {
+        format!("{disco_prefix}/status")
+    } else {
+        pattern.to_string()
+    }
+}
+
+/// Single source of truth for MQTT route → handler bindings.
+///
+/// `$m` receives the full `pattern => handler, ...` list so registration,
+/// `MQTT_ROUTE_PAIRINGS`, and the recorder test expand from the same tokens.
+/// Opt-in features (music palette) gate handler behaviour, not this table.
+macro_rules! mqtt_routes {
+    ($m:ident) => {
+        $m! {
+            HASS_STATUS_ROUTE_PATTERN => mqtt_homeassitant_status,
+            "gv2mqtt/light/:id/command" => mqtt_light_command,
+            "gv2mqtt/light/:id/command/:segment" => mqtt_light_segment_command,
+            "gv2mqtt/switch/:id/command/:instance" => mqtt_switch_command,
+            "gv2mqtt/oneclick" => mqtt_oneclick,
+            "gv2mqtt/purge-caches" => mqtt_purge_caches,
+            "gv2mqtt/:id/request-platform-data" => mqtt_request_platform_data,
+            "gv2mqtt/:id/scene-next" => mqtt_scene_next,
+            "gv2mqtt/:id/scene-prev" => mqtt_scene_prev,
+            "gv2mqtt/number/:id/command/:mode_name/:work_mode" => mqtt_number_command,
+            "gv2mqtt/humidifier/:id/set-mode" => mqtt_device_set_work_mode,
+            "gv2mqtt/:id/set-work-mode" => mqtt_device_set_work_mode,
+            MUSIC_SENSITIVITY_COMMAND_ROUTE =>
+                crate::hass_mqtt::number::mqtt_music_sensitivity_command,
+            MUSIC_SENSITIVITY_CLEAR_ROUTE =>
+                crate::hass_mqtt::number::mqtt_clear_music_sensitivity_command,
+            "gv2mqtt/humidifier/:id/set-target" => mqtt_humidifier_set_target,
+            "gv2mqtt/:id/set-temperature/:instance/:units" => mqtt_set_temperature,
+            "gv2mqtt/:id/set-mode-scene" => mqtt_set_mode_scene,
+            "gv2mqtt/:id/set-music-palette" => mqtt_set_music_palette,
+        }
+    };
+}
+
+#[cfg(test)]
+macro_rules! emit_mqtt_route_pairings {
+    ($($pattern:expr => $handler:path),+ $(,)?) => {
+        /// `(pattern, handler_label)` for every route `rebuild_router` registers.
+        /// Built from the same `mqtt_routes!` table as the live `.route()` calls.
+        ///
+        /// Labels are `stringify!(handler)` with spaces removed so `a::b` and
+        /// `a :: b` compare equal. The final path segment is the stable name
+        /// asserted by `mqtt_route_handlers_match_their_patterns`.
+        pub(crate) const MQTT_ROUTE_PAIRINGS: &[(&str, &str)] = &[
+            $(($pattern, stringify!($handler)),)+
+        ];
+    };
+}
+#[cfg(test)]
+mqtt_routes!(emit_mqtt_route_pairings);
+
+/// Production registers on a live `MqttRouter`; tests record patterns without
+/// a broker. Both go through `bind_mqtt_command_routes`, so wrapping one
+/// registration in a runtime `if` shows up as a missing recorded pattern.
+enum MqttRouteBind<'a> {
+    Live(&'a mut MqttRouter<StateHandle>),
+    #[cfg(test)]
+    Record(&'a mut Vec<String>),
+}
+
+async fn bind_one_mqtt_route<T, F>(
+    bind: &mut MqttRouteBind<'_>,
+    path: String,
+    handler: F,
+) -> anyhow::Result<()>
+where
+    F: MakeDispatcher<T, StateHandle>,
+{
+    match bind {
+        MqttRouteBind::Live(router) => {
+            router.route(path, handler).await?;
+            Ok(())
+        }
+        #[cfg(test)]
+        MqttRouteBind::Record(patterns) => {
+            let _ = handler;
+            patterns.push(path);
+            Ok(())
+        }
+    }
+}
+
+/// Register every command topic. No per-route conditions live here.
+async fn bind_mqtt_command_routes(
+    bind: &mut MqttRouteBind<'_>,
+    disco_prefix: &str,
+) -> anyhow::Result<()> {
+    macro_rules! register_mqtt_routes {
+        ($($pattern:expr => $handler:path),+ $(,)?) => {
+            $(
+                bind_one_mqtt_route(
+                    bind,
+                    resolve_mqtt_route_pattern($pattern, disco_prefix),
+                    $handler,
+                )
+                .await?;
+            )+
+        };
+    }
+    mqtt_routes!(register_mqtt_routes);
+    Ok(())
+}
 
 type MqttDispatchTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
@@ -808,80 +922,7 @@ async fn run_mqtt_loop(
     ) -> anyhow::Result<Arc<MqttRouter<StateHandle>>> {
         let disco_prefix = state.get_hass_disco_prefix().await;
         let mut router: MqttRouter<StateHandle> = MqttRouter::new(client.clone());
-
-        router
-            .route(format!("{disco_prefix}/status"), mqtt_homeassitant_status)
-            .await?;
-
-        router
-            .route("gv2mqtt/light/:id/command", mqtt_light_command)
-            .await?;
-        router
-            .route(
-                "gv2mqtt/light/:id/command/:segment",
-                mqtt_light_segment_command,
-            )
-            .await?;
-        router
-            .route("gv2mqtt/switch/:id/command/:instance", mqtt_switch_command)
-            .await?;
-
-        router.route(oneclick_topic(), mqtt_oneclick).await?;
-        router.route(purge_cache_topic(), mqtt_purge_caches).await?;
-        router
-            .route(
-                "gv2mqtt/:id/request-platform-data",
-                mqtt_request_platform_data,
-            )
-            .await?;
-        router
-            .route("gv2mqtt/:id/scene-next", mqtt_scene_next)
-            .await?;
-        router
-            .route("gv2mqtt/:id/scene-prev", mqtt_scene_prev)
-            .await?;
-        router
-            .route(
-                "gv2mqtt/number/:id/command/:mode_name/:work_mode",
-                mqtt_number_command,
-            )
-            .await?;
-        router
-            .route("gv2mqtt/humidifier/:id/set-mode", mqtt_device_set_work_mode)
-            .await?;
-        router
-            .route("gv2mqtt/:id/set-work-mode", mqtt_device_set_work_mode)
-            .await?;
-        router
-            .route(
-                MUSIC_SENSITIVITY_COMMAND_ROUTE,
-                crate::hass_mqtt::number::mqtt_music_sensitivity_command,
-            )
-            .await?;
-        router
-            .route(
-                MUSIC_SENSITIVITY_CLEAR_ROUTE,
-                crate::hass_mqtt::number::mqtt_clear_music_sensitivity_command,
-            )
-            .await?;
-        router
-            .route(
-                "gv2mqtt/humidifier/:id/set-target",
-                mqtt_humidifier_set_target,
-            )
-            .await?;
-        router
-            .route(
-                "gv2mqtt/:id/set-temperature/:instance/:units",
-                mqtt_set_temperature,
-            )
-            .await?;
-        router
-            .route("gv2mqtt/:id/set-mode-scene", mqtt_set_mode_scene)
-            .await?;
-        router
-            .route("gv2mqtt/:id/set-music-palette", mqtt_set_music_palette)
-            .await?;
+        bind_mqtt_command_routes(&mut MqttRouteBind::Live(&mut router), &disco_prefix).await?;
 
         tokio::time::sleep(HASS_REGISTER_DELAY).await;
         state
@@ -1200,6 +1241,159 @@ mod tests {
         }
         assert!(!music_palette_enabled(None));
         assert!(music_palette_enabled(Some("true")));
+    }
+
+    fn mqtt_handler_basename(stringified: &str) -> &str {
+        stringified
+            .split("::")
+            .map(str::trim)
+            .last()
+            .unwrap_or(stringified)
+    }
+
+    /// Independent of `mqtt_routes!`: documents which handler each pattern must
+    /// bind. Swapping two same-arity handlers in the table (e.g. scene-next /
+    /// scene-prev) changes `MQTT_ROUTE_PAIRINGS` without touching this list, so
+    /// the assertion fails. Updating both deliberately is the only silent path,
+    /// which is an intentional binding change rather than an accidental swap.
+    #[test]
+    fn mqtt_route_handlers_match_their_patterns() {
+        const EXPECTED_PAIRINGS: &[(&str, &str)] = &[
+            (HASS_STATUS_ROUTE_PATTERN, "mqtt_homeassitant_status"),
+            ("gv2mqtt/light/:id/command", "mqtt_light_command"),
+            (
+                "gv2mqtt/light/:id/command/:segment",
+                "mqtt_light_segment_command",
+            ),
+            (
+                "gv2mqtt/switch/:id/command/:instance",
+                "mqtt_switch_command",
+            ),
+            ("gv2mqtt/oneclick", "mqtt_oneclick"),
+            ("gv2mqtt/purge-caches", "mqtt_purge_caches"),
+            (
+                "gv2mqtt/:id/request-platform-data",
+                "mqtt_request_platform_data",
+            ),
+            ("gv2mqtt/:id/scene-next", "mqtt_scene_next"),
+            ("gv2mqtt/:id/scene-prev", "mqtt_scene_prev"),
+            (
+                "gv2mqtt/number/:id/command/:mode_name/:work_mode",
+                "mqtt_number_command",
+            ),
+            (
+                "gv2mqtt/humidifier/:id/set-mode",
+                "mqtt_device_set_work_mode",
+            ),
+            ("gv2mqtt/:id/set-work-mode", "mqtt_device_set_work_mode"),
+            (
+                MUSIC_SENSITIVITY_COMMAND_ROUTE,
+                "mqtt_music_sensitivity_command",
+            ),
+            (
+                MUSIC_SENSITIVITY_CLEAR_ROUTE,
+                "mqtt_clear_music_sensitivity_command",
+            ),
+            (
+                "gv2mqtt/humidifier/:id/set-target",
+                "mqtt_humidifier_set_target",
+            ),
+            (
+                "gv2mqtt/:id/set-temperature/:instance/:units",
+                "mqtt_set_temperature",
+            ),
+            ("gv2mqtt/:id/set-mode-scene", "mqtt_set_mode_scene"),
+            ("gv2mqtt/:id/set-music-palette", "mqtt_set_music_palette"),
+        ];
+
+        assert_eq!(
+            MQTT_ROUTE_PAIRINGS.len(),
+            EXPECTED_PAIRINGS.len(),
+            "route table and expected pairings must stay the same length"
+        );
+
+        for (idx, ((actual_pattern, actual_handler), (expected_pattern, expected_handler))) in
+            MQTT_ROUTE_PAIRINGS
+                .iter()
+                .zip(EXPECTED_PAIRINGS.iter())
+                .enumerate()
+        {
+            assert_eq!(
+                *actual_pattern, *expected_pattern,
+                "pattern mismatch at index {idx}"
+            );
+            assert_eq!(
+                mqtt_handler_basename(actual_handler),
+                *expected_handler,
+                "handler mismatch for pattern {expected_pattern} at index {idx}"
+            );
+        }
+
+        // Topic helpers used elsewhere must still name the same static routes.
+        assert_eq!(oneclick_topic(), "gv2mqtt/oneclick");
+        assert_eq!(purge_cache_topic(), "gv2mqtt/purge-caches");
+        assert_eq!(
+            resolve_mqtt_route_pattern(HASS_STATUS_ROUTE_PATTERN, "homeassistant"),
+            "homeassistant/status"
+        );
+    }
+
+    /// Wrapping a `.route()` (or `bind_one_mqtt_route`) in a runtime `if`
+    /// compiles and leaves Home Assistant rendering a control that publishes
+    /// into the void. `GOVEE_MUSIC_PALETTE` is the legitimate opt-in, and it
+    /// must stay in `mqtt_set_music_palette`, not at the registration site.
+    ///
+    /// Independent of `MQTT_ROUTE_PAIRINGS`: this invokes the same bind path
+    /// `rebuild_router` uses and records the patterns that actually register.
+    #[tokio::test]
+    async fn mqtt_command_routes_register_even_when_music_palette_is_off() {
+        let previous = std::env::var(MUSIC_PALETTE_ENV_VAR).ok();
+        std::env::set_var(MUSIC_PALETTE_ENV_VAR, "false");
+
+        let mut recorded = Vec::new();
+        let bind_result =
+            bind_mqtt_command_routes(&mut MqttRouteBind::Record(&mut recorded), "homeassistant")
+                .await;
+        let palette_off =
+            !music_palette_enabled(std::env::var(MUSIC_PALETTE_ENV_VAR).ok().as_deref());
+
+        match previous {
+            Some(value) => std::env::set_var(MUSIC_PALETTE_ENV_VAR, value),
+            None => std::env::remove_var(MUSIC_PALETTE_ENV_VAR),
+        }
+
+        bind_result.expect("recording registration does not need a broker");
+        assert!(
+            palette_off,
+            "{MUSIC_PALETTE_ENV_VAR}=false must keep the handler opt-in off"
+        );
+
+        const EXPECTED_REGISTERED_PATTERNS: &[&str] = &[
+            "homeassistant/status",
+            "gv2mqtt/light/:id/command",
+            "gv2mqtt/light/:id/command/:segment",
+            "gv2mqtt/switch/:id/command/:instance",
+            "gv2mqtt/oneclick",
+            "gv2mqtt/purge-caches",
+            "gv2mqtt/:id/request-platform-data",
+            "gv2mqtt/:id/scene-next",
+            "gv2mqtt/:id/scene-prev",
+            "gv2mqtt/number/:id/command/:mode_name/:work_mode",
+            "gv2mqtt/humidifier/:id/set-mode",
+            "gv2mqtt/:id/set-work-mode",
+            MUSIC_SENSITIVITY_COMMAND_ROUTE,
+            MUSIC_SENSITIVITY_CLEAR_ROUTE,
+            "gv2mqtt/humidifier/:id/set-target",
+            "gv2mqtt/:id/set-temperature/:instance/:units",
+            "gv2mqtt/:id/set-mode-scene",
+            "gv2mqtt/:id/set-music-palette",
+        ];
+
+        assert_eq!(
+            recorded, EXPECTED_REGISTERED_PATTERNS,
+            "every command route must register even when {MUSIC_PALETTE_ENV_VAR} is off; \
+             gate the handler, not the subscription"
+        );
     }
 
     #[tokio::test]
