@@ -202,7 +202,8 @@ expected list.
 **Cons:** Not reachable from a plain unit test against a live `MqttRouter` (subscribe needs a
 broker). The recorder bind path is the substitute.
 **Context:** Pre-existing — all 16 routes on `origin/main` have the same exposure; the music
-sensitivity branch adds the 17th. Closed by `feat/conditional-mqtt-route-guard`.
+sensitivity branch adds the 17th and 18th (`set-music-sensitivity` and
+`clear-music-sensitivity`). Closed by `feat/conditional-mqtt-route-guard`.
 **Effort:** Medium.
 
 ## `GOVEE_DISABLE_EFFECTS` leaves a live but useless sensitivity slider

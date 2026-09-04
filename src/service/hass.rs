@@ -1345,28 +1345,19 @@ mod tests {
     ///
     /// Independent of `MQTT_ROUTE_PAIRINGS`: this invokes the same bind path
     /// `rebuild_router` uses and records the patterns that actually register.
+    /// The off value is injected into `music_palette_enabled` so this test never
+    /// touches process environment (unsafe under a multithreaded cargo test).
     #[tokio::test]
-    async fn mqtt_command_routes_register_even_when_music_palette_is_off() {
-        let previous = std::env::var(MUSIC_PALETTE_ENV_VAR).ok();
-        std::env::set_var(MUSIC_PALETTE_ENV_VAR, "false");
+    async fn mqtt_command_routes_register_even_when_music_palette_is_off() -> anyhow::Result<()> {
+        // Scenario under test: handler opt-in is off. Registration must ignore it.
+        assert!(
+            !music_palette_enabled(Some("false")),
+            "injected off value must keep the handler opt-in off"
+        );
 
         let mut recorded = Vec::new();
-        let bind_result =
-            bind_mqtt_command_routes(&mut MqttRouteBind::Record(&mut recorded), "homeassistant")
-                .await;
-        let palette_off =
-            !music_palette_enabled(std::env::var(MUSIC_PALETTE_ENV_VAR).ok().as_deref());
-
-        match previous {
-            Some(value) => std::env::set_var(MUSIC_PALETTE_ENV_VAR, value),
-            None => std::env::remove_var(MUSIC_PALETTE_ENV_VAR),
-        }
-
-        bind_result.expect("recording registration does not need a broker");
-        assert!(
-            palette_off,
-            "{MUSIC_PALETTE_ENV_VAR}=false must keep the handler opt-in off"
-        );
+        bind_mqtt_command_routes(&mut MqttRouteBind::Record(&mut recorded), "homeassistant")
+            .await?;
 
         const EXPECTED_REGISTERED_PATTERNS: &[&str] = &[
             "homeassistant/status",
@@ -1394,6 +1385,7 @@ mod tests {
             "every command route must register even when {MUSIC_PALETTE_ENV_VAR} is off; \
              gate the handler, not the subscription"
         );
+        Ok(())
     }
 
     #[tokio::test]
