@@ -16,7 +16,7 @@ use serde_json::json;
 pub struct SwitchConfig {
     #[serde(flatten)]
     pub base: EntityConfig,
-    pub command_topic: String,
+    pub command_topic: crate::hass_mqtt::command_routes::CommandTopic,
     pub state_topic: String,
 }
 
@@ -29,7 +29,7 @@ impl SwitchConfig {
         let command_topic = instantiate_route(
             SWITCH_COMMAND_ROUTE,
             &[("id", &id), ("instance", &instance.instance)],
-        );
+        )?;
         let state_topic = switch_instance_state_topic(device, &instance.instance);
         let availability_topic = availability_topic();
         let unique_id = format!("gv2mqtt-{id}-{inst}", inst = instance.instance);
@@ -139,5 +139,70 @@ impl EntityInstance for CapabilitySwitch {
             instance = self.instance_name
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::platform_api::DeviceCapabilityKind;
+
+    // H9999 is deliberately absent from the quirk table (see
+    // hass_mqtt::enumerator's tests), so this fixture exercises only the
+    // route-substitution logic, not quirk-derived behavior.
+    const DEVICE_ID: &str = "AA:BB:CC:DD:EE:FF:11:22";
+    const SKU: &str = "H9999";
+
+    fn test_device() -> ServiceDevice {
+        ServiceDevice::new(SKU, DEVICE_ID)
+    }
+
+    fn power_switch_capability() -> DeviceCapability {
+        DeviceCapability {
+            kind: DeviceCapabilityKind::Toggle,
+            instance: "powerSwitch".to_string(),
+            parameters: None,
+            alarm_type: None,
+            event_state: None,
+        }
+    }
+
+    /// `hass.rs` only subscribes to `SWITCH_COMMAND_ROUTE`. If the segment
+    /// order or param names here ever drift from that registered pattern,
+    /// Home Assistant renders a working-looking switch that writes to a
+    /// topic the bridge's router never reads.
+    #[tokio::test]
+    async fn for_device_command_topic_matches_the_switch_route() {
+        let device = test_device();
+        let instance = power_switch_capability();
+        let switch = SwitchConfig::for_device(&device, &instance)
+            .await
+            .expect("a well-formed capability must build a switch");
+
+        let id = topic_safe_id(&device);
+        let expected = format!(
+            "gv2mqtt/switch/{id}/command/{inst}",
+            inst = instance.instance
+        );
+        assert_eq!(switch.command_topic.as_str(), expected);
+    }
+
+    /// A malformed Platform API response (empty instance name) must fail
+    /// loud through `instantiate_route`'s `ensure!` rather than silently
+    /// advertise `.../command/` with a missing trailing segment that no
+    /// registered route pattern matches.
+    #[tokio::test]
+    async fn for_device_rejects_an_empty_instance_name() {
+        let device = test_device();
+        let mut instance = power_switch_capability();
+        instance.instance = String::new();
+
+        let error = SwitchConfig::for_device(&device, &instance)
+            .await
+            .expect_err("an empty instance name must not be advertised");
+        assert!(
+            error.to_string().contains("empty parameter 'instance'"),
+            "unexpected error: {error:#}"
+        );
     }
 }

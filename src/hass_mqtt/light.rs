@@ -21,7 +21,7 @@ pub struct LightConfig {
     pub base: EntityConfig,
     pub schema: String,
 
-    pub command_topic: String,
+    pub command_topic: crate::hass_mqtt::command_routes::CommandTopic,
     /// The docs say that this is optional, but hass errors out if
     /// it is not passed
     pub state_topic: String,
@@ -141,13 +141,13 @@ impl DeviceLight {
 
         let id = topic_safe_id(device);
         let command_topic = match segment {
-            None => instantiate_route(LIGHT_COMMAND_ROUTE, &[("id", &id)]),
+            None => instantiate_route(LIGHT_COMMAND_ROUTE, &[("id", &id)])?,
             Some(seg) => {
                 let seg = seg.to_string();
                 instantiate_route(
                     LIGHT_SEGMENT_COMMAND_ROUTE,
                     &[("id", &id), ("segment", &seg)],
-                )
+                )?
             }
         };
 
@@ -285,7 +285,8 @@ mod test {
                 icon: None,
             },
             schema: "json".to_string(),
-            command_topic: "govee/cmd".to_string(),
+            command_topic: instantiate_route(LIGHT_COMMAND_ROUTE, &[("id", "test")])
+                .expect("registered test route"),
             state_topic: "govee/state".to_string(),
             optimistic: false,
             supported_color_modes: modes,
@@ -325,6 +326,50 @@ mod test {
         assert_eq!(
             json.get("supported_color_modes"),
             Some(&serde_json::json!(["rgb", "color_temp"])),
+        );
+    }
+
+    // H9999 is deliberately absent from the quirk table (see
+    // hass_mqtt::enumerator's tests), so this fixture exercises only the
+    // route-substitution logic, not quirk-derived behavior.
+    const DEVICE_ID: &str = "AA:BB:CC:DD:EE:FF:11:22";
+    const SKU: &str = "H9999";
+
+    /// `hass.rs` only subscribes to `LIGHT_COMMAND_ROUTE` and
+    /// `LIGHT_SEGMENT_COMMAND_ROUTE`. Unlike `light_config_with_color_modes`
+    /// above (which hand-builds a `LightConfig` with a throwaway
+    /// `CommandTopic`), this drives the real `DeviceLight::for_device`
+    /// constructor and its `match segment { .. }` branch, so a swapped route
+    /// or param name for either the whole-light or per-segment case would
+    /// fail here.
+    #[tokio::test]
+    async fn for_device_command_topics_match_their_registered_routes() {
+        let device = ServiceDevice::new(SKU, DEVICE_ID);
+        let state: StateHandle = std::sync::Arc::new(crate::service::state::State::new());
+        {
+            let mut canonical = state.device_mut(&device.sku, &device.id).await;
+            canonical.set_scene_catalog(crate::service::state::SceneCatalogCache {
+                platform_signature: None,
+                categories: vec![],
+            });
+        }
+
+        let id = topic_safe_id(&device);
+
+        let whole = DeviceLight::for_device(&device, &state, None)
+            .await
+            .expect("a plain light must build");
+        assert_eq!(
+            whole.light.command_topic.as_str(),
+            format!("gv2mqtt/light/{id}/command")
+        );
+
+        let segment = DeviceLight::for_device(&device, &state, Some(3))
+            .await
+            .expect("a segmented light must build");
+        assert_eq!(
+            segment.light.command_topic.as_str(),
+            format!("gv2mqtt/light/{id}/command/3")
         );
     }
 }
