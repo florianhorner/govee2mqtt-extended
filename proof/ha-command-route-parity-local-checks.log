@@ -1,58 +1,32 @@
-== HA command-route parity — local checks 2026-09-02T22:44:16Z ==
+== HA command-route parity — local checks 2026-09-05T00:36:41Z ==
 base: origin/main
 host: Darwin 25.5.0
 rustc: rustc 1.98.0 (88d9e12ae 2026-08-18)
 Govee device hardware: NOT TESTED
 Govee cloud API: NOT REACHED (source-level + in-process tests only)
 
-## cargo +stable build --all
-   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/warsaw-v3)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.28s
+## cargo build --all
+   Compiling govee v0.1.0 (workspace root)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.33s
 BUILD: OK
 
-## cargo +stable test --all -- --show-output
-    undoc_api::test::oversized_response_bodies_are_truncated_before_logging
-    undoc_api::test::plain_anyhow_error_does_not_downcast_to_no_cache_error
-    undoc_api::test::raw_request_error_still_yields_the_2fa_message
-    undoc_api::test::rejected_configured_code_allows_one_fresh_request_for_454_and_455
-    undoc_api::test::repeated_454_retries_request_one_code_per_account
-    undoc_api::test::statuses_other_than_454_do_not_request_a_code
-    undoc_api::test::unknown_delivery_outcome_claims_the_suppression_window
-    undoc_api::test::unrelated_no_cache_error_is_not_classified_as_two_factor
-    undoc_api::test::verification_body_cap_counts_accumulated_bytes
-    undoc_api::test::verification_body_is_withheld_from_logged_errors_by_default
-    undoc_api::test::verification_cache_key_ignores_email_case
-    undoc_api::test::verification_request_has_expected_endpoint_client_id_and_body
-    undoc_api::test::verification_response_accepts_api_status_200
-    undoc_api::test::verification_response_rejects_missing_or_non_numeric_api_status
-    undoc_api::test::verification_response_rejects_non_200_api_status
-    undoc_api::test::with_code_empty_string_does_not_set_code_field
-    undoc_api::test::with_code_normalizes_input
-
-test result: ok. 251 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.84s
-
-
-## cargo +stable test --all --all-features -- --show-output
-    undoc_api::test::verification_response_accepts_api_status_200
-    undoc_api::test::verification_response_rejects_missing_or_non_numeric_api_status
-    undoc_api::test::verification_response_rejects_non_200_api_status
-    undoc_api::test::with_code_empty_string_does_not_set_code_field
-    undoc_api::test::with_code_normalizes_input
-
-test result: ok. 252 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.83s
-
-
-## cargo +stable clippy --all -- -D warnings
-   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/warsaw-v3)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.36s
+## cargo clippy --all -- -D warnings
+   Compiling govee v0.1.0 (workspace root)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.01s
 CLIPPY: OK
 
-## cargo +stable clippy --all --all-features -- -D warnings
-   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/warsaw-v3)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.08s
+## cargo clippy --all --all-features -- -D warnings
+   Compiling govee v0.1.0 (workspace root)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.03s
 CLIPPY ALL-FEATURES: OK
 
-## cargo +stable fmt --all -- --check
+## cargo test --all -- --show-output
+test result: ok. 271 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.85s
+
+## cargo test --all --all-features -- --show-output
+test result: ok. 272 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.86s
+
+## cargo fmt --all -- --check
 Warning: can't set `imports_granularity = Module`, unstable features are only available in nightly channel.
 Warning: can't set `imports_granularity = Module`, unstable features are only available in nightly channel.
 FMT: OK
@@ -64,9 +38,73 @@ Ran 22 tests in 0.023s
 
 OK
 
-New tests:
-- hass_mqtt::command_routes::test::advertised_command_topics_are_not_raw_format_strings
-- hass_mqtt::command_routes::test::rebuild_router_registers_exactly_the_command_route_inventory
-- hass_mqtt::command_routes::test::instantiate_route_callers_use_registered_consts
+Test count: 244 on origin/main -> 272 (#[test]/#[tokio::test] attributes), +28 net new.
+
+## Pre-landing review summary
+
+Ran the full /ship pre-landing pipeline: 5 specialist reviewers (testing, maintainability,
+security, performance, api-contract), a coverage audit subagent, and 3 adversarial passes
+(Claude subagent — stalled/unavailable after 600s, non-blocking per policy; Codex adversarial
+challenge; Codex structured review). Four independent passes (testing specialist, security
+specialist, Codex structured review, Codex adversarial) converged on the same root-cause
+finding, which is fixed in this diff, not just documented:
+
+- **Fixed:** `enumerate_all_entites` (src/hass_mqtt/enumerator.rs) used to propagate a single
+  device's enumeration error with `?`, aborting Home Assistant registration for every device.
+  Combined with `instantiate_route`'s new validation (this diff), a single malformed Govee
+  Platform API capability (e.g. an empty `instance` name) could reach `run_mqtt_loop`'s fatal
+  handler and `std::process::exit(1)` the whole bridge. Now isolated: a per-device failure is
+  logged and skipped, other devices still register. Regression test:
+  `enumerator::test::one_devices_malformed_capability_does_not_abort_the_rest`.
+- **Fixed:** `instantiate_route` (src/hass_mqtt/command_routes.rs) now rejects parameter values
+  containing `/`, `+`, `#`, or a NUL byte (MQTT-significant characters that could desync a
+  topic from its own route pattern), in addition to the existing empty-value check. Found by
+  Codex adversarial challenge. Test:
+  `command_routes::test::instantiate_route_rejects_parameter_values_with_mqtt_special_characters`.
+- **Verified, not just assumed:** every `format!()`-to-`instantiate_route()` conversion in this
+  diff (button/climate/humidifier/light/number/select/switch + service/hass.rs's
+  oneclick/purge-cache helpers) produces a byte-identical topic string to the pre-refactor code
+  for the same inputs — checked by hand against `git show origin/main:<file>` during the
+  api-contract specialist pass. No deployed Home Assistant instance's MQTT subscriptions are
+  desynced by this change.
+- **Verified, not just assumed:** the module's core claim (the router now actually subscribes
+  to every registered route) is real behavioral coverage, not text-scanning —
+  `bind_mqtt_command_routes` is invoked by both the live router and a test-only
+  `MqttRouteBind::Record` variant off one shared table, so a route present in the registry but
+  never wired up would fail `mqtt_command_routes_register_the_complete_inventory`. Closes the
+  pre-existing "nothing asserts the MQTT router's route table" gap tracked in TODOS.md.
+- **Considered and dismissed, with reasoning:** Codex adversarial also flagged
+  `device_id_segment`'s per-message allocation cost (up to ~34 short-lived allocations per
+  inbound MQTT message, 17 routes x 2 Vec allocations) as a P2. The performance specialist
+  reviewed this specifically and found no issue at this project's actual scale (a handful to a
+  few dozen devices per household, a few messages/second, not attacker-reachable in this
+  threat model) — not fixed, judged correctly out of proportion to the project's stability-
+  over-micro-optimization preference.
+
+New tests covering the route-registry contract (this branch's own commit):
+- hass_mqtt::command_routes::test::instantiate_route_fills_named_segments_without_prefix_theft
+- hass_mqtt::command_routes::test::instantiate_route_rejects_unknown_or_unresolved_routes
 - hass_mqtt::command_routes::test::every_device_scoped_route_exposes_its_id_segment
+- hass_mqtt::command_routes::test::global_routes_have_no_device_id_segment
+- hass_mqtt::command_routes::test::registered_patterns_are_unique
 - hass_mqtt::command_routes::test::live_rust_drops_commented_out_routes
+- hass_mqtt::command_routes::test::advertised_command_topics_use_restricted_route_fields
+- hass_mqtt::command_routes::test::instantiate_route_callers_use_registered_consts
+- hass_mqtt::command_routes::test::oneclick_and_purge_helpers_return_inventory_routes
+- service::hass::test::mqtt_route_handlers_match_their_patterns
+- service::hass::test::mqtt_command_routes_register_the_complete_inventory
+
+Additional tests from the /ship pre-landing coverage audit and adversarial-fix passes:
+- command_routes::test::instantiate_route_rejects_an_empty_parameter_value
+- command_routes::test::instantiate_route_rejects_parameter_values_with_mqtt_special_characters
+- command_routes::test::device_id_segment_returns_none_for_a_topic_shaped_like_no_route
+- command_routes::test::command_topic_serializes_to_a_bare_json_string
+- enumerator::test::a_capability_with_an_empty_instance_name_fails_enumeration
+- enumerator::test::one_devices_malformed_capability_does_not_abort_the_rest
+- switch.rs, button.rs, humidifier.rs, climate.rs, select.rs, light.rs, number.rs: each
+  entity module's real for_device()/constructor path is now exercised directly (five of these
+  files had zero tests at all before the coverage audit, despite this diff giving each of them
+  new fallible route-substitution logic)
+
+Note: this file was regenerated several times during /ship as the pre-landing review,
+coverage audit, and adversarial-review fixes landed. This run reflects the diff as it ships.
