@@ -33,12 +33,16 @@ pub async fn enumerate_all_entites(state: &StateHandle) -> anyhow::Result<Entity
         // Isolate one device's enumeration failure from the rest: a single
         // malformed capability (for example an empty `instance` name from
         // the Platform API, rejected by `instantiate_route`) must not take
-        // every other device's entities down with it.
-        if let Err(err) = enumerate_entities_for_device(d, state, &mut entities)
+        // every other device's entities down with it. Build into a scratch
+        // list and merge only on success, so a failure partway through a
+        // device's entities doesn't leave a partial set behind for it.
+        let mut device_entities = EntityList::new();
+        match enumerate_entities_for_device(d, state, &mut device_entities)
             .await
             .with_context(|| format!("Config::for_device({d})"))
         {
-            log::error!("Skipping entities for device {d}: {err:#}");
+            Ok(()) => entities.extend(device_entities),
+            Err(err) => log::error!("Skipping entities for device {d}: {err:#}"),
         }
     }
 
@@ -500,17 +504,20 @@ mod test {
             .await
             .expect("one device's malformed capability must not abort the whole batch");
 
-        // Lower bound only (not an exact count): 2 unconditional global
+        // Exact count, not just a lower bound: 2 unconditional global
         // entities (version diagnostic + purge-caches button) plus 2
         // unconditional per-device entities for the well-formed device
-        // (status diagnostic + request-platform-data button). This holds
-        // regardless of `state.devices()` iteration order and regardless of
-        // how many entities the malformed device manages to contribute
-        // before its Toggle capability fails.
-        assert!(
-            entities.len() >= 4,
-            "the well-formed device's entities must still register even though \
-             the other device's capability was malformed: got {} entities",
+        // (status diagnostic + request-platform-data button). The malformed
+        // device contributes exactly zero -- `enumerate_all_entites` merges
+        // a device's entities in only after that device's enumeration fully
+        // succeeds, so its partial progress (the two entities added before
+        // its Toggle capability failed) is discarded, not published. This
+        // holds regardless of `state.devices()` iteration order.
+        assert_eq!(
+            entities.len(),
+            4,
+            "the well-formed device's entities must register and the malformed \
+             device must contribute none (no partial entity set): got {} entities",
             entities.len()
         );
     }
