@@ -1,4 +1,7 @@
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
+use crate::hass_mqtt::command_routes::{
+    instantiate_route, SET_MODE_SCENE_ROUTE, SET_WORK_MODE_ROUTE,
+};
 use crate::hass_mqtt::instance::{publish_entity_config, EntityInstance};
 use crate::hass_mqtt::work_mode::ParsedWorkMode;
 use crate::service::device::Device as ServiceDevice;
@@ -14,7 +17,7 @@ pub struct SelectConfig {
     #[serde(flatten)]
     pub base: EntityConfig,
 
-    pub command_topic: String,
+    pub command_topic: crate::hass_mqtt::command_routes::CommandTopic,
     pub options: Vec<String>,
     pub state_topic: String,
 }
@@ -32,13 +35,18 @@ pub struct WorkModeSelect {
 }
 
 impl WorkModeSelect {
-    pub fn new(device: &ServiceDevice, work_modes: &ParsedWorkMode, state: &StateHandle) -> Self {
-        let command_topic = format!("gv2mqtt/{id}/set-work-mode", id = topic_safe_id(device),);
-        let state_topic = format!("gv2mqtt/{id}/notify-work-mode", id = topic_safe_id(device));
+    pub fn new(
+        device: &ServiceDevice,
+        work_modes: &ParsedWorkMode,
+        state: &StateHandle,
+    ) -> anyhow::Result<Self> {
+        let id = topic_safe_id(device);
+        let command_topic = instantiate_route(SET_WORK_MODE_ROUTE, &[("id", &id)])?;
+        let state_topic = format!("gv2mqtt/{id}/notify-work-mode");
         let availability_topic = availability_topic();
-        let unique_id = format!("gv2mqtt-{id}-workMode", id = topic_safe_id(device),);
+        let unique_id = format!("gv2mqtt-{id}-workMode");
 
-        Self {
+        Ok(Self {
             select: SelectConfig {
                 base: EntityConfig {
                     availability_topic,
@@ -56,7 +64,7 @@ impl WorkModeSelect {
             },
             device_id: device.id.to_string(),
             state: state.clone(),
-        }
+        })
     }
 }
 
@@ -114,10 +122,11 @@ impl SceneModeSelect {
             return Ok(None);
         }
 
-        let command_topic = format!("gv2mqtt/{id}/set-mode-scene", id = topic_safe_id(device));
-        let state_topic = format!("gv2mqtt/{id}/notify-mode-scene", id = topic_safe_id(device));
+        let id = topic_safe_id(device);
+        let command_topic = instantiate_route(SET_MODE_SCENE_ROUTE, &[("id", &id)])?;
+        let state_topic = format!("gv2mqtt/{id}/notify-mode-scene");
         let availability_topic = availability_topic();
-        let unique_id = format!("gv2mqtt-{id}-mode-scene", id = topic_safe_id(device));
+        let unique_id = format!("gv2mqtt-{id}-mode-scene");
 
         Ok(Some(Self {
             select: SelectConfig {
@@ -182,4 +191,73 @@ pub async fn mqtt_set_mode_scene(
         .context("mqtt_set_mode_scene: state.device_set_scene")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::service::state::{SceneCatalogCache, SceneCatalogCategory, SceneCatalogEntry};
+
+    // H9999 is deliberately absent from the quirk table (see
+    // hass_mqtt::enumerator's tests), so this fixture exercises only the
+    // route-substitution logic, not quirk-derived behavior.
+    const DEVICE_ID: &str = "AA:BB:CC:DD:EE:FF:11:22";
+    const SKU: &str = "H9999";
+
+    fn test_device() -> ServiceDevice {
+        ServiceDevice::new(SKU, DEVICE_ID)
+    }
+
+    fn empty_state() -> StateHandle {
+        std::sync::Arc::new(crate::service::state::State::new())
+    }
+
+    /// `hass.rs` only subscribes to `SET_WORK_MODE_ROUTE`.
+    #[test]
+    fn work_mode_select_command_topic_matches_the_registered_route() {
+        let device = test_device();
+        let work_modes = ParsedWorkMode::default();
+        let select = WorkModeSelect::new(&device, &work_modes, &empty_state())
+            .expect("a device with no work modes still builds a select");
+
+        let id = topic_safe_id(&device);
+        assert_eq!(
+            select.select.command_topic.as_str(),
+            format!("gv2mqtt/{id}/set-work-mode")
+        );
+    }
+
+    /// `hass.rs` only subscribes to `SET_MODE_SCENE_ROUTE`. Uses the same
+    /// cached-scene-catalog fixture as `hass_mqtt::enumerator`'s tests so no
+    /// test ever reaches out to the Govee API.
+    #[tokio::test]
+    async fn scene_mode_select_command_topic_matches_the_registered_route() {
+        let device = test_device();
+        let state = empty_state();
+        {
+            let mut canonical = state.device_mut(&device.sku, &device.id).await;
+            canonical.set_scene_catalog(SceneCatalogCache {
+                platform_signature: None,
+                categories: vec![SceneCatalogCategory {
+                    name: "Favorites".to_string(),
+                    scenes: vec![SceneCatalogEntry {
+                        name: "Sunset".to_string(),
+                        icon_urls: vec![],
+                        hint: None,
+                    }],
+                }],
+            });
+        }
+
+        let select = SceneModeSelect::new(&device, &state)
+            .await
+            .expect("scene lookup must not fail")
+            .expect("a non-empty scene catalog must build a select");
+
+        let id = topic_safe_id(&device);
+        assert_eq!(
+            select.select.command_topic.as_str(),
+            format!("gv2mqtt/{id}/set-mode-scene")
+        );
+    }
 }

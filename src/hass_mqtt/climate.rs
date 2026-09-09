@@ -1,4 +1,5 @@
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
+use crate::hass_mqtt::command_routes::{instantiate_route, SET_TEMPERATURE_ROUTE};
 use crate::hass_mqtt::instance::EntityInstance;
 use crate::hass_mqtt::number::NumberConfig;
 use crate::platform_api::{DeviceCapability, DeviceParameters};
@@ -90,15 +91,14 @@ impl TargetTemperatureEntity {
         );
 
         let name = "Target Temperature".to_string();
-        let command_topic = format!(
-            "gv2mqtt/{id}/set-temperature/{inst}/{units}",
-            id = topic_safe_id(device),
-            inst = topic_safe_string(&instance.instance)
-        );
-        let state_topic = format!(
-            "gv2mqtt/{id}/advise-set-temperature",
-            id = topic_safe_id(device),
-        );
+        let id = topic_safe_id(device);
+        let inst = topic_safe_string(&instance.instance);
+        let units_label = units.to_string();
+        let command_topic = instantiate_route(
+            SET_TEMPERATURE_ROUTE,
+            &[("id", &id), ("instance", &inst), ("units", &units_label)],
+        )?;
+        let state_topic = format!("gv2mqtt/{id}/advise-set-temperature");
 
         Ok(Self {
             number: NumberConfig {
@@ -212,4 +212,73 @@ pub async fn mqtt_set_temperature(
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::platform_api::{DeviceCapabilityKind, IntegerRange, StructField};
+
+    // H9999 is deliberately absent from the quirk table (see
+    // hass_mqtt::enumerator's tests), so this fixture exercises only the
+    // route-substitution logic, not quirk-derived behavior.
+    const DEVICE_ID: &str = "AA:BB:CC:DD:EE:FF:11:22";
+    const SKU: &str = "H9999";
+
+    fn test_device() -> ServiceDevice {
+        ServiceDevice::new(SKU, DEVICE_ID)
+    }
+
+    fn empty_state() -> StateHandle {
+        std::sync::Arc::new(crate::service::state::State::new())
+    }
+
+    fn temperature_capability() -> DeviceCapability {
+        DeviceCapability {
+            kind: DeviceCapabilityKind::TemperatureSetting,
+            instance: "sensorTemperature".to_string(),
+            parameters: Some(DeviceParameters::Struct {
+                fields: vec![StructField {
+                    field_name: "temperature".to_string(),
+                    field_type: DeviceParameters::Integer {
+                        unit: None,
+                        range: IntegerRange {
+                            min: 0,
+                            max: 100,
+                            precision: 1,
+                        },
+                    },
+                    default_value: None,
+                    required: true,
+                }],
+            }),
+            alarm_type: None,
+            event_state: None,
+        }
+    }
+
+    /// `hass.rs` only subscribes to `SET_TEMPERATURE_ROUTE`. State defaults
+    /// to Celsius (see `service::state::test_state_temperature_scale_default`),
+    /// and that scale's `Display` impl -- unchanged by this refactor, since
+    /// both the old `{units}` interpolation and the new `units.to_string()`
+    /// read the same local variable -- is what lands in the topic, degree
+    /// sign included.
+    #[tokio::test]
+    async fn command_topic_matches_the_registered_route() {
+        let device = test_device();
+        let state = empty_state();
+        let instance = temperature_capability();
+
+        let entity = TargetTemperatureEntity::new(&device, &state, &instance)
+            .await
+            .expect("a well-formed temperature capability must build");
+
+        let id = topic_safe_id(&device);
+        let inst = topic_safe_string(&instance.instance);
+        let expected = format!(
+            "gv2mqtt/{id}/set-temperature/{inst}/{units}",
+            units = TemperatureScale::Celsius
+        );
+        assert_eq!(entity.number.command_topic.as_str(), expected);
+    }
 }

@@ -1,4 +1,5 @@
 use crate::hass_mqtt::base::EntityConfig;
+use crate::hass_mqtt::command_routes::CommandTopic;
 use crate::hass_mqtt::instance::{publish_entity_config, EntityInstance};
 use crate::service::hass::HassClient;
 use crate::service::state::StateHandle;
@@ -10,7 +11,7 @@ pub struct SceneConfig {
     #[serde(flatten)]
     pub base: EntityConfig,
 
-    pub command_topic: String,
+    pub command_topic: CommandTopic,
     pub payload_on: String,
 }
 

@@ -184,27 +184,6 @@ fix without that repro risks papering over a different race.
 `feat/music-sensitivity-and-palette-wiring`. Found while running its gates (2026-08-29).
 **Effort:** Small.
 
-## Nothing asserts the MQTT router's route table
-**What:** `rebuild_router` (`src/service/hass.rs`) registers 17 routes and is called only from
-`run_mqtt_loop`. No test constructs it, so deleting any single `.route(...)` registration leaves
-the whole suite green while the corresponding entity becomes inert in production — Home Assistant
-still renders the control, and CI still passes.
-**Why:** Verified by mutation during pre-merge review: removing the
-`gv2mqtt/:id/set-music-sensitivity` registration entirely left 238/238 tests passing. The test that
-looks like it covers this, `command_and_state_topics_match_the_registered_mqtt_route`, never reads
-`rebuild_router`; it round-trips `MusicSensitivityNumber::new`'s own `replacen` against the same
-constant, so it cannot fail independently.
-**Pros:** Closes the gap for all 17 routes at once, not just the new one. This is the single
-highest-leverage missing test in the crate: it is the only layer where a whole feature can vanish
-without a red build.
-**Cons:** Not reachable from a plain unit test. `MqttRouter::route()` calls `client.subscribe()`,
-which needs a live broker, so this needs either an integration test against a Mosquitto instance in
-CI, or extracting the pattern list into a pure value that both the registration and the test read.
-The latter is awkward because each route carries a differently-typed handler.
-**Context:** Pre-existing — all 16 routes on `origin/main` have the same exposure; the music
-sensitivity branch adds the 17th. Not introduced by that branch, so it was not fixed there.
-**Effort:** Medium.
-
 ## `GOVEE_DISABLE_EFFECTS` leaves a live but useless sensitivity slider
 **What:** `src/hass_mqtt/light.rs` empties the effect list when `GOVEE_DISABLE_EFFECTS=true` (and
 filters it via `GOVEE_ALLOWED_EFFECTS`), but the Music Sensitivity guard in

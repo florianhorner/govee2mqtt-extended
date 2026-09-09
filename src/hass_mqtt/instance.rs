@@ -44,6 +44,13 @@ impl EntityList {
         self.entities.push(Arc::new(e));
     }
 
+    /// Append another list's entities. Used to merge a device's entities in
+    /// only after that device's enumeration has fully succeeded, so a
+    /// failure partway through doesn't leave a partial set behind.
+    pub fn extend(&mut self, other: EntityList) {
+        self.entities.extend(other.entities);
+    }
+
     pub fn len(&self) -> usize {
         self.entities.len()
     }

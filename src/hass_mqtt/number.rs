@@ -1,4 +1,7 @@
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
+use crate::hass_mqtt::command_routes::{
+    instantiate_route, MUSIC_SENSITIVITY_COMMAND_ROUTE, NUMBER_COMMAND_ROUTE,
+};
 use crate::hass_mqtt::instance::{publish_entity_config, EntityInstance};
 use crate::service::device::Device as ServiceDevice;
 use crate::service::hass::{
@@ -13,8 +16,6 @@ use serde_json::Value as JsonValue;
 use std::ops::Range;
 use std::sync::Arc;
 
-pub const MUSIC_SENSITIVITY_COMMAND_ROUTE: &str = "gv2mqtt/:id/set-music-sensitivity";
-pub const MUSIC_SENSITIVITY_CLEAR_ROUTE: &str = "gv2mqtt/:id/clear-music-sensitivity";
 const MUSIC_SENSITIVITY_RESET_PAYLOAD: &str = "None";
 
 #[derive(Serialize, Clone, Debug)]
@@ -22,7 +23,7 @@ pub struct NumberConfig {
     #[serde(flatten)]
     pub base: EntityConfig,
 
-    pub command_topic: String,
+    pub command_topic: crate::hass_mqtt::command_routes::CommandTopic,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_topic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,30 +70,23 @@ impl WorkModeNumber {
         mode_name: &str,
         work_mode: JsonValue,
         range: Option<Range<i64>>,
-    ) -> Self {
-        let command_topic = format!(
-            "gv2mqtt/number/{id}/command/{mode}/{mode_num}",
-            id = topic_safe_id(device),
-            mode = topic_safe_string(mode_name),
-            mode_num = work_mode
-                .as_i64()
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "work-mode-was-not-int".to_string()),
-        );
-        let state_topic = format!(
-            "gv2mqtt/number/{id}/state/{mode}",
-            id = topic_safe_id(device),
-            mode = topic_safe_string(mode_name)
-        );
+    ) -> anyhow::Result<Self> {
+        let id = topic_safe_id(device);
+        let mode = topic_safe_string(mode_name);
+        let mode_num = work_mode
+            .as_i64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "work-mode-was-not-int".to_string());
+        let command_topic = instantiate_route(
+            NUMBER_COMMAND_ROUTE,
+            &[("id", &id), ("mode_name", &mode), ("work_mode", &mode_num)],
+        )?;
+        let state_topic = format!("gv2mqtt/number/{id}/state/{mode}");
 
         let availability_topic = availability_topic();
-        let unique_id = format!(
-            "gv2mqtt-{id}-{mode}-number",
-            id = topic_safe_id(device),
-            mode = topic_safe_string(mode_name),
-        );
+        let unique_id = format!("gv2mqtt-{id}-{mode}-number");
 
-        Self {
+        Ok(Self {
             number: NumberConfig {
                 base: EntityConfig {
                     availability_topic,
@@ -119,7 +113,7 @@ impl WorkModeNumber {
             state: state.clone(),
             mode_name: mode_name.to_string(),
             work_mode,
-        }
+        })
     }
 }
 
@@ -245,12 +239,12 @@ async fn publish_music_sensitivity_value<P: MusicSensitivityPublisher>(
 }
 
 impl MusicSensitivityNumber {
-    pub fn new(device: &ServiceDevice, state: &StateHandle) -> Self {
+    pub fn new(device: &ServiceDevice, state: &StateHandle) -> anyhow::Result<Self> {
         let id = topic_safe_id(device);
         // Built once: the discovery payload tells HA which topic to subscribe
         // to, and notifications publish through that same config field.
         let state_topic = music_sensitivity_state_topic(device);
-        Self {
+        Ok(Self {
             number: NumberConfig {
                 base: EntityConfig {
                     availability_topic: availability_topic(),
@@ -262,7 +256,7 @@ impl MusicSensitivityNumber {
                     entity_category: Some("config".to_string()),
                     icon: Some("mdi:music-note".to_string()),
                 },
-                command_topic: MUSIC_SENSITIVITY_COMMAND_ROUTE.replacen(":id", &id, 1),
+                command_topic: instantiate_route(MUSIC_SENSITIVITY_COMMAND_ROUTE, &[("id", &id)])?,
                 state_topic: Some(state_topic),
                 payload_reset: Some(MUSIC_SENSITIVITY_RESET_PAYLOAD),
                 min: Some(0.),
@@ -272,7 +266,7 @@ impl MusicSensitivityNumber {
             },
             device_id: device.id.to_string(),
             state: state.clone(),
-        }
+        })
     }
 
     async fn notify_state_with<P: MusicSensitivityPublisher>(
@@ -485,6 +479,7 @@ pub async fn mqtt_music_sensitivity_command(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::hass_mqtt::command_routes::MUSIC_SENSITIVITY_CLEAR_ROUTE;
     use crate::service::state::State as ServiceState;
     use std::sync::Arc;
 
@@ -580,6 +575,58 @@ mod test {
         Arc::new(ServiceState::new())
     }
 
+    /// `WorkModeNumber` is the slider shown for work modes that don't
+    /// qualify for preset buttons. It shares `NUMBER_COMMAND_ROUTE` with
+    /// `ButtonConfig::activate_work_mode_preset`, but is built by a
+    /// completely separate constructor with its own chance to drift on
+    /// segment order or param names -- and, unlike the rest of this file,
+    /// had no test at all before this one.
+    #[test]
+    fn work_mode_number_command_topic_matches_the_number_route() {
+        let device = test_device();
+        let id = topic_safe_id(&device);
+
+        let entity = WorkModeNumber::new(
+            &device,
+            &empty_state(),
+            "Gentle".to_string(),
+            "gentleMode",
+            serde_json::json!(2),
+            None,
+        )
+        .expect("a well-formed work mode must build");
+
+        assert_eq!(
+            entity.number.command_topic.as_str(),
+            format!("gv2mqtt/number/{id}/command/gentlemode/2")
+        );
+    }
+
+    /// A non-numeric work-mode value does not error: it substitutes the
+    /// literal sentinel `work-mode-was-not-int` for the `:work_mode`
+    /// segment. That sentinel is itself non-empty, so `instantiate_route`'s
+    /// empty-parameter guard does not (and should not) reject it.
+    #[test]
+    fn work_mode_number_falls_back_to_a_sentinel_for_a_non_numeric_work_mode() {
+        let device = test_device();
+        let id = topic_safe_id(&device);
+
+        let entity = WorkModeNumber::new(
+            &device,
+            &empty_state(),
+            "Weird".to_string(),
+            "weirdMode",
+            serde_json::json!("not-a-number"),
+            None,
+        )
+        .expect("the non-integer fallback must still build a topic");
+
+        assert_eq!(
+            entity.number.command_topic.as_str(),
+            format!("gv2mqtt/number/{id}/command/weirdmode/work-mode-was-not-int")
+        );
+    }
+
     async fn state_with_device() -> StateHandle {
         let state = empty_state();
         {
@@ -602,7 +649,8 @@ mod test {
     #[test]
     fn music_sensitivity_entity_is_a_config_percent_slider() {
         let device = test_device();
-        let entity = MusicSensitivityNumber::new(&device, &empty_state());
+        let entity = MusicSensitivityNumber::new(&device, &empty_state())
+            .expect("registered music sensitivity route");
         let cfg = &entity.number;
 
         assert_eq!(
@@ -629,12 +677,14 @@ mod test {
     #[test]
     fn command_and_state_topics_match_the_registered_mqtt_route() {
         let device = test_device();
-        let entity = MusicSensitivityNumber::new(&device, &empty_state());
+        let entity = MusicSensitivityNumber::new(&device, &empty_state())
+            .expect("registered music sensitivity route");
         let id = topic_safe_id(&device);
+        let expected_command_topic = format!("gv2mqtt/{id}/set-music-sensitivity");
 
         assert_eq!(
-            entity.number.command_topic,
-            format!("gv2mqtt/{id}/set-music-sensitivity")
+            entity.number.command_topic.as_str(),
+            expected_command_topic.as_str()
         );
         let expected_state_topic = format!("gv2mqtt/{id}/notify-music-sensitivity");
         assert_eq!(
@@ -642,7 +692,7 @@ mod test {
             Some(expected_state_topic.as_str())
         );
 
-        let route = entity.number.command_topic.replacen(&id, ":id", 1);
+        let route = entity.number.command_topic.as_str().replacen(&id, ":id", 1);
         assert_eq!(route, MUSIC_SENSITIVITY_COMMAND_ROUTE);
     }
 
@@ -650,7 +700,8 @@ mod test {
     #[test]
     fn music_sensitivity_discovery_payload_carries_the_slider_bounds() {
         let device = test_device();
-        let entity = MusicSensitivityNumber::new(&device, &empty_state());
+        let entity = MusicSensitivityNumber::new(&device, &empty_state())
+            .expect("registered music sensitivity route");
         let json = serde_json::to_value(&entity.number).unwrap();
 
         assert_eq!(json["min"], 0.0);
@@ -757,14 +808,16 @@ mod test {
     fn clear_button_topic_matches_the_registered_route() {
         let device = test_device();
         let button =
-            crate::hass_mqtt::button::ButtonConfig::clear_music_sensitivity_for_device(&device);
+            crate::hass_mqtt::button::ButtonConfig::clear_music_sensitivity_for_device(&device)
+                .expect("registered clear sensitivity route");
         let id = topic_safe_id(&device);
+        let expected_command_topic = format!("gv2mqtt/{id}/clear-music-sensitivity");
         assert_eq!(
-            button.command_topic,
-            format!("gv2mqtt/{id}/clear-music-sensitivity")
+            button.command_topic.as_str(),
+            expected_command_topic.as_str()
         );
         assert_eq!(
-            button.command_topic.replacen(&id, ":id", 1),
+            button.command_topic.as_str().replacen(&id, ":id", 1),
             MUSIC_SENSITIVITY_CLEAR_ROUTE
         );
     }
@@ -798,7 +851,8 @@ mod test {
     #[tokio::test]
     async fn sensitivity_state_echo_has_the_exact_topic_and_payload() {
         let state = state_with_device().await;
-        let entity = MusicSensitivityNumber::new(&test_device(), &state);
+        let entity = MusicSensitivityNumber::new(&test_device(), &state)
+            .expect("registered music sensitivity route");
         let publisher = CapturingPublisher::default();
 
         entity
@@ -843,7 +897,8 @@ mod test {
     async fn stale_notify_cannot_publish_after_a_newer_slider_echo() {
         let state = state_with_device().await;
         let device = stored_sensitivity(&state).await;
-        let entity = MusicSensitivityNumber::new(&device, &state);
+        let entity = MusicSensitivityNumber::new(&device, &state)
+            .expect("registered music sensitivity route");
         let (publisher, first_started, release_first) = BlockingFirstPublisher::new();
         let publisher = Arc::new(publisher);
 
@@ -971,7 +1026,8 @@ mod test {
     #[tokio::test]
     async fn unset_sensitivity_reset_propagates_publish_failures() {
         let state = state_with_device().await;
-        let entity = MusicSensitivityNumber::new(&test_device(), &state);
+        let entity = MusicSensitivityNumber::new(&test_device(), &state)
+            .expect("registered music sensitivity route");
 
         let error = entity
             .notify_state_with(&FailingPublisher)
@@ -987,7 +1043,8 @@ mod test {
             .device_mut(SKU, DEVICE_ID)
             .await
             .set_music_sensitivity(60);
-        let entity = MusicSensitivityNumber::new(&test_device(), &state);
+        let entity = MusicSensitivityNumber::new(&test_device(), &state)
+            .expect("registered music sensitivity route");
 
         let error = entity
             .notify_state_with(&FailingPublisher)

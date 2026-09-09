@@ -1,5 +1,8 @@
 use crate::ble::TargetHumidity;
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
+use crate::hass_mqtt::command_routes::{
+    instantiate_route, HUMIDIFIER_SET_MODE_ROUTE, HUMIDIFIER_SET_TARGET_ROUTE, SWITCH_COMMAND_ROUTE,
+};
 use crate::hass_mqtt::instance::{publish_entity_config, EntityInstance};
 use crate::hass_mqtt::work_mode::ParsedWorkMode;
 use crate::platform_api::{DeviceParameters, DeviceType, IntegerRange};
@@ -20,14 +23,14 @@ pub struct HumidifierConfig {
     #[serde(flatten)]
     pub base: EntityConfig,
 
-    pub command_topic: String,
+    pub command_topic: crate::hass_mqtt::command_routes::CommandTopic,
     /// HASS will publish here to change the humidity target percentage
-    pub target_humidity_command_topic: String,
+    pub target_humidity_command_topic: crate::hass_mqtt::command_routes::CommandTopic,
     /// HASS will subscribe here to receive the humidity target percentage
     pub target_humidity_state_topic: String,
 
     /// HASS will publish here to change the current mode
-    pub mode_command_topic: String,
+    pub mode_command_topic: crate::hass_mqtt::command_routes::CommandTopic,
     /// we will publish the current mode here
     pub mode_state_topic: String,
 
@@ -66,31 +69,21 @@ impl Humidifier {
 
         // command_topic controls the power state; just route it to
         // the general power switch handler
-        let command_topic = format!(
-            "gv2mqtt/switch/{id}/command/powerSwitch",
-            id = topic_safe_id(device)
-        );
+        let id = topic_safe_id(device);
+        let command_topic = instantiate_route(
+            SWITCH_COMMAND_ROUTE,
+            &[("id", &id), ("instance", "powerSwitch")],
+        )?;
 
-        let target_humidity_command_topic = format!(
-            "gv2mqtt/humidifier/{id}/set-target",
-            id = topic_safe_id(device)
-        );
-        let target_humidity_state_topic = format!(
-            "gv2mqtt/humidifier/{id}/notify-target",
-            id = topic_safe_id(device)
-        );
-        let state_topic = format!("gv2mqtt/humidifier/{id}/state", id = topic_safe_id(device));
+        let target_humidity_command_topic =
+            instantiate_route(HUMIDIFIER_SET_TARGET_ROUTE, &[("id", &id)])?;
+        let target_humidity_state_topic = format!("gv2mqtt/humidifier/{id}/notify-target");
+        let state_topic = format!("gv2mqtt/humidifier/{id}/state");
 
-        let mode_command_topic = format!(
-            "gv2mqtt/humidifier/{id}/set-mode",
-            id = topic_safe_id(device)
-        );
-        let mode_state_topic = format!(
-            "gv2mqtt/humidifier/{id}/notify-mode",
-            id = topic_safe_id(device)
-        );
+        let mode_command_topic = instantiate_route(HUMIDIFIER_SET_MODE_ROUTE, &[("id", &id)])?;
+        let mode_state_topic = format!("gv2mqtt/humidifier/{id}/notify-mode");
 
-        let unique_id = format!("gv2mqtt-{id}-humidifier", id = topic_safe_id(device),);
+        let unique_id = format!("gv2mqtt-{id}-humidifier");
 
         let mut min_humidity = None;
         let mut max_humidity = None;
@@ -322,4 +315,52 @@ pub async fn mqtt_humidifier_set_target(
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    // H9999 is deliberately absent from the quirk table (see
+    // hass_mqtt::enumerator's tests), so this fixture exercises only the
+    // route-substitution logic, not quirk-derived behavior.
+    const DEVICE_ID: &str = "AA:BB:CC:DD:EE:FF:11:22";
+    const SKU: &str = "H9999";
+
+    fn test_device() -> ServiceDevice {
+        ServiceDevice::new(SKU, DEVICE_ID)
+    }
+
+    fn empty_state() -> StateHandle {
+        std::sync::Arc::new(crate::service::state::State::new())
+    }
+
+    /// `hass.rs` subscribes to exactly `SWITCH_COMMAND_ROUTE` (with the
+    /// hardcoded "powerSwitch" instance), `HUMIDIFIER_SET_TARGET_ROUTE`, and
+    /// `HUMIDIFIER_SET_MODE_ROUTE`. If any of these three topics drift from
+    /// that inventory, Home Assistant renders a humidifier control whose
+    /// power, target-humidity, or mode command nothing on the broker side
+    /// ever reads.
+    #[tokio::test]
+    async fn humidifier_command_topics_match_their_registered_routes() {
+        let device = test_device();
+        let entity = Humidifier::new(&device, &empty_state())
+            .await
+            .expect("a plain humidifier device must build");
+        let cfg = &entity.humidifier;
+        let id = topic_safe_id(&device);
+
+        assert_eq!(
+            cfg.command_topic.as_str(),
+            format!("gv2mqtt/switch/{id}/command/powerSwitch")
+        );
+        assert_eq!(
+            cfg.target_humidity_command_topic.as_str(),
+            format!("gv2mqtt/humidifier/{id}/set-target")
+        );
+        assert_eq!(
+            cfg.mode_command_topic.as_str(),
+            format!("gv2mqtt/humidifier/{id}/set-mode")
+        );
+    }
 }

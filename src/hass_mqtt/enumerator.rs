@@ -30,9 +30,20 @@ pub async fn enumerate_all_entites(state: &StateHandle) -> anyhow::Result<Entity
     let devices = state.devices().await;
 
     for d in &devices {
-        enumerate_entities_for_device(d, state, &mut entities)
+        // Isolate one device's enumeration failure from the rest: a single
+        // malformed capability (for example an empty `instance` name from
+        // the Platform API, rejected by `instantiate_route`) must not take
+        // every other device's entities down with it. Build into a scratch
+        // list and merge only on success, so a failure partway through a
+        // device's entities doesn't leave a partial set behind for it.
+        let mut device_entities = EntityList::new();
+        match enumerate_entities_for_device(d, state, &mut device_entities)
             .await
-            .with_context(|| format!("Config::for_device({d})"))?;
+            .with_context(|| format!("Config::for_device({d})"))
+        {
+            Ok(()) => entities.extend(device_entities),
+            Err(err) => log::error!("Skipping entities for device {d}: {err:#}"),
+        }
     }
 
     Ok(entities)
@@ -43,7 +54,7 @@ async fn enumerate_global_entities(
     entities: &mut EntityList,
 ) -> anyhow::Result<()> {
     entities.add(GlobalFixedDiagnostic::new("Version", govee_version()));
-    entities.add(ButtonConfig::new("Purge Caches", purge_cache_topic()));
+    entities.add(ButtonConfig::new("Purge Caches", purge_cache_topic()?));
     Ok(())
 }
 
@@ -67,7 +78,7 @@ async fn enumerate_scenes(state: &StateHandle, entities: &mut EntityList) -> any
                             device_class: None,
                             icon: None,
                         },
-                        command_topic: oneclick_topic(),
+                        command_topic: oneclick_topic()?,
                         payload_on: oc.name,
                     });
                 }
@@ -113,7 +124,7 @@ async fn entities_for_work_mode(
                     &work_mode.name,
                     mode_num,
                     work_mode.default_value(),
-                ));
+                )?);
             } else {
                 for value in &work_mode.values {
                     if let Some(mode_value) = value.value.as_i64() {
@@ -123,7 +134,7 @@ async fn entities_for_work_mode(
                             &work_mode.name,
                             mode_num,
                             mode_value,
-                        ));
+                        )?);
                     }
                 }
             }
@@ -137,11 +148,11 @@ async fn entities_for_work_mode(
                 &work_mode.name,
                 work_mode.value.clone(),
                 range,
-            ));
+            )?);
         }
     }
 
-    entities.add(WorkModeSelect::new(d, &work_modes, state));
+    entities.add(WorkModeSelect::new(d, &work_modes, state)?);
 
     Ok(())
 }
@@ -156,12 +167,12 @@ pub async fn enumerate_entities_for_device(
     }
 
     entities.add(DeviceStatusDiagnostic::new(d, state));
-    entities.add(ButtonConfig::request_platform_data_for_device(d));
+    entities.add(ButtonConfig::request_platform_data_for_device(d)?);
 
     // Add scene cycling buttons for devices that support scenes
     if d.supports_rgb() || d.get_color_temperature_range().is_some() {
-        entities.add(ButtonConfig::scene_next_for_device(d));
-        entities.add(ButtonConfig::scene_prev_for_device(d));
+        entities.add(ButtonConfig::scene_next_for_device(d)?);
+        entities.add(ButtonConfig::scene_prev_for_device(d)?);
         entities.add(SceneInfoSensor::new(d, state));
     }
 
@@ -199,11 +210,11 @@ pub async fn enumerate_entities_for_device(
                     // the Platform API (the `with_broken_platform` quirks) take
                     // the LAN path, which cannot carry sensitivity — publishing
                     // the entity there would echo a value that never applies.
-                    entities.add(MusicSensitivityNumber::new(d, state));
+                    entities.add(MusicSensitivityNumber::new(d, state)?);
                     // Paired with the slider, under the same guard: HA cannot
                     // return a number to "unknown" on its own, so the button is
                     // the only way back to the Platform API default.
-                    entities.add(ButtonConfig::clear_music_sensitivity_for_device(d));
+                    entities.add(ButtonConfig::clear_music_sensitivity_for_device(d)?);
                 }
 
                 DeviceCapabilityKind::ColorSetting
@@ -400,6 +411,114 @@ mod test {
         assert_eq!(
             with, without,
             "a LAN-only device must not get a sensitivity slider"
+        );
+    }
+
+    /// A malformed Platform API response (empty capability instance name)
+    /// must fail enumeration loud through the real call graph -- not just
+    /// `command_routes`'s own synthetic unit tests -- rather than let
+    /// `instantiate_route` build a truncated command topic (`.../command/`)
+    /// that no registered route pattern, and therefore no `hass.rs`
+    /// subscription, would ever match.
+    #[tokio::test]
+    async fn a_capability_with_an_empty_instance_name_fails_enumeration() {
+        let device = device_with_capabilities(
+            "H9999",
+            vec![DeviceCapability {
+                kind: DeviceCapabilityKind::Toggle,
+                instance: String::new(),
+                parameters: None,
+                alarm_type: None,
+                event_state: None,
+            }],
+        );
+        let state: StateHandle = Arc::new(State::new());
+        {
+            let mut canonical = state.device_mut(&device.sku, &device.id).await;
+            canonical.set_scene_catalog(SceneCatalogCache {
+                platform_signature: None,
+                categories: vec![],
+            });
+        }
+
+        let mut entities = EntityList::new();
+        let error = enumerate_entities_for_device(&device, &state, &mut entities)
+            .await
+            .expect_err(
+                "an empty capability instance must not silently advertise a malformed topic",
+            );
+        assert!(
+            error.to_string().contains("empty parameter 'instance'"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    /// `enumerate_all_entites` must isolate one device's enumeration failure
+    /// instead of propagating it with `?`: previously, the malformed device
+    /// below would abort the whole batch and `enumerate_all_entites` would
+    /// return `Err`, taking every other device's entities down with it (and,
+    /// through `run_mqtt_loop`, the whole bridge process).
+    #[tokio::test]
+    async fn one_devices_malformed_capability_does_not_abort_the_rest() {
+        let state: StateHandle = Arc::new(State::new());
+
+        const GOOD_ID: &str = "AA:BB:CC:DD:EE:01";
+        const BAD_ID: &str = "AA:BB:CC:DD:EE:02";
+
+        {
+            let mut good = state.device_mut("H9999", GOOD_ID).await;
+            good.http_device_info = Some(HttpDeviceInfo {
+                sku: "H9999".to_string(),
+                device: GOOD_ID.to_string(),
+                device_name: "Good Light".to_string(),
+                device_type: DeviceType::Light,
+                capabilities: vec![],
+            });
+            good.set_scene_catalog(SceneCatalogCache {
+                platform_signature: None,
+                categories: vec![],
+            });
+        }
+        {
+            let mut bad = state.device_mut("H9999", BAD_ID).await;
+            bad.http_device_info = Some(HttpDeviceInfo {
+                sku: "H9999".to_string(),
+                device: BAD_ID.to_string(),
+                device_name: "Bad Light".to_string(),
+                device_type: DeviceType::Light,
+                capabilities: vec![DeviceCapability {
+                    kind: DeviceCapabilityKind::Toggle,
+                    instance: String::new(),
+                    parameters: None,
+                    alarm_type: None,
+                    event_state: None,
+                }],
+            });
+            bad.set_scene_catalog(SceneCatalogCache {
+                platform_signature: None,
+                categories: vec![],
+            });
+        }
+
+        let entities = enumerate_all_entites(&state)
+            .await
+            .expect("one device's malformed capability must not abort the whole batch");
+
+        // Exact count, not just a lower bound: 2 unconditional global
+        // entities (version diagnostic + purge-caches button) plus 2
+        // unconditional per-device entities for the well-formed device
+        // (status diagnostic + request-platform-data button). The malformed
+        // device contributes exactly zero -- `enumerate_all_entites` merges
+        // a device's entities in only after that device's enumeration fully
+        // succeeds, so its partial progress (the two entities added before
+        // its Toggle capability failed) is discarded, not published. This
+        // holds regardless of `state.devices()` iteration order.
+        assert_eq!(
+            entities.len(),
+            4,
+            "the well-formed device's entities must register and the malformed \
+             device must contribute none (no partial entity set): got {} entities",
+            entities.len()
         );
     }
 }
