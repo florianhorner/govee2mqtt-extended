@@ -237,7 +237,22 @@ pub async fn enumerate_entities_for_device(
                 DeviceCapabilityKind::Range if cap.instance == "brightness" => {}
                 DeviceCapabilityKind::Range if cap.instance == "humidity" => {}
                 DeviceCapabilityKind::WorkMode => {
-                    entities_for_work_mode(d, state, cap, entities).await?;
+                    // Isolated, not propagated. `Fan::new` promises a device
+                    // with unparseable work-mode metadata still gets its power
+                    // switch, sensors and an on/off-only fan -- but that
+                    // promise was hollow while this `?` aborted the whole
+                    // device's enumeration two arms later, discarding the
+                    // scratch list `enumerate_all_entites` had built.
+                    //
+                    // Same isolation the per-device loop already applies, one
+                    // level down: one malformed capability costs its own
+                    // entities, not the device's.
+                    if let Err(err) = entities_for_work_mode(d, state, cap, entities).await {
+                        log::error!(
+                            "Skipping work-mode entities for {d}: {err:#}. The \
+                             device keeps its other entities."
+                        );
+                    }
                 }
 
                 DeviceCapabilityKind::Property => {
@@ -400,6 +415,56 @@ mod test {
              here and `select.<device>_mode_scene` is the one entity a live \
              run has and this test does not. Verified against an H7124 via \
              scripts/live_mqtt.py."
+        );
+    }
+
+    /// A work-mode capability that cannot be parsed costs its own entities and
+    /// nothing else.
+    ///
+    /// `Fan::new` promises a device with unusable work-mode metadata still gets
+    /// its power switch, sensors and an on/off-only fan. That promise was
+    /// hollow: `entities_for_work_mode(..)?` two arms later aborted the whole
+    /// device, and `enumerate_all_entites` discarded the scratch list. Found by
+    /// Copilot on PR #56.
+    #[tokio::test]
+    async fn a_malformed_work_mode_does_not_cost_the_device_its_other_entities() {
+        // A WorkMode capability whose struct has no `workMode` field at all:
+        // `ParsedWorkMode::with_capability` returns Err on it.
+        let broken = DeviceCapability {
+            kind: DeviceCapabilityKind::WorkMode,
+            instance: "workMode".to_string(),
+            parameters: Some(DeviceParameters::Struct { fields: vec![] }),
+            alarm_type: None,
+            event_state: None,
+        };
+
+        let mut device = h7124_as(DeviceType::AirPurifier);
+        let info = device.http_device_info.as_mut().unwrap();
+        for cap in info.capabilities.iter_mut() {
+            if cap.instance == "workMode" {
+                *cap = broken.clone();
+            }
+        }
+
+        // Must not error, and must still publish the rest of the device.
+        let state: StateHandle = Arc::new(State::new());
+        {
+            let mut canonical = state.device_mut(&device.sku, &device.id).await;
+            canonical.set_scene_catalog(SceneCatalogCache {
+                platform_signature: None,
+                categories: vec![],
+            });
+        }
+        let mut entities = EntityList::new();
+        enumerate_entities_for_device(&device, &state, &mut entities)
+            .await
+            .expect("a malformed capability must not abort the device");
+
+        assert!(
+            entities.len() >= 8,
+            "the power switch, sensors, light and diagnostics must survive a \
+             broken work mode; got {}",
+            entities.len()
         );
     }
 

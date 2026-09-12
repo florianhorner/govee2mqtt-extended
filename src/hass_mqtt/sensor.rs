@@ -144,6 +144,13 @@ fn capability_state_value(
     }
 }
 
+/// What Home Assistant reads as "this numeric sensor has no current value".
+///
+/// Publishing this clears a stale reading without adding an invalid sample to
+/// long-term statistics. An empty payload would simply be ignored, leaving the
+/// previous value in place.
+const UNKNOWN_MEASUREMENT: &str = "None";
+
 /// Whether a value must be withheld from a statistics sensor.
 ///
 /// A `state_class` sensor is a recorder source: Home Assistant rejects a
@@ -312,17 +319,23 @@ impl EntityInstance for CapabilitySensor {
             // whole object for a shape it does not recognise, which is the
             // right answer for a plain diagnostic and the wrong one here.
             if should_skip_measurement(self.sensor.state_class, &value) {
+                // Publish `None` rather than nothing. Home Assistant reads it
+                // as "unknown" on a numeric sensor, which clears the previous
+                // reading without contributing an invalid statistics sample.
+                // Skipping the publish instead leaves the last good value on
+                // screen indefinitely, which is a worse lie than "unknown".
+                // An empty string would be ignored outright.
                 // Data is being dropped, not merely reformatted: at the
                 // default `RUST_LOG=govee=info` a trace line is invisible, and
                 // the user sees a sensor that never updates with no reason
                 // given anywhere.
                 log::warn!(
                     "{instance} reported {value:?}, which is not a finite \
-                     number; withholding it from a measurement sensor rather \
-                     than feeding the recorder a value it will reject",
+                     number; reporting the measurement as unknown rather than \
+                     feeding the recorder a value it will reject",
                     instance = self.instance_name
                 );
-                return Ok(());
+                return self.sensor.notify_state(client, UNKNOWN_MEASUREMENT).await;
             }
 
             return self.sensor.notify_state(client, &value).await;
@@ -641,6 +654,34 @@ mod test {
         // the object fallback must still reach Home Assistant.
         assert!(!should_skip_measurement(None, "{}"));
         assert!(!should_skip_measurement(None, "anything"));
+
+        // The sentinel is what HA reads as "unknown" on a numeric sensor.
+        // An empty payload would be ignored, leaving the stale value on screen.
+        assert_eq!(UNKNOWN_MEASUREMENT, "None");
+        assert!(!UNKNOWN_MEASUREMENT.is_empty());
+    }
+
+    /// A withheld measurement is reported as unknown, not silently dropped.
+    ///
+    /// Publishing nothing leaves the last good reading on screen forever,
+    /// which is a worse lie than "unknown". An empty payload would be ignored
+    /// by Home Assistant for the same reason. Raised by CodeRabbit on PR #56.
+    #[test]
+    fn a_withheld_measurement_is_cleared_not_left_stale() {
+        assert_eq!(
+            UNKNOWN_MEASUREMENT, "None",
+            "Home Assistant reads this as unknown on a numeric sensor"
+        );
+        assert!(
+            !UNKNOWN_MEASUREMENT.is_empty(),
+            "an empty payload is ignored, leaving the stale value in place"
+        );
+        // And it must not itself look like a finite number, or it would be
+        // published as a statistic.
+        assert!(should_skip_measurement(
+            Some(StateClass::Measurement),
+            UNKNOWN_MEASUREMENT
+        ));
     }
 
     /// Drives the real dispatch, not just the helper. Mutation-checked:

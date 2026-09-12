@@ -494,7 +494,12 @@ impl ParsedWorkMode {
             let presets = self
                 .modes
                 .values()
-                .filter(|mode| mode.value.as_i64() != Some(owner))
+                // `as_i64()` of None means the mode cannot be commanded:
+                // `mqtt_device_set_work_mode` rejects it with "expected
+                // workMode to be a number". Advertising it puts a dead entry
+                // in Home Assistant's dropdown. The top-level path below
+                // already excludes these; this one did not.
+                .filter(|mode| mode.value.as_i64().is_some_and(|v| v != owner))
                 .collect();
             return FanControls {
                 axis: Some(axis),
@@ -846,6 +851,30 @@ mod test {
             .axis
             .expect("1,1,2,3 still contains the run 1,2,3");
         assert_eq!(axis.max_ordinal(), 3);
+    }
+
+    /// A mode with a non-integer value is not a preset either.
+    ///
+    /// `mqtt_device_set_work_mode` rejects it with "expected workMode to be a
+    /// number", so advertising it puts a dead entry in Home Assistant's
+    /// dropdown. The top-level path already excluded these; the owned-axis
+    /// path did not. Found by Copilot on PR #56.
+    #[test]
+    fn an_uncommandable_mode_is_not_advertised_beside_an_owned_axis() {
+        let mut wm = ParsedWorkMode::default();
+        wm.add("gearMode".to_string(), 1.into());
+        wm.get_mut("gearMode").unwrap().value_range = Some(1..4);
+        wm.add("Auto".to_string(), 3.into());
+        // Govee sent no integer for this one.
+        wm.add("Broken".to_string(), JsonValue::Null);
+
+        let controls = wm.classify_fan_controls();
+        assert!(controls.axis.is_some(), "gearMode is the axis");
+        assert_eq!(
+            preset_names(&controls),
+            vec!["Auto"],
+            "Broken has no commandable value, so it is not a preset"
+        );
     }
 
     /// `dedup_by_key` removes a same-valued mode to compute the run, but the
