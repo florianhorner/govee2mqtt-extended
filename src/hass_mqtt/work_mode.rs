@@ -3,7 +3,7 @@ use crate::service::device::Device as ServiceDevice;
 use anyhow::anyhow;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 #[derive(Default, Debug)]
@@ -23,11 +23,22 @@ impl ParsedWorkMode {
             .filter_map(|mode| mode.value.as_i64().map(|value| (value, mode)))
     }
 
+    /// Commandable fan presets with one stable name per numeric value.
+    ///
+    /// `mode_for_value` resolves duplicate values to the first mode in this
+    /// name-keyed `BTreeMap`. Keep that same entry here, or selecting an alias
+    /// would read back as a different preset name.
+    fn fan_preset_modes(&self) -> impl Iterator<Item = (i64, &WorkMode)> {
+        let mut seen = BTreeSet::new();
+        self.commandable_modes()
+            .filter(move |(value, _)| seen.insert(*value))
+    }
+
     /// Degrade to presets without exposing vendor modes that cannot be sent.
     fn preset_only_fan_controls(&self) -> FanControls<'_> {
         FanControls {
             axis: None,
-            presets: self.commandable_modes().map(|(_, mode)| mode).collect(),
+            presets: self.fan_preset_modes().map(|(_, mode)| mode).collect(),
         }
     }
 
@@ -505,7 +516,7 @@ impl ParsedWorkMode {
 
         if let Some((owner, axis)) = candidates.into_iter().next() {
             let presets = self
-                .commandable_modes()
+                .fan_preset_modes()
                 .filter(|(value, _)| *value != owner)
                 .map(|(_, mode)| mode)
                 .collect();
@@ -580,7 +591,7 @@ impl ParsedWorkMode {
         // `entities_for_work_mode` still emitted a button for it.
         let on_axis: Vec<i64> = axis.steps.iter().map(|(mode, _)| *mode).collect();
         let presets = self
-            .commandable_modes()
+            .fan_preset_modes()
             .filter(|(value, _)| !on_axis.contains(value))
             .map(|(_, mode)| mode)
             .collect();
@@ -889,27 +900,44 @@ mod test {
         );
     }
 
-    /// `dedup_by_key` removes a same-valued mode to compute the run, but the
-    /// preset list must still carry it. Building presets from the deduplicated
-    /// vector dropped it silently -- while `entities_for_work_mode` went on
-    /// emitting a button for it, so the fan and the buttons disagreed about
-    /// which modes exist.
+    /// A fan may advertise only one name per numeric value. State read-back
+    /// uses `mode_for_value`, which chooses the first name in the `BTreeMap`;
+    /// advertising a second alias would make it snap back to the first after a
+    /// successful command. Legacy per-mode buttons remain separate.
     #[test]
-    fn a_duplicate_valued_mode_above_the_run_survives_as_a_preset() {
-        let wm = modes_only(&[
+    fn duplicate_valued_presets_use_the_same_name_as_state_read_back() {
+        let preset_only = modes_only(&[("Schlaf", 16), ("Sleep", 16)]);
+        let controls = preset_only.classify_fan_controls();
+        assert!(controls.axis.is_none());
+        assert_eq!(preset_names(&controls), vec!["Schlaf"]);
+
+        let mut owned_axis = modes_only(&[("Schlaf", 16), ("Sleep", 16)]);
+        owned_axis.add("gearMode".to_string(), 1.into());
+        owned_axis.get_mut("gearMode").unwrap().value_range = Some(1..4);
+        let controls = owned_axis.classify_fan_controls();
+        assert_eq!(controls.axis.as_ref().map(|a| a.owner), Some(Some(1)));
+        assert_eq!(preset_names(&controls), vec!["Schlaf"]);
+
+        let top_level_axis = modes_only(&[
             ("Low", 1),
             ("Medium", 2),
             ("High", 3),
             ("Schlaf", 16),
             ("Sleep", 16),
         ]);
-        let controls = wm.classify_fan_controls();
+        let controls = top_level_axis.classify_fan_controls();
 
         assert_eq!(controls.axis.as_ref().map(|a| a.max_ordinal()), Some(3));
         assert_eq!(
             preset_names(&controls),
-            vec!["Schlaf", "Sleep"],
-            "both same-valued modes are presets; neither may vanish"
+            vec!["Schlaf"],
+            "every preset path keeps the same first name that mode_for_value returns"
+        );
+        assert_eq!(
+            top_level_axis
+                .mode_for_value(&JsonValue::from(16))
+                .map(|mode| mode.name.as_str()),
+            Some("Schlaf")
         );
     }
 
