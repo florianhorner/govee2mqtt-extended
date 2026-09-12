@@ -308,17 +308,13 @@ impl WorkMode {
     }
 }
 
-/// Home Assistant's `speed_range_max` is serialized as a `u8`
-/// (`FanConfig::speed_range_max`), so an axis longer than this cannot be
-/// advertised at all.
+/// This bridge serializes `speed_range_max` as a `u8`
+/// (`FanConfig::speed_range_max`), so its fan discovery representation is
+/// deliberately bounded to this many steps.
 ///
-/// Note this is a Home Assistant limit, not a Govee one. An earlier version of
-/// this file justified the cap with "the command encoding is a u8", which is
-/// false for every device that can have a fan: `humidifier_set_parameter`
-/// casts to `u8` only on the BLE/IoT branch, whose codec is registered for
-/// `["H7160"]` alone (`ble.rs`) -- a humidifier. Every fan and purifier falls
-/// through to `GoveeApiClient::set_work_mode`, which takes `i64` and
-/// serializes both fields as full-range JSON.
+/// This is a local representation and allocation bound, not a Home Assistant
+/// or Govee wire limit. Widening it is a separate behavior change; axes beyond
+/// it degrade to presets without materializing an unbounded vendor range.
 const MAX_AXIS_STEPS: i64 = 255;
 
 /// Govee's `modeValue` is not always a speed scale, and its length is entirely
@@ -332,10 +328,9 @@ const MAX_AXIS_STEPS: i64 = 255;
 ///   device ends up with no fan entity at all rather than a preset-only one.
 ///   `classify_fan_controls` already refuses a one-element run for the
 ///   top-level shape; this applies the same rule to the other two.
-/// - **More than 255** cannot be advertised: Home Assistant's
-///   `speed_range_max` is a `u8`. Rejecting it here keeps `Fan::new`
-///   infallible instead of erroring and costing the device every entity it
-///   has.
+/// - **More than 255** exceeds this bridge's bounded `u8` discovery
+///   representation. Rejecting it here keeps `Fan::new` infallible and avoids
+///   materializing an unbounded vendor-controlled range.
 fn usable_axis_len(len: Option<i64>) -> Option<usize> {
     let len = len?;
     if (2..=MAX_AXIS_STEPS).contains(&len) {
@@ -347,8 +342,8 @@ fn usable_axis_len(len: Option<i64>) -> Option<usize> {
 
 /// Accept a fully-built axis, or reject it.
 ///
-/// Only the step COUNT is bounded, because only the count has a real limit:
-/// `FanConfig::speed_range_max` is a `u8`.
+/// Only the step COUNT is bounded, because that is what the bridge's
+/// `FanConfig::speed_range_max: u8` representation constrains.
 ///
 /// A previous version also required every `(workMode, modeValue)` pair to fit
 /// a `u8`, on the stated grounds that the command encoding is one. It is not,
@@ -391,7 +386,7 @@ impl SpeedAxis {
         self.steps.len()
     }
 
-    /// `max_ordinal` as the `u8` the discovery payload carries.
+    /// `max_ordinal` as the bridge's bounded discovery representation.
     ///
     /// Saturating rather than fallible: `usable_axis_len` already bounds every
     /// constructed axis to `2..=255`, and a panic or an error on this path
@@ -462,8 +457,11 @@ impl ParsedWorkMode {
     pub fn classify_fan_controls(&self) -> FanControls<'_> {
         // Step 1: which modes could carry a speed axis in their own values?
         let mut candidates: Vec<(i64, SpeedAxis)> = vec![];
+        let mut has_nested_speed_metadata = false;
 
         for (mode_num, mode) in self.commandable_modes() {
+            has_nested_speed_metadata |= mode.value_range.is_some() || !mode.values.is_empty();
+
             if let Some(range) = &mode.value_range {
                 // Check the length BEFORE materializing. `value_range` comes
                 // straight from Govee JSON with no bound, and a 24-bit range
@@ -489,7 +487,12 @@ impl ParsedWorkMode {
                     .iter()
                     .map(|value| value.value.as_i64())
                     .collect();
-                if let Some(values) = values {
+                if let Some(mut values) = values {
+                    // Platform metadata is not ordered by contract. The axis
+                    // promises lowest speed first, so vendor array order must
+                    // not decide which value HA calls speed 1.
+                    values.sort_unstable();
+                    values.dedup();
                     let steps = values.into_iter().map(|value| (mode_num, value)).collect();
                     if let Some(axis) = usable_axis(SpeedAxis {
                         owner: Some(mode_num),
@@ -526,6 +529,15 @@ impl ParsedWorkMode {
             };
         }
 
+        // Nested `modeValue` metadata and top-level `workMode` values are two
+        // different schema shapes, not fallback interpretations of each other.
+        // If a nested axis was present but unusable (oversized, one-step or
+        // malformed), reinterpreting its owner and sibling presets as a
+        // top-level speed run fabricates a slider the metadata never described.
+        if has_nested_speed_metadata {
+            return self.preset_only_fan_controls();
+        }
+
         // Step 3: no mode carries its own speeds, so the top-level modes may
         // themselves be the speed scale. Take the contiguous run starting at
         // the lowest value; anything above the break (H7121's Sleep=16) is a
@@ -554,9 +566,10 @@ impl ParsedWorkMode {
         }
 
         // Same bound as the other two paths: at least two steps (a run of one
-        // is a button, not a scale) and at most what the u8 command encoding
-        // can address. Without the upper half, a device with more than 255
-        // contiguous modes built an axis that `Fan::new` then rejected -- and
+        // is a button, not a scale) and at most what the bridge's bounded
+        // discovery representation can address. Without the upper half, a
+        // device with more than 255 contiguous modes built an axis that
+        // `Fan::new` then rejected -- and
         // because a single whole-set run leaves `numbered[run_len..]` empty,
         // the device ended up with neither a speed axis NOR presets. Every
         // mode has to survive as a preset instead.
@@ -566,7 +579,7 @@ impl ParsedWorkMode {
             // deliberately moved from `trace` to `warn` in this branch.
             log::warn!(
                 "work mode metadata yields a {run_len}-step top-level speed run, \
-                 which Home Assistant cannot advertise; exposing every mode as a \
+                 which exceeds this bridge's discovery bound; exposing every mode as a \
                  preset instead"
             );
             return self.preset_only_fan_controls();
@@ -700,7 +713,11 @@ mod test {
     /// a fan entity -- this asserts the classifier, not a product decision.
     #[test]
     fn named_sub_options_become_the_axis() {
-        let wm = ParsedWorkMode::with_capability(&work_mode_cap_for("H7131")).unwrap();
+        let mut wm = ParsedWorkMode::with_capability(&work_mode_cap_for("H7131")).unwrap();
+        wm.get_mut("gearMode")
+            .expect("H7131 has gearMode")
+            .values
+            .reverse();
         let controls = wm.classify_fan_controls();
 
         let axis = controls
@@ -711,6 +728,35 @@ mod test {
         assert_eq!(axis.max_ordinal(), 3);
         assert_eq!(axis.command_for_ordinal(1), Some((gear_mode, 1)));
         assert_eq!(axis.command_for_ordinal(3), Some((gear_mode, 3)));
+    }
+
+    /// An unusable nested axis must not be reinterpreted as the distinct
+    /// top-level-speed schema merely because its owner and sibling presets have
+    /// contiguous `workMode` values.
+    #[test]
+    fn rejected_nested_metadata_does_not_fabricate_a_top_level_axis() {
+        let mut oversized = modes_only(&[("FanSpeed", 1), ("Custom", 2), ("Auto", 3)]);
+        oversized.get_mut("FanSpeed").unwrap().value_range = Some(1..257);
+        let controls = oversized.classify_fan_controls();
+        assert!(controls.axis.is_none());
+        assert_eq!(preset_names(&controls), vec!["Auto", "Custom", "FanSpeed"]);
+
+        let mut malformed = modes_only(&[("gearMode", 1), ("Auto", 2), ("Sleep", 3)]);
+        malformed.get_mut("gearMode").unwrap().values = vec![
+            WorkModeValue {
+                value: 1.into(),
+                name: Some("Low".to_string()),
+                computed_label: String::new(),
+            },
+            WorkModeValue {
+                value: JsonValue::Null,
+                name: Some("Broken".to_string()),
+                computed_label: String::new(),
+            },
+        ];
+        let controls = malformed.classify_fan_controls();
+        assert!(controls.axis.is_none());
+        assert_eq!(preset_names(&controls), vec!["Auto", "Sleep", "gearMode"]);
     }
 
     /// The real device this feature was built for: an H7124 air purifier,
@@ -841,7 +887,7 @@ mod test {
         wm.get_mut("TooWide").unwrap().value_range = Some(1..257); // 256 steps
         assert!(
             wm.classify_fan_controls().axis.is_none(),
-            "256 steps cannot be advertised through HA's u8 speed range"
+            "256 steps exceed the bridge's u8 speed-range representation"
         );
     }
 
@@ -983,7 +1029,7 @@ mod test {
         let controls = wm.classify_fan_controls();
         assert!(
             controls.axis.is_none(),
-            "300 contiguous modes cannot be advertised through HA's u8 speed range"
+            "300 contiguous modes exceed the bridge's u8 speed-range representation"
         );
         let expected: Vec<String> = (1..=300).map(|n| format!("M{n:03}")).collect();
         assert_eq!(

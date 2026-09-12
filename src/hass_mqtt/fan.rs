@@ -104,13 +104,14 @@ impl Fan {
     /// Build the fan entity for a device, or `Ok(None)` when there is nothing
     /// controllable to expose.
     ///
-    /// Returns `Ok(None)` rather than `Err` for missing or unparseable
-    /// `workMode` metadata. `enumerate_all_entites` isolates a device's
-    /// enumeration failure but still drops **all** of that device's entities,
-    /// so an `Err` here would cost a device the switch and sensors it already
-    /// had. Upstream wez/govee2mqtt#713 is exactly this case: an H1310 ceiling
-    /// fan has a power toggle and no usable `workMode`, and must gain a working
-    /// on/off fan rather than lose everything.
+    /// Missing or unparseable `workMode` metadata still yields an on/off-only
+    /// fan when platform metadata and `powerSwitch` are present. Returning an
+    /// error would cost the device its switch and sensors too, because
+    /// `enumerate_all_entites` drops the whole device's scratch entity list.
+    /// Upstream wez/govee2mqtt#713 is exactly this case: an H1310 ceiling fan
+    /// has a power toggle and no usable `workMode`, and must gain a working
+    /// on/off fan rather than lose everything. `Ok(None)` is reserved for a
+    /// missing platform description or missing power switch.
     pub async fn new(device: &ServiceDevice, state: &StateHandle) -> anyhow::Result<Option<Self>> {
         let Some(info) = &device.http_device_info else {
             return Ok(None);
@@ -149,8 +150,8 @@ impl Fan {
             None => (None, vec![]),
         };
 
-        // `classify_fan_controls` already bounds the axis to something Home
-        // Assistant and the `u8` command encoding can both express. Degrade
+        // `classify_fan_controls` already bounds the axis to this bridge's
+        // discovery representation. Degrade
         // rather than error if that ever stops holding: an `Err` here would
         // propagate through `advise_hass_of_light_state`, which re-enumerates
         // on EVERY state change, costing the device not just its fan but every
