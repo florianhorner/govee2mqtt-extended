@@ -12,6 +12,25 @@ pub struct ParsedWorkMode {
 }
 
 impl ParsedWorkMode {
+    /// Work modes that can actually be sent through `set-work-mode`.
+    ///
+    /// Keep this predicate shared by every fan-control path. Advertising a
+    /// mode without an integer `workMode` value creates a dead preset that the
+    /// command handler will reject.
+    fn commandable_modes(&self) -> impl Iterator<Item = (i64, &WorkMode)> {
+        self.modes
+            .values()
+            .filter_map(|mode| mode.value.as_i64().map(|value| (value, mode)))
+    }
+
+    /// Degrade to presets without exposing vendor modes that cannot be sent.
+    fn preset_only_fan_controls(&self) -> FanControls<'_> {
+        FanControls {
+            axis: None,
+            presets: self.commandable_modes().map(|(_, mode)| mode).collect(),
+        }
+    }
+
     pub fn with_device(device: &ServiceDevice) -> anyhow::Result<Self> {
         let info = device
             .http_device_info
@@ -433,13 +452,7 @@ impl ParsedWorkMode {
         // Step 1: which modes could carry a speed axis in their own values?
         let mut candidates: Vec<(i64, SpeedAxis)> = vec![];
 
-        for mode in self.modes.values() {
-            let Some(mode_num) = mode.value.as_i64() else {
-                // A mode with no integer value cannot be commanded at all;
-                // `entities_for_work_mode` skips these too.
-                continue;
-            };
-
+        for (mode_num, mode) in self.commandable_modes() {
             if let Some(range) = &mode.value_range {
                 // Check the length BEFORE materializing. `value_range` comes
                 // straight from Govee JSON with no bound, and a 24-bit range
@@ -492,14 +505,9 @@ impl ParsedWorkMode {
 
         if let Some((owner, axis)) = candidates.into_iter().next() {
             let presets = self
-                .modes
-                .values()
-                // `as_i64()` of None means the mode cannot be commanded:
-                // `mqtt_device_set_work_mode` rejects it with "expected
-                // workMode to be a number". Advertising it puts a dead entry
-                // in Home Assistant's dropdown. The top-level path below
-                // already excludes these; this one did not.
-                .filter(|mode| mode.value.as_i64().is_some_and(|v| v != owner))
+                .commandable_modes()
+                .filter(|(value, _)| *value != owner)
+                .map(|(_, mode)| mode)
                 .collect();
             return FanControls {
                 axis: Some(axis),
@@ -511,11 +519,7 @@ impl ParsedWorkMode {
         // themselves be the speed scale. Take the contiguous run starting at
         // the lowest value; anything above the break (H7121's Sleep=16) is a
         // preset, not speed 4.
-        let mut numbered: Vec<(i64, &WorkMode)> = self
-            .modes
-            .values()
-            .filter_map(|mode| mode.value.as_i64().map(|value| (value, mode)))
-            .collect();
+        let mut numbered: Vec<(i64, &WorkMode)> = self.commandable_modes().collect();
         numbered.sort_by_key(|(value, _)| *value);
 
         // Two modes can share one integer value -- `modes` is keyed by NAME,
@@ -554,10 +558,7 @@ impl ParsedWorkMode {
                  which Home Assistant cannot advertise; exposing every mode as a \
                  preset instead"
             );
-            return FanControls {
-                axis: None,
-                presets: self.modes.values().collect(),
-            };
+            return self.preset_only_fan_controls();
         };
 
         let steps: Vec<(i64, i64)> = numbered[..run_len]
@@ -570,10 +571,7 @@ impl ParsedWorkMode {
                 "top-level speed axis rejected as unadvertisable; exposing every \
                  mode as a preset instead"
             );
-            return FanControls {
-                axis: None,
-                presets: self.modes.values().collect(),
-            };
+            return self.preset_only_fan_controls();
         };
 
         // Presets come from `self.modes`, not from `numbered`: `dedup_by_key`
@@ -582,12 +580,9 @@ impl ParsedWorkMode {
         // `entities_for_work_mode` still emitted a button for it.
         let on_axis: Vec<i64> = axis.steps.iter().map(|(mode, _)| *mode).collect();
         let presets = self
-            .modes
-            .values()
-            // `as_i64()` of None means the mode cannot be commanded at all
-            // (`mqtt_device_set_work_mode` bails on it), so it is not a preset
-            // either -- advertising it would put a dead entry in HA's dropdown.
-            .filter(|mode| mode.value.as_i64().is_some_and(|v| !on_axis.contains(&v)))
+            .commandable_modes()
+            .filter(|(value, _)| !on_axis.contains(value))
+            .map(|(_, mode)| mode)
             .collect();
 
         FanControls {
@@ -835,7 +830,7 @@ mod test {
         wm.get_mut("TooWide").unwrap().value_range = Some(1..257); // 256 steps
         assert!(
             wm.classify_fan_controls().axis.is_none(),
-            "256 steps cannot be commanded through the u8 encoding"
+            "256 steps cannot be advertised through HA's u8 speed range"
         );
     }
 
@@ -873,6 +868,23 @@ mod test {
         assert_eq!(
             preset_names(&controls),
             vec!["Auto"],
+            "Broken has no commandable value, so it is not a preset"
+        );
+    }
+
+    /// The preset-only path must enforce the same commandability rule as the
+    /// owned-axis and top-level-axis paths.
+    #[test]
+    fn an_uncommandable_mode_is_not_advertised_in_a_preset_only_fan() {
+        let mut wm = ParsedWorkMode::default();
+        wm.add("Normal".to_string(), 1.into());
+        wm.add("Broken".to_string(), JsonValue::Null);
+
+        let controls = wm.classify_fan_controls();
+        assert!(controls.axis.is_none(), "one numeric mode is not an axis");
+        assert_eq!(
+            preset_names(&controls),
+            vec!["Normal"],
             "Broken has no commandable value, so it is not a preset"
         );
     }
@@ -938,16 +950,18 @@ mod test {
         for n in 1..=300i64 {
             wm.add(format!("M{n:03}"), n.into());
         }
+        wm.add("Broken".to_string(), JsonValue::Null);
 
         let controls = wm.classify_fan_controls();
         assert!(
             controls.axis.is_none(),
-            "300 contiguous modes cannot be commanded through the u8 encoding"
+            "300 contiguous modes cannot be advertised through HA's u8 speed range"
         );
+        let expected: Vec<String> = (1..=300).map(|n| format!("M{n:03}")).collect();
         assert_eq!(
-            controls.presets.len(),
-            300,
-            "every mode must survive as a preset rather than vanishing"
+            preset_names(&controls),
+            expected,
+            "every numeric mode must survive as a preset, while Broken cannot be commanded"
         );
     }
 

@@ -352,6 +352,29 @@ mod test {
         device
     }
 
+    /// Give the H7124 fixture a `workMode` capability that the parser rejects,
+    /// while leaving every other capability identical for differential tests.
+    fn h7124_with_malformed_work_mode(device_type: DeviceType) -> ServiceDevice {
+        let mut device = h7124_as(device_type);
+        let info = device
+            .http_device_info
+            .as_mut()
+            .expect("H7124 fixture has Platform API metadata");
+        let work_mode = info
+            .capabilities
+            .iter_mut()
+            .find(|cap| cap.instance == "workMode")
+            .expect("H7124 fixture has a workMode capability");
+        *work_mode = DeviceCapability {
+            kind: DeviceCapabilityKind::WorkMode,
+            instance: "workMode".to_string(),
+            parameters: Some(DeviceParameters::Struct { fields: vec![] }),
+            alarm_type: None,
+            event_state: None,
+        };
+        device
+    }
+
     /// An `AirPurifier` gains exactly one entity over the same capabilities
     /// enumerated as a `Heater`: the fan.
     ///
@@ -428,43 +451,16 @@ mod test {
     /// Copilot on PR #56.
     #[tokio::test]
     async fn a_malformed_work_mode_does_not_cost_the_device_its_other_entities() {
-        // A WorkMode capability whose struct has no `workMode` field at all:
-        // `ParsedWorkMode::with_capability` returns Err on it.
-        let broken = DeviceCapability {
-            kind: DeviceCapabilityKind::WorkMode,
-            instance: "workMode".to_string(),
-            parameters: Some(DeviceParameters::Struct { fields: vec![] }),
-            alarm_type: None,
-            event_state: None,
-        };
+        let as_heater = entity_count(&h7124_with_malformed_work_mode(DeviceType::Heater)).await;
+        let as_purifier =
+            entity_count(&h7124_with_malformed_work_mode(DeviceType::AirPurifier)).await;
 
-        let mut device = h7124_as(DeviceType::AirPurifier);
-        let info = device.http_device_info.as_mut().unwrap();
-        for cap in info.capabilities.iter_mut() {
-            if cap.instance == "workMode" {
-                *cap = broken.clone();
-            }
-        }
-
-        // Must not error, and must still publish the rest of the device.
-        let state: StateHandle = Arc::new(State::new());
-        {
-            let mut canonical = state.device_mut(&device.sku, &device.id).await;
-            canonical.set_scene_catalog(SceneCatalogCache {
-                platform_signature: None,
-                categories: vec![],
-            });
-        }
-        let mut entities = EntityList::new();
-        enumerate_entities_for_device(&device, &state, &mut entities)
-            .await
-            .expect("a malformed capability must not abort the device");
-
-        assert!(
-            entities.len() >= 8,
-            "the power switch, sensors, light and diagnostics must survive a \
-             broken work mode; got {}",
-            entities.len()
+        assert_eq!(
+            as_purifier,
+            as_heater + 1,
+            "the malformed capability must cost only its own work-mode entities; \
+             the purifier must retain the same non-fan baseline plus its \
+             on/off-only fan (heater: {as_heater}, purifier: {as_purifier})"
         );
     }
 
