@@ -9,6 +9,9 @@ use std::ops::Range;
 #[derive(Default, Debug)]
 pub struct ParsedWorkMode {
     pub modes: BTreeMap<String, WorkMode>,
+    /// The capability described nested `modeValue` data, even if parsing or
+    /// localization prevented that data from being attached to a work mode.
+    has_nested_value_schema: bool,
 }
 
 impl ParsedWorkMode {
@@ -70,6 +73,15 @@ impl ParsedWorkMode {
 
         if let Some(mv) = cap.struct_field_by_name("modeValue") {
             if let DeviceParameters::Enum { options } = &mv.field_type {
+                // Preserve the schema shape before the exact-name join below.
+                // A localized or malformed nested option can otherwise be
+                // discarded and later misread as evidence for the distinct
+                // top-level-speed shape. Default-only options (as on H7121)
+                // do not describe a nested axis and intentionally stay out.
+                work_modes.has_nested_value_schema = options.iter().any(|opt| {
+                    opt.extras.contains_key("range") || opt.extras.contains_key("options")
+                });
+
                 let mut joined = 0usize;
                 for opt in options {
                     let mode_name = &opt.name;
@@ -457,7 +469,7 @@ impl ParsedWorkMode {
     pub fn classify_fan_controls(&self) -> FanControls<'_> {
         // Step 1: which modes could carry a speed axis in their own values?
         let mut candidates: Vec<(i64, SpeedAxis)> = vec![];
-        let mut has_nested_speed_metadata = false;
+        let mut has_nested_speed_metadata = self.has_nested_value_schema;
 
         for (mode_num, mode) in self.commandable_modes() {
             has_nested_speed_metadata |= mode.value_range.is_some() || !mode.values.is_empty();
@@ -1185,12 +1197,12 @@ mod test {
         );
     }
 
-    /// When Govee localizes one enum and not the other, every name join
-    /// misses. The modes still exist but carry no values, so the classifier
-    /// must fall through to the top-level rule rather than inventing an axis
-    /// from a half-parsed mode. Upstream wez/govee2mqtt#645.
+    /// When Govee localizes one enum and not the other, every name join misses.
+    /// Preserve the nested schema marker so three contiguous top-level values
+    /// cannot fabricate an axis from the half-parsed metadata. Upstream
+    /// wez/govee2mqtt#645.
     #[test]
-    fn a_failed_mode_value_name_join_yields_no_owned_axis() {
+    fn a_failed_mode_value_name_join_cannot_fabricate_a_top_level_axis() {
         let cap = DeviceCapability {
             kind: DeviceCapabilityKind::WorkMode,
             instance: "workMode".to_string(),
@@ -1201,11 +1213,23 @@ mod test {
                     StructField {
                         field_name: "workMode".to_string(),
                         field_type: DeviceParameters::Enum {
-                            options: vec![EnumOption {
-                                name: "gearMode".to_string(),
-                                value: 1.into(),
-                                extras: HashMap::new(),
-                            }],
+                            options: vec![
+                                EnumOption {
+                                    name: "gearMode".to_string(),
+                                    value: 1.into(),
+                                    extras: HashMap::new(),
+                                },
+                                EnumOption {
+                                    name: "Auto".to_string(),
+                                    value: 2.into(),
+                                    extras: HashMap::new(),
+                                },
+                                EnumOption {
+                                    name: "Sleep".to_string(),
+                                    value: 3.into(),
+                                    extras: HashMap::new(),
+                                },
+                            ],
                         },
                         default_value: None,
                         required: true,
@@ -1238,13 +1262,17 @@ mod test {
             wm.mode_by_name("gearMode").unwrap().values.is_empty(),
             "the join missed, so no values were attached"
         );
+        assert!(
+            wm.has_nested_value_schema,
+            "the parser must retain the nested shape even when every join misses"
+        );
 
         let controls = wm.classify_fan_controls();
         assert!(
             controls.axis.is_none(),
-            "one mode is not a run of two, so there is no axis to fabricate"
+            "the contiguous top-level values belong to presets, not a fallback axis"
         );
-        assert_eq!(preset_names(&controls), vec!["gearMode"]);
+        assert_eq!(preset_names(&controls), vec!["Auto", "Sleep", "gearMode"]);
     }
 
     #[test]
@@ -1325,6 +1353,7 @@ ParsedWorkMode {
             ),
         },
     },
+    has_nested_value_schema: true,
 }
 "#
         );
@@ -1377,6 +1406,7 @@ ParsedWorkMode {
             ),
         },
     },
+    has_nested_value_schema: true,
 }
 "#
         );
@@ -1467,6 +1497,7 @@ ParsedWorkMode {
             value_range: None,
         },
     },
+    has_nested_value_schema: true,
 }
 "#
         );
@@ -1547,6 +1578,7 @@ ParsedWorkMode {
             value_range: None,
         },
     },
+    has_nested_value_schema: true,
 }
 "#
         );
@@ -1606,6 +1638,7 @@ ParsedWorkMode {
             ),
         },
     },
+    has_nested_value_schema: true,
 }
 "#
         );
