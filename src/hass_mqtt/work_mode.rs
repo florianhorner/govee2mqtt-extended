@@ -504,14 +504,19 @@ impl ParsedWorkMode {
             }
         }
 
-        // A run of one is not a scale -- that is just a device with a single
-        // mode, and a 1-step slider would be a worse control than a button.
-        if run_len < 2 {
+        // Same bound as the other two paths: at least two steps (a run of one
+        // is a button, not a scale) and at most what the u8 command encoding
+        // can address. Without the upper half, a device with more than 255
+        // contiguous modes built an axis that `Fan::new` then rejected -- and
+        // because a single whole-set run leaves `numbered[run_len..]` empty,
+        // the device ended up with neither a speed axis NOR presets. Every
+        // mode has to survive as a preset instead.
+        let Some(run_len) = usable_axis_len(i64::try_from(run_len).ok()) else {
             return FanControls {
                 axis: None,
                 presets: self.modes.values().collect(),
             };
-        }
+        };
 
         let steps: Vec<(i64, i64)> = numbered[..run_len]
             .iter()
@@ -780,6 +785,34 @@ mod test {
             .axis
             .expect("1,1,2,3 still contains the run 1,2,3");
         assert_eq!(axis.max_ordinal(), 3);
+    }
+
+    /// The top-level-run path must respect the same upper bound as the other
+    /// two. It did not: `usable_axis_len` guarded the `value_range` and named
+    /// `values` paths, but this one only checked `run_len < 2`.
+    ///
+    /// The failure is worse than an oversized slider. When the whole mode set
+    /// is one run, `numbered[run_len..]` is empty, so `presets` is empty too --
+    /// and `Fan::new` then rejects the oversized axis and produces a
+    /// POWER-only fan, silently dropping every mode the device has, rather
+    /// than the preset-only fan its own comment promises.
+    #[test]
+    fn an_oversized_top_level_run_is_not_an_axis() {
+        let mut wm = ParsedWorkMode::default();
+        for n in 1..=300i64 {
+            wm.add(format!("M{n:03}"), n.into());
+        }
+
+        let controls = wm.classify_fan_controls();
+        assert!(
+            controls.axis.is_none(),
+            "300 contiguous modes cannot be commanded through the u8 encoding"
+        );
+        assert_eq!(
+            controls.presets.len(),
+            300,
+            "every mode must survive as a preset rather than vanishing"
+        );
     }
 
     /// Large mode values still classify correctly.

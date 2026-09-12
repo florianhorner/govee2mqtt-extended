@@ -144,6 +144,20 @@ fn capability_state_value(
     }
 }
 
+/// Whether a value must be withheld from a statistics sensor.
+///
+/// A `state_class` sensor is a recorder source: Home Assistant rejects a
+/// non-numeric state and logs it on every statistics cycle. The scalar
+/// fallback deliberately publishes the whole object for a shape it does not
+/// recognise, which is right for a plain diagnostic and wrong here.
+///
+/// Extracted rather than left inline in `notify_state`, which needs a live
+/// broker and so cannot be tested -- the same reason `capability_state_value`
+/// was pulled out.
+fn should_skip_measurement(state_class: Option<StateClass>, value: &str) -> bool {
+    state_class.is_some() && value.parse::<f64>().is_err()
+}
+
 /// Publish the scalar a capability carries, not the JSON wrapper around it.
 ///
 /// Govee's Platform API reports property state as `{"value": 6}`. Publishing
@@ -286,7 +300,7 @@ impl EntityInstance for CapabilitySensor {
             // statistics cycle. The scalar fallback deliberately publishes the
             // whole object for a shape it does not recognise, which is the
             // right answer for a plain diagnostic and the wrong one here.
-            if self.sensor.state_class.is_some() && value.parse::<f64>().is_err() {
+            if should_skip_measurement(self.sensor.state_class, &value) {
                 log::trace!(
                     "{instance} reported a non-numeric value ({value}); not \
                      publishing it to a measurement sensor",
@@ -575,6 +589,34 @@ mod test {
             .await
             .expect("capability sensor is constructible");
         serde_json::to_value(&entity.sensor).expect("SensorConfig serializes")
+    }
+
+    /// A `state_class` sensor feeds Home Assistant's recorder, which rejects a
+    /// non-numeric state and logs it on every statistics cycle. The scalar
+    /// fallback still publishes a whole object for a shape it does not
+    /// recognise, so such a value has to be withheld rather than published.
+    #[test]
+    fn non_numeric_values_are_withheld_from_measurement_sensors() {
+        // airQuality carries a state_class, and `{}` is exactly what
+        // `capability_state_value` produces for an unrecognised shape.
+        assert!(should_skip_measurement(Some(StateClass::Measurement), "{}"));
+        assert!(should_skip_measurement(
+            Some(StateClass::Measurement),
+            "{\"value\":null}"
+        ));
+        assert!(should_skip_measurement(Some(StateClass::Measurement), ""));
+
+        // Numbers are fine, including the decimals temperature publishes.
+        assert!(!should_skip_measurement(Some(StateClass::Measurement), "6"));
+        assert!(!should_skip_measurement(
+            Some(StateClass::Measurement),
+            "-5.83"
+        ));
+
+        // A plain diagnostic has no state_class and no recorder to upset, so
+        // the object fallback must still reach Home Assistant.
+        assert!(!should_skip_measurement(None, "{}"));
+        assert!(!should_skip_measurement(None, "anything"));
     }
 
     /// Drives the real dispatch, not just the helper. Mutation-checked:

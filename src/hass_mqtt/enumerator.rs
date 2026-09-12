@@ -376,15 +376,22 @@ mod test {
     /// reference them keep working (upstream wez/govee2mqtt#283).
     #[tokio::test]
     async fn the_fan_is_additive_and_removes_nothing() {
+        // Measured against the same baseline the sibling test uses, not an
+        // absolute floor. `>= 10` would stay green while a regression quietly
+        // dropped two pre-existing entities -- which is precisely what this
+        // test is named for.
+        let as_heater = entity_count(&h7124_as(DeviceType::Heater)).await;
         let as_purifier = entity_count(&h7124_as(DeviceType::AirPurifier)).await;
 
-        // The H7124 carries powerSwitch, workMode, nightlightToggle,
-        // brightness, colorRgb, nightlightScene, filterLifeTime and airQuality,
-        // so its entity set is substantial. A regression that replaced the
-        // pre-existing entities with the fan would collapse this number.
+        assert_eq!(
+            as_purifier,
+            as_heater + 1,
+            "the fan is added; nothing the device already had may disappear"
+        );
         assert!(
-            as_purifier >= 10,
-            "expected the pre-existing entity set plus the fan, got {as_purifier}"
+            as_heater >= 9,
+            "sanity: the H7124's pre-existing entity set should be substantial, \
+             got {as_heater} -- if this drops, the baseline itself regressed"
         );
     }
 

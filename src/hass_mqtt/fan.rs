@@ -1008,6 +1008,73 @@ mod test {
         );
     }
 
+    /// An oversized `modeValue` range is dropped as a speed axis, and the
+    /// device still ends up with a usable control surface rather than a
+    /// power-only stub.
+    ///
+    /// Widening H7111's `FanSpeed` past what a u8 can command makes
+    /// `classify_fan_controls` reject that mode as an axis; it then finds the
+    /// contiguous top-level run instead. The device keeps a slider and its
+    /// presets, which is the whole point of bounding the axis rather than
+    /// erroring on it.
+    ///
+    /// Note on `Fan::new`'s own `.filter()` guard: `classify_fan_controls` is
+    /// the only producer of a `SpeedAxis` and now enforces `2..=255` on every
+    /// path, so that filter is unreachable by construction and no test can
+    /// distinguish it. It is kept as a second line because the invariant lives
+    /// in a different module than the consumer -- the same trade, and the same
+    /// disclosure, as the `checked_add` in the contiguity walk.
+    #[tokio::test]
+    async fn an_inexpressible_axis_degrades_instead_of_erroring() {
+        let mut device = device_from_fixture("H7111");
+        let info = device.http_device_info.as_mut().unwrap();
+        let cap = info
+            .capabilities
+            .iter_mut()
+            .find(|cap| cap.instance == "workMode")
+            .unwrap();
+
+        if let Some(crate::platform_api::DeviceParameters::Struct { fields }) = &mut cap.parameters
+        {
+            for field in fields.iter_mut() {
+                if field.field_name != "modeValue" {
+                    continue;
+                }
+                if let crate::platform_api::DeviceParameters::Enum { options } =
+                    &mut field.field_type
+                {
+                    for option in options.iter_mut() {
+                        if option.name == "FanSpeed" {
+                            option
+                                .extras
+                                .insert("range".to_string(), json!({"min": 0, "max": 4000}));
+                        }
+                    }
+                }
+            }
+        }
+
+        let fan = Fan::new(&device, &empty_state())
+            .await
+            .expect("an inexpressible axis must never be an error")
+            .expect("the device still has a power switch, so it still gets a fan");
+
+        let json = serde_json::to_value(&fan.fan).unwrap();
+        assert_ne!(
+            json["speed_range_max"], 4001,
+            "the 4001-step range must not reach Home Assistant: {json}"
+        );
+        assert!(
+            fan.axis.as_ref().map(|a| a.max_ordinal()).unwrap_or(0) <= 255,
+            "whatever axis survives must be commandable"
+        );
+        assert!(
+            !json["preset_modes"].as_array().unwrap().is_empty(),
+            "losing BOTH the axis and the presets would leave a power-only fan, \
+             which is what bounding the classifier exists to prevent: {json}"
+        );
+    }
+
     fn owned_axis() -> SpeedAxis {
         SpeedAxis {
             owner: Some(1),
