@@ -866,8 +866,8 @@ mod test {
     /// `value_range` is vendor-controlled and unbounded. Govee uses 24-bit
     /// ranges elsewhere (colorRgb), and this runs on EVERY state change via
     /// `advise_hass_of_light_state` -- materialising 16.7M tuples there would
-    /// be ~268 MB per notify. It is also uncommandable: the wire encoding is a
-    /// u8.
+    /// be ~268 MB per notify. It also exceeds this bridge's bounded `u8`
+    /// discovery representation.
     #[test]
     fn an_absurdly_wide_range_is_refused_without_materialising_it() {
         let mut wm = ParsedWorkMode::default();

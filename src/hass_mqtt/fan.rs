@@ -160,8 +160,8 @@ impl Fan {
             let expressible = u8::try_from(axis.max_ordinal()).is_ok() && axis.max_ordinal() >= 2;
             if !expressible {
                 log::warn!(
-                    "{device} produced a {n}-step fan speed axis, which Home \
-                     Assistant cannot express; falling back to a preset-only fan",
+                    "{device} produced a {n}-step fan speed axis, which this \
+                     bridge cannot advertise; falling back to a preset-only fan",
                     n = axis.max_ordinal()
                 );
             }
@@ -268,10 +268,16 @@ impl Fan {
     /// the ordering are testable without a broker.
     fn state_publishes(
         &self,
-        is_on: bool,
+        is_on: Option<bool>,
         reported: Option<(i64, Option<i64>)>,
         parsed: Option<&ParsedWorkMode>,
     ) -> Vec<FanPublish> {
+        // No observation is not an OFF observation. Keep HA's state unknown
+        // until a source reports power instead of publishing a fabricated OFF.
+        let Some(is_on) = is_on else {
+            return vec![];
+        };
+
         let mut percentage = None;
         let mut preset = None;
 
@@ -360,7 +366,7 @@ impl EntityInstance for Fan {
             return Ok(());
         };
 
-        let is_on = device.device_state().map(|s| s.on).unwrap_or(false);
+        let is_on = device.device_state().map(|state| state.on);
         let parsed = ParsedWorkMode::with_device(&device).ok();
 
         for publish in
@@ -694,13 +700,27 @@ mod test {
         let parsed = parsed_for("H7111");
 
         assert_eq!(
-            fan.state_publishes(false, Some((1, Some(3))), Some(&parsed)),
+            fan.state_publishes(Some(false), Some((1, Some(3))), Some(&parsed)),
             vec![
                 FanPublish::Power("OFF"),
                 FanPublish::Percentage("None".to_string()),
                 FanPublish::PresetMode("None".to_string()),
             ],
             "an off fan reports no speed and no preset, whatever workMode says"
+        );
+    }
+
+    /// Missing source state must not be invented as OFF. This is distinct from
+    /// a real `Some(false)` observation, which resets both axes above.
+    #[tokio::test]
+    async fn an_unknown_power_state_publishes_nothing() {
+        let fan = fan_for("H7111").await;
+        let parsed = parsed_for("H7111");
+
+        assert!(
+            fan.state_publishes(None, Some((1, Some(3))), Some(&parsed))
+                .is_empty(),
+            "unknown power must leave the fan unknown instead of fabricating OFF"
         );
     }
 
@@ -712,7 +732,7 @@ mod test {
         let parsed = parsed_for("H7111");
 
         assert_eq!(
-            fan.state_publishes(true, Some((1, Some(3))), Some(&parsed)),
+            fan.state_publishes(Some(true), Some((1, Some(3))), Some(&parsed)),
             vec![
                 FanPublish::Power("ON"),
                 FanPublish::PresetMode("None".to_string()),
@@ -730,7 +750,7 @@ mod test {
 
         // workMode 3 is "Auto" on the H7111, which is a preset not a speed.
         assert_eq!(
-            fan.state_publishes(true, Some((3, None)), Some(&parsed)),
+            fan.state_publishes(Some(true), Some((3, None)), Some(&parsed)),
             vec![
                 FanPublish::Power("ON"),
                 FanPublish::Percentage("None".to_string()),
@@ -747,7 +767,7 @@ mod test {
         let parsed = parsed_for("H7111");
 
         assert_eq!(
-            fan.state_publishes(true, None, Some(&parsed)),
+            fan.state_publishes(Some(true), None, Some(&parsed)),
             vec![
                 FanPublish::Power("ON"),
                 FanPublish::Percentage("None".to_string()),
@@ -765,7 +785,7 @@ mod test {
 
         // H7121's Low=1 is part of the speed axis, so it resolves to a mode
         // name but is deliberately absent from preset_modes.
-        let publishes = fan.state_publishes(true, Some((1, None)), Some(&parsed));
+        let publishes = fan.state_publishes(Some(true), Some((1, None)), Some(&parsed));
         assert!(
             !publishes
                 .iter()
@@ -796,7 +816,7 @@ mod test {
         );
 
         assert_eq!(
-            fan.state_publishes(true, Some((1, Some(99))), Some(&parsed)),
+            fan.state_publishes(Some(true), Some((1, Some(99))), Some(&parsed)),
             vec![
                 FanPublish::Power("ON"),
                 FanPublish::Percentage("None".to_string()),
@@ -814,7 +834,7 @@ mod test {
         let parsed = parsed_for("H7121");
 
         assert_eq!(
-            fan.state_publishes(true, Some((16, None)), Some(&parsed)),
+            fan.state_publishes(Some(true), Some((16, None)), Some(&parsed)),
             vec![
                 FanPublish::Power("ON"),
                 FanPublish::Percentage("None".to_string()),
@@ -864,7 +884,7 @@ mod test {
         let parsed = ParsedWorkMode::with_device(&device).unwrap();
 
         assert_eq!(
-            fan.state_publishes(true, Some((5, Some(0))), Some(&parsed)),
+            fan.state_publishes(Some(true), Some((5, Some(0))), Some(&parsed)),
             vec![
                 FanPublish::Power("ON"),
                 FanPublish::Percentage("None".to_string()),
@@ -874,7 +894,7 @@ mod test {
 
         // And gearMode 2 reads back as speed 2.
         assert_eq!(
-            fan.state_publishes(true, Some((1, Some(2))), Some(&parsed)),
+            fan.state_publishes(Some(true), Some((1, Some(2))), Some(&parsed)),
             vec![
                 FanPublish::Power("ON"),
                 FanPublish::PresetMode("None".to_string()),
