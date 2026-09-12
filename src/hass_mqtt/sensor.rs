@@ -155,7 +155,13 @@ fn capability_state_value(
 /// broker and so cannot be tested -- the same reason `capability_state_value`
 /// was pulled out.
 fn should_skip_measurement(state_class: Option<StateClass>, value: &str) -> bool {
-    state_class.is_some() && value.parse::<f64>().is_err()
+    if state_class.is_none() {
+        return false;
+    }
+    // `f64: FromStr` accepts "NaN", "inf" and "infinity" -- precisely the
+    // values Home Assistant's recorder rejects hardest -- so parsing alone is
+    // not the test. Finiteness is.
+    !value.parse::<f64>().is_ok_and(f64::is_finite)
 }
 
 /// Publish the scalar a capability carries, not the JSON wrapper around it.
@@ -200,8 +206,13 @@ impl CapabilitySensor {
         let unit_of_measurement = match instance.instance.as_str() {
             "sensorTemperature" => Some(state.get_temperature_scale().await.unit_of_measurement()),
             "sensorHumidity" => Some("%"),
-            // Govee reports remaining filter life as a percentage.
-            "filterLifeTime" => Some("%"),
+            // Deliberately no unit for filterLifeTime. The instance name says
+            // *time*, the one live H7124 reading was `100`, and nothing in the
+            // repo pins the scale -- so `%` would be the same unverified claim
+            // the airQuality arm below refuses to make. It matters more here:
+            // `state_class: Measurement` makes this a long-term-statistics
+            // source, and a wrong unit is written into HA's statistics tables
+            // and needs a manual purge to correct.
             _ => None,
         };
 
@@ -301,9 +312,14 @@ impl EntityInstance for CapabilitySensor {
             // whole object for a shape it does not recognise, which is the
             // right answer for a plain diagnostic and the wrong one here.
             if should_skip_measurement(self.sensor.state_class, &value) {
-                log::trace!(
-                    "{instance} reported a non-numeric value ({value}); not \
-                     publishing it to a measurement sensor",
+                // Data is being dropped, not merely reformatted: at the
+                // default `RUST_LOG=govee=info` a trace line is invisible, and
+                // the user sees a sensor that never updates with no reason
+                // given anywhere.
+                log::warn!(
+                    "{instance} reported {value:?}, which is not a finite \
+                     number; withholding it from a measurement sensor rather \
+                     than feeding the recorder a value it will reject",
                     instance = self.instance_name
                 );
                 return Ok(());
@@ -608,6 +624,14 @@ mod test {
 
         // Numbers are fine, including the decimals temperature publishes.
         assert!(!should_skip_measurement(Some(StateClass::Measurement), "6"));
+
+        // `f64::from_str` accepts these; Home Assistant's recorder does not.
+        for non_finite in ["NaN", "inf", "-inf", "infinity"] {
+            assert!(
+                should_skip_measurement(Some(StateClass::Measurement), non_finite),
+                "{non_finite} parses as f64 but is not a usable statistic"
+            );
+        }
         assert!(!should_skip_measurement(
             Some(StateClass::Measurement),
             "-5.83"
@@ -781,9 +805,15 @@ mod test {
 
         assert_eq!(json["entity_category"], "diagnostic");
         assert_eq!(json["name"], "Filter Life");
-        assert_eq!(json["unit_of_measurement"], "%");
         assert_eq!(json["state_class"], "measurement");
         assert_eq!(json["icon"], "mdi:air-filter");
+        assert!(
+            json.get("unit_of_measurement").is_none(),
+            "the instance name says *time* and no live reading pins the scale, \
+             so claiming `%` would be the same unverified assertion the \
+             airQuality arm refuses to make -- and a wrong unit on a \
+             statistics source needs a manual purge to correct: {json}"
+        );
     }
 
     /// Regression guard: the new arms must not reclassify every other

@@ -180,7 +180,11 @@ impl WorkMode {
 
         if let Some(range) = opt.extras.get("range") {
             if let Ok(range) = serde_json::from_value::<ModeRange>(range.clone()) {
-                self.value_range = Some(range.min..range.max + 1);
+                // Vendor JSON: `max: i64::MAX` panics in debug and wraps in
+                // release. The consumers were hardened; the producer was not.
+                if let Some(end) = range.max.checked_add(1) {
+                    self.value_range = Some(range.min..end);
+                }
                 return;
             }
         }
@@ -266,7 +270,7 @@ impl WorkMode {
             }
         }
 
-        Some(min..max + 1)
+        Some(min..max.checked_add(1)?)
     }
 
     pub fn should_show_as_preset(&self) -> bool {
@@ -299,6 +303,27 @@ fn usable_axis_len(len: Option<i64>) -> Option<usize> {
     } else {
         None
     }
+}
+
+/// Accept a fully-built axis, or reject it.
+///
+/// Length alone is not enough. An offset range such as `{min: 250, max: 259}`
+/// is ten steps -- a fine length -- whose last four values cannot be commanded,
+/// because `humidifier_set_parameter` encodes both fields as `u8`. Advertising
+/// it gives Home Assistant a ten-step slider whose top end silently does
+/// nothing: the command fails in the dispatcher's `log::error!`, while
+/// `optimistic: true` leaves the card showing the speed the user picked.
+///
+/// So every `(workMode, modeValue)` pair the axis can emit is checked here,
+/// where the axis is built, rather than at command time where the only
+/// remaining option is to fail.
+fn usable_axis(axis: SpeedAxis) -> Option<SpeedAxis> {
+    let len_ok = usable_axis_len(i64::try_from(axis.steps.len()).ok()).is_some();
+    let values_ok = axis
+        .steps
+        .iter()
+        .all(|(mode, value)| u8::try_from(*mode).is_ok() && u8::try_from(*value).is_ok());
+    (len_ok && values_ok).then_some(axis)
 }
 
 /// How a Home Assistant fan's percentage maps onto Govee's `workMode` command.
@@ -419,13 +444,12 @@ impl ParsedWorkMode {
                         .take(len)
                         .map(|value| (mode_num, value))
                         .collect();
-                    candidates.push((
-                        mode_num,
-                        SpeedAxis {
-                            owner: Some(mode_num),
-                            steps,
-                        },
-                    ));
+                    if let Some(axis) = usable_axis(SpeedAxis {
+                        owner: Some(mode_num),
+                        steps,
+                    }) {
+                        candidates.push((mode_num, axis));
+                    }
                 }
             } else if !mode.values.is_empty() {
                 let values: Option<Vec<i64>> = mode
@@ -434,15 +458,12 @@ impl ParsedWorkMode {
                     .map(|value| value.value.as_i64())
                     .collect();
                 if let Some(values) = values {
-                    if usable_axis_len(i64::try_from(values.len()).ok()).is_some() {
-                        let steps = values.into_iter().map(|value| (mode_num, value)).collect();
-                        candidates.push((
-                            mode_num,
-                            SpeedAxis {
-                                owner: Some(mode_num),
-                                steps,
-                            },
-                        ));
+                    let steps = values.into_iter().map(|value| (mode_num, value)).collect();
+                    if let Some(axis) = usable_axis(SpeedAxis {
+                        owner: Some(mode_num),
+                        steps,
+                    }) {
+                        candidates.push((mode_num, axis));
                     }
                 }
             }
@@ -522,10 +543,27 @@ impl ParsedWorkMode {
             .iter()
             .map(|(value, mode)| (*value, mode.default_value()))
             .collect();
-        let presets = numbered[run_len..].iter().map(|(_, mode)| *mode).collect();
+
+        let Some(axis) = usable_axis(SpeedAxis { owner: None, steps }) else {
+            return FanControls {
+                axis: None,
+                presets: self.modes.values().collect(),
+            };
+        };
+
+        // Presets come from `self.modes`, not from `numbered`: `dedup_by_key`
+        // dropped same-valued duplicates to compute the run, and a duplicate
+        // ABOVE the run would otherwise vanish from `preset_modes` while
+        // `entities_for_work_mode` still emitted a button for it.
+        let on_axis: Vec<i64> = axis.steps.iter().map(|(mode, _)| *mode).collect();
+        let presets = self
+            .modes
+            .values()
+            .filter(|mode| !mode.value.as_i64().is_some_and(|v| on_axis.contains(&v)))
+            .collect();
 
         FanControls {
-            axis: Some(SpeedAxis { owner: None, steps }),
+            axis: Some(axis),
             presets,
         }
     }
@@ -787,6 +825,71 @@ mod test {
         assert_eq!(axis.max_ordinal(), 3);
     }
 
+    /// `dedup_by_key` removes a same-valued mode to compute the run, but the
+    /// preset list must still carry it. Building presets from the deduplicated
+    /// vector dropped it silently -- while `entities_for_work_mode` went on
+    /// emitting a button for it, so the fan and the buttons disagreed about
+    /// which modes exist.
+    #[test]
+    fn a_duplicate_valued_mode_above_the_run_survives_as_a_preset() {
+        let wm = modes_only(&[
+            ("Low", 1),
+            ("Medium", 2),
+            ("High", 3),
+            ("Schlaf", 16),
+            ("Sleep", 16),
+        ]);
+        let controls = wm.classify_fan_controls();
+
+        assert_eq!(controls.axis.as_ref().map(|a| a.max_ordinal()), Some(3));
+        assert_eq!(
+            preset_names(&controls),
+            vec!["Schlaf", "Sleep"],
+            "both same-valued modes are presets; neither may vanish"
+        );
+    }
+
+    /// The bound must be on the step VALUES, not just how many there are.
+    ///
+    /// An offset range like `{min: 250, max: 259}` is only ten steps, so a
+    /// length check waves it through -- but values 256..259 cannot be
+    /// commanded, and `fan_percentage_command` rejects them at command time.
+    /// With `optimistic: true` (every non-IoT device) Home Assistant moves the
+    /// card to the requested speed and leaves it there while the device never
+    /// changed. The only trace is a `log::error!` in the dispatcher.
+    #[test]
+    fn an_offset_range_whose_values_exceed_u8_is_not_an_axis() {
+        let mut wm = ParsedWorkMode::default();
+        wm.add("Offset".to_string(), 1.into());
+        wm.get_mut("Offset").unwrap().value_range = Some(250..260);
+
+        assert!(
+            wm.classify_fan_controls().axis.is_none(),
+            "ten steps, but four of them are uncommandable"
+        );
+    }
+
+    /// Same hole on the top-level path: three contiguous modes at 300, 301,
+    /// 302 are a valid-length run whose every value is uncommandable.
+    #[test]
+    fn a_top_level_run_whose_values_exceed_u8_is_not_an_axis() {
+        let wm = modes_only(&[("A", 300), ("B", 301), ("C", 302)]);
+        assert!(wm.classify_fan_controls().axis.is_none());
+    }
+
+    /// The boundary itself stays usable.
+    #[test]
+    fn steps_ending_exactly_at_255_are_still_an_axis() {
+        let mut wm = ParsedWorkMode::default();
+        wm.add("Edge".to_string(), 1.into());
+        wm.get_mut("Edge").unwrap().value_range = Some(250..256);
+        let axis = wm
+            .classify_fan_controls()
+            .axis
+            .expect("250..=255 is commandable");
+        assert_eq!(axis.command_for_ordinal(6), Some((1, 255)));
+    }
+
     /// The top-level-run path must respect the same upper bound as the other
     /// two. It did not: `usable_axis_len` guarded the `value_range` and named
     /// `values` paths, but this one only checked `run_len < 2`.
@@ -828,12 +931,13 @@ mod test {
     /// already been bitten by.
     #[test]
     fn large_mode_values_still_classify() {
+        // Contiguous, but neither value fits the u8 command encoding, so they
+        // are presets rather than speeds. Before the value bound this produced
+        // a two-step slider where neither step could be commanded.
         let wm = modes_only(&[("A", i64::MAX - 1), ("B", i64::MAX)]);
-        let axis = wm
-            .classify_fan_controls()
-            .axis
-            .expect("two contiguous values");
-        assert_eq!(axis.max_ordinal(), 2);
+        let controls = wm.classify_fan_controls();
+        assert!(controls.axis.is_none());
+        assert_eq!(preset_names(&controls), vec!["A", "B"]);
 
         let wm = modes_only(&[("A", i64::MAX)]);
         assert!(wm.classify_fan_controls().axis.is_none());
