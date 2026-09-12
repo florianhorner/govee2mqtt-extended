@@ -412,15 +412,6 @@ pub fn fan_percentage_command(axis: &SpeedAxis, ordinal: i64) -> anyhow::Result<
         )
     })?;
 
-    // `humidifier_set_parameter` casts both fields to `u8` for the BLE/IoT
-    // encoding. Refuse out-of-range values rather than letting the cast wrap
-    // and command a mode the user never asked for.
-    anyhow::ensure!(
-        u8::try_from(work_mode).is_ok() && u8::try_from(mode_value).is_ok(),
-        "fan speed ordinal {ordinal} maps to workMode {work_mode}/modeValue \
-         {mode_value}, which does not fit the u8 command encoding"
-    );
-
     Ok((work_mode, mode_value))
 }
 
@@ -1068,8 +1059,13 @@ mod test {
             fan.axis.as_ref().map(|a| a.max_ordinal()).unwrap_or(0) <= 255,
             "whatever axis survives must be commandable"
         );
+        // `preset_modes` carries `skip_serializing_if = "Vec::is_empty"`, so
+        // an empty list means the key is ABSENT, not `[]`. Indexing and
+        // unwrapping would panic here and the diagnostic below would never
+        // print -- in precisely the case this assertion exists to catch.
+        let presets = json.get("preset_modes").and_then(|v| v.as_array());
         assert!(
-            !json["preset_modes"].as_array().unwrap().is_empty(),
+            presets.is_some_and(|p| !p.is_empty()),
             "losing BOTH the axis and the presets would leave a power-only fan, \
              which is what bounding the classifier exists to prevent: {json}"
         );
@@ -1103,18 +1099,22 @@ mod test {
         }
     }
 
-    /// `humidifier_set_parameter` casts both fields to `u8`. A value past 255
-    /// would wrap and command an unrelated mode, so it is refused here instead.
+    /// Large values are commanded, not refused.
+    ///
+    /// This test previously asserted the opposite, on the stated grounds that
+    /// `humidifier_set_parameter` encodes both fields as `u8`. That cast is on
+    /// the BLE/IoT branch, whose codec is registered for `["H7160"]` only
+    /// (`ble.rs`), so a fan or purifier never reaches it: the command goes to
+    /// `set_work_mode(.., i64, i64)` and is serialized as full-range JSON.
+    /// `mqtt_number_command` already sends such values through the same
+    /// function unbounded.
     #[test]
-    fn commands_that_would_truncate_to_u8_are_refused() {
+    fn large_mode_values_are_commanded_not_refused() {
         let axis = SpeedAxis {
             owner: Some(1),
-            steps: vec![(1, 300)],
+            steps: vec![(1, 300), (1, 301)],
         };
-        let err = fan_percentage_command(&axis, 1).unwrap_err().to_string();
-        assert!(
-            err.contains("u8"),
-            "the error must name the encoding limit: {err}"
-        );
+        assert_eq!(fan_percentage_command(&axis, 1).unwrap(), (1, 300));
+        assert_eq!(fan_percentage_command(&axis, 2).unwrap(), (1, 301));
     }
 }

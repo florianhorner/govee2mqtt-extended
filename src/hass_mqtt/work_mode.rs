@@ -278,7 +278,17 @@ impl WorkMode {
     }
 }
 
-/// The command encoding is a `u8`, so a speed past 255 is uncommandable.
+/// Home Assistant's `speed_range_max` is serialized as a `u8`
+/// (`FanConfig::speed_range_max`), so an axis longer than this cannot be
+/// advertised at all.
+///
+/// Note this is a Home Assistant limit, not a Govee one. An earlier version of
+/// this file justified the cap with "the command encoding is a u8", which is
+/// false for every device that can have a fan: `humidifier_set_parameter`
+/// casts to `u8` only on the BLE/IoT branch, whose codec is registered for
+/// `["H7160"]` alone (`ble.rs`) -- a humidifier. Every fan and purifier falls
+/// through to `GoveeApiClient::set_work_mode`, which takes `i64` and
+/// serializes both fields as full-range JSON.
 const MAX_AXIS_STEPS: i64 = 255;
 
 /// Govee's `modeValue` is not always a speed scale, and its length is entirely
@@ -292,10 +302,10 @@ const MAX_AXIS_STEPS: i64 = 255;
 ///   device ends up with no fan entity at all rather than a preset-only one.
 ///   `classify_fan_controls` already refuses a one-element run for the
 ///   top-level shape; this applies the same rule to the other two.
-/// - **More than 255** cannot be commanded anyway, because
-///   `humidifier_set_parameter` encodes the value as a `u8`. Rejecting it here
-///   keeps `Fan::new` infallible instead of erroring and costing the device
-///   every entity it has.
+/// - **More than 255** cannot be advertised: Home Assistant's
+///   `speed_range_max` is a `u8`. Rejecting it here keeps `Fan::new`
+///   infallible instead of erroring and costing the device every entity it
+///   has.
 fn usable_axis_len(len: Option<i64>) -> Option<usize> {
     let len = len?;
     if (2..=MAX_AXIS_STEPS).contains(&len) {
@@ -307,23 +317,21 @@ fn usable_axis_len(len: Option<i64>) -> Option<usize> {
 
 /// Accept a fully-built axis, or reject it.
 ///
-/// Length alone is not enough. An offset range such as `{min: 250, max: 259}`
-/// is ten steps -- a fine length -- whose last four values cannot be commanded,
-/// because `humidifier_set_parameter` encodes both fields as `u8`. Advertising
-/// it gives Home Assistant a ten-step slider whose top end silently does
-/// nothing: the command fails in the dispatcher's `log::error!`, while
-/// `optimistic: true` leaves the card showing the speed the user picked.
+/// Only the step COUNT is bounded, because only the count has a real limit:
+/// `FanConfig::speed_range_max` is a `u8`.
 ///
-/// So every `(workMode, modeValue)` pair the axis can emit is checked here,
-/// where the axis is built, rather than at command time where the only
-/// remaining option is to fail.
+/// A previous version also required every `(workMode, modeValue)` pair to fit
+/// a `u8`, on the stated grounds that the command encoding is one. It is not,
+/// for any device that reaches this function: the `u8` cast in
+/// `humidifier_set_parameter` is on the BLE/IoT branch, whose codec exists
+/// only for `["H7160"]`, and `classify_fan_controls` runs solely for
+/// `DeviceType::Fan | AirPurifier`. Those always fall through to
+/// `set_work_mode(.., i64, i64)`. The value check therefore rejected axes
+/// whose commands would have succeeded -- `mqtt_number_command` pushes the
+/// same pair through the same function unbounded, and H7141's `Auto` range of
+/// 40..70 already ships that way.
 fn usable_axis(axis: SpeedAxis) -> Option<SpeedAxis> {
-    let len_ok = usable_axis_len(i64::try_from(axis.steps.len()).ok()).is_some();
-    let values_ok = axis
-        .steps
-        .iter()
-        .all(|(mode, value)| u8::try_from(*mode).is_ok() && u8::try_from(*value).is_ok());
-    (len_ok && values_ok).then_some(axis)
+    usable_axis_len(i64::try_from(axis.steps.len()).ok()).map(|_| axis)
 }
 
 /// How a Home Assistant fan's percentage maps onto Govee's `workMode` command.
@@ -533,6 +541,14 @@ impl ParsedWorkMode {
         // the device ended up with neither a speed axis NOR presets. Every
         // mode has to survive as a preset instead.
         let Some(run_len) = usable_axis_len(i64::try_from(run_len).ok()) else {
+            // Say so. A device silently losing its speed slider is the same
+            // failure shape as a sensor that never updates, and that one was
+            // deliberately moved from `trace` to `warn` in this branch.
+            log::warn!(
+                "work mode metadata yields a {run_len}-step top-level speed run, \
+                 which Home Assistant cannot advertise; exposing every mode as a \
+                 preset instead"
+            );
             return FanControls {
                 axis: None,
                 presets: self.modes.values().collect(),
@@ -545,6 +561,10 @@ impl ParsedWorkMode {
             .collect();
 
         let Some(axis) = usable_axis(SpeedAxis { owner: None, steps }) else {
+            log::warn!(
+                "top-level speed axis rejected as unadvertisable; exposing every \
+                 mode as a preset instead"
+            );
             return FanControls {
                 axis: None,
                 presets: self.modes.values().collect(),
@@ -559,7 +579,10 @@ impl ParsedWorkMode {
         let presets = self
             .modes
             .values()
-            .filter(|mode| !mode.value.as_i64().is_some_and(|v| on_axis.contains(&v)))
+            // `as_i64()` of None means the mode cannot be commanded at all
+            // (`mqtt_device_set_work_mode` bails on it), so it is not a preset
+            // either -- advertising it would put a dead entry in HA's dropdown.
+            .filter(|mode| mode.value.as_i64().is_some_and(|v| !on_axis.contains(&v)))
             .collect();
 
         FanControls {
@@ -849,45 +872,26 @@ mod test {
         );
     }
 
-    /// The bound must be on the step VALUES, not just how many there are.
+    /// Govee values above 255 are commandable, so they are not a reason to
+    /// refuse an axis.
     ///
-    /// An offset range like `{min: 250, max: 259}` is only ten steps, so a
-    /// length check waves it through -- but values 256..259 cannot be
-    /// commanded, and `fan_percentage_command` rejects them at command time.
-    /// With `optimistic: true` (every non-IoT device) Home Assistant moves the
-    /// card to the requested speed and leaves it there while the device never
-    /// changed. The only trace is a `log::error!` in the dispatcher.
+    /// An earlier version rejected these on the stated grounds that the wire
+    /// encoding is a `u8`. It is not for any device that gets a fan: the `u8`
+    /// cast lives on the BLE/IoT branch of `humidifier_set_parameter`, whose
+    /// codec is registered for `["H7160"]` only, and a fan always falls
+    /// through to `set_work_mode(.., i64, i64)`.
     #[test]
-    fn an_offset_range_whose_values_exceed_u8_is_not_an_axis() {
+    fn an_offset_range_with_large_values_is_still_an_axis() {
         let mut wm = ParsedWorkMode::default();
         wm.add("Offset".to_string(), 1.into());
         wm.get_mut("Offset").unwrap().value_range = Some(250..260);
 
-        assert!(
-            wm.classify_fan_controls().axis.is_none(),
-            "ten steps, but four of them are uncommandable"
-        );
-    }
-
-    /// Same hole on the top-level path: three contiguous modes at 300, 301,
-    /// 302 are a valid-length run whose every value is uncommandable.
-    #[test]
-    fn a_top_level_run_whose_values_exceed_u8_is_not_an_axis() {
-        let wm = modes_only(&[("A", 300), ("B", 301), ("C", 302)]);
-        assert!(wm.classify_fan_controls().axis.is_none());
-    }
-
-    /// The boundary itself stays usable.
-    #[test]
-    fn steps_ending_exactly_at_255_are_still_an_axis() {
-        let mut wm = ParsedWorkMode::default();
-        wm.add("Edge".to_string(), 1.into());
-        wm.get_mut("Edge").unwrap().value_range = Some(250..256);
         let axis = wm
             .classify_fan_controls()
             .axis
-            .expect("250..=255 is commandable");
-        assert_eq!(axis.command_for_ordinal(6), Some((1, 255)));
+            .expect("ten steps is a fine length, and the values are commandable");
+        assert_eq!(axis.max_ordinal(), 10);
+        assert_eq!(axis.command_for_ordinal(10), Some((1, 259)));
     }
 
     /// The top-level-run path must respect the same upper bound as the other
@@ -931,14 +935,15 @@ mod test {
     /// already been bitten by.
     #[test]
     fn large_mode_values_still_classify() {
-        // Contiguous, but neither value fits the u8 command encoding, so they
-        // are presets rather than speeds. Before the value bound this produced
-        // a two-step slider where neither step could be commanded.
+        // Two contiguous values are a valid axis whatever their magnitude:
+        // the Platform API serializes them as full-range integers.
         let wm = modes_only(&[("A", i64::MAX - 1), ("B", i64::MAX)]);
-        let controls = wm.classify_fan_controls();
-        assert!(controls.axis.is_none());
-        assert_eq!(preset_names(&controls), vec!["A", "B"]);
+        assert_eq!(
+            wm.classify_fan_controls().axis.map(|a| a.max_ordinal()),
+            Some(2)
+        );
 
+        // A single mode is still not a scale.
         let wm = modes_only(&[("A", i64::MAX)]);
         assert!(wm.classify_fan_controls().axis.is_none());
     }

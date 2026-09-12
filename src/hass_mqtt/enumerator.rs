@@ -376,22 +376,30 @@ mod test {
     /// reference them keep working (upstream wez/govee2mqtt#283).
     #[tokio::test]
     async fn the_fan_is_additive_and_removes_nothing() {
-        // Measured against the same baseline the sibling test uses, not an
-        // absolute floor. `>= 10` would stay green while a regression quietly
-        // dropped two pre-existing entities -- which is precisely what this
-        // test is named for.
-        let as_heater = entity_count(&h7124_as(DeviceType::Heater)).await;
+        // The sibling test already pins the purifier-vs-heater delta. Asserting
+        // it again here would make this test a duplicate, and a duplicate of a
+        // DIFFERENTIAL check cannot see a regression that removes an entity
+        // from BOTH device types -- which nearly every enumeration branch is,
+        // since most are device-type independent.
+        //
+        // So this one keeps an absolute count instead. It is brittle by
+        // design: it must be updated deliberately when the H7124's entity set
+        // legitimately changes, which is the point.
         let as_purifier = entity_count(&h7124_as(DeviceType::AirPurifier)).await;
 
         assert_eq!(
-            as_purifier,
-            as_heater + 1,
-            "the fan is added; nothing the device already had may disappear"
-        );
-        assert!(
-            as_heater >= 9,
-            "sanity: the H7124's pre-existing entity set should be substantial, \
-             got {as_heater} -- if this drops, the baseline itself regressed"
+            as_purifier, 16,
+            "the H7124 publishes a fixed set from powerSwitch, workMode, \
+             nightlightToggle, brightness, colorRgb, nightlightScene, \
+             filterLifeTime and airQuality, plus the fan. A change here means \
+             an entity appeared or vanished -- confirm which before updating \
+             this number.\n\
+             \n\
+             The same device on real hardware publishes 17: `entity_count` \
+             seeds an EMPTY scene catalog, so `SceneModeSelect` returns None \
+             here and `select.<device>_mode_scene` is the one entity a live \
+             run has and this test does not. Verified against an H7124 via \
+             scripts/live_mqtt.py."
         );
     }
 
