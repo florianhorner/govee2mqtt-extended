@@ -239,10 +239,7 @@ impl DeviceLight {
             // plus a fan entity on one device.
             None if matches!(
                 device_type,
-                DeviceType::Humidifier
-                    | DeviceType::Dehumidifier
-                    | DeviceType::Fan
-                    | DeviceType::AirPurifier
+                DeviceType::Humidifier | DeviceType::Fan | DeviceType::AirPurifier
             ) =>
             {
                 Some("Night Light".to_string())
@@ -292,7 +289,6 @@ mod test {
     async fn an_appliances_light_is_named_night_light() {
         for device_type in [
             crate::platform_api::DeviceType::Humidifier,
-            crate::platform_api::DeviceType::Dehumidifier,
             crate::platform_api::DeviceType::Fan,
             crate::platform_api::DeviceType::AirPurifier,
         ] {

@@ -246,3 +246,17 @@ the fan route is inconsistent; the useful version covers all of them.
 **Context:** Found by the pre-ship adversarial review. Consistency with existing routes rather than
 a new class of hole, which is why it was not fixed inline.
 **Effort:** Small per route, medium to do uniformly.
+
+## A dehumidifier's light is not named "Night Light"
+**What:** `light.rs` names an appliance's light "Night Light" for `Humidifier`, `Fan` and
+`AirPurifier`, but not `Dehumidifier`. `enumerate_entities_for_device` creates a `Humidifier`
+entity for `Humidifier | Dehumidifier` alike, so a dehumidifier with a nightlight renders a
+`light.*` and a `humidifier.*` under the same friendly name.
+**Why:** Same confusion the guard exists to prevent for humidifiers; a one-token omission.
+**Pros:** One variant in an existing `matches!`. Display-name only — `unique_id` and therefore
+`entity_id` are untouched, so no automation breaks.
+**Cons:** It renames an entity for existing dehumidifier owners, who did not ask for it.
+**Context:** Noticed while extending that guard for the fan platform. Deliberately NOT included
+there: the fan PR has no other reason to touch dehumidifiers, and scope discipline beats a
+drive-by fix that changes what a user sees.
+**Effort:** Trivial, but wants its own change so the rename is visible in its own diff.
