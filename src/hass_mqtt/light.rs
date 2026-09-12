@@ -232,7 +232,21 @@ impl DeviceLight {
 
         let name = match segment {
             Some(n) => Some(format!("Segment {:03}", n + 1)),
-            None if device_type == DeviceType::Humidifier => Some("Night Light".to_string()),
+            // An appliance's light is its night light, not the appliance. Left
+            // unnamed it inherits the bare device name and collides with the
+            // entity that IS the appliance -- a humidifier, or now a fan or
+            // purifier. The H7124 purifier is exactly this: RGB nightlight
+            // plus a fan entity on one device.
+            None if matches!(
+                device_type,
+                DeviceType::Humidifier
+                    | DeviceType::Dehumidifier
+                    | DeviceType::Fan
+                    | DeviceType::AirPurifier
+            ) =>
+            {
+                Some("Night Light".to_string())
+            }
             None => None,
         };
 
@@ -270,6 +284,66 @@ impl DeviceLight {
 
 #[cfg(test)]
 mod test {
+    /// An appliance's light is its NIGHT light, not the appliance. Left unnamed
+    /// it inherits the bare device name and renders with the same friendly name
+    /// as the entity that actually IS the appliance. The H7124 purifier is
+    /// exactly this shape: an RGB nightlight alongside a fan entity.
+    #[tokio::test]
+    async fn an_appliances_light_is_named_night_light() {
+        for device_type in [
+            crate::platform_api::DeviceType::Humidifier,
+            crate::platform_api::DeviceType::Dehumidifier,
+            crate::platform_api::DeviceType::Fan,
+            crate::platform_api::DeviceType::AirPurifier,
+        ] {
+            assert_eq!(
+                night_light_name_for(device_type.clone()).await.as_deref(),
+                Some("Night Light"),
+                "{device_type:?} carries a night light, not a primary light"
+            );
+        }
+    }
+
+    /// A real light keeps the bare device name; it IS the device.
+    #[tokio::test]
+    async fn a_light_device_keeps_the_device_name() {
+        assert_eq!(
+            night_light_name_for(crate::platform_api::DeviceType::Light).await,
+            None
+        );
+    }
+
+    async fn night_light_name_for(device_type: crate::platform_api::DeviceType) -> Option<String> {
+        use crate::service::state::{SceneCatalogCache, State};
+        use std::sync::Arc;
+
+        const DEVICE_ID: &str = "AA:BB:CC:DD:EE:FF:11:22";
+        let mut device = ServiceDevice::new("H7124", DEVICE_ID);
+        device.http_device_info = Some(crate::platform_api::HttpDeviceInfo {
+            sku: "H7124".to_string(),
+            device: DEVICE_ID.to_string(),
+            device_name: "Test".to_string(),
+            device_type,
+            capabilities: vec![],
+        });
+
+        let state: StateHandle = Arc::new(State::new());
+        {
+            let mut canonical = state.device_mut(&device.sku, &device.id).await;
+            canonical.set_scene_catalog(SceneCatalogCache {
+                platform_signature: None,
+                categories: vec![],
+            });
+        }
+
+        DeviceLight::for_device(&device, &state, None)
+            .await
+            .unwrap()
+            .light
+            .base
+            .name
+    }
+
     use super::*;
 
     fn light_config_with_color_modes(modes: Vec<String>) -> LightConfig {

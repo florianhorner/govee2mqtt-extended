@@ -23,7 +23,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use mosquitto_rs::router::{Params, Payload, State};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value as JsonValue};
 
 /// The instance name Govee uses for a fan or purifier's oscillation toggle.
 const OSCILLATION_INSTANCE: &str = "oscillationToggle";
@@ -138,6 +138,10 @@ impl Fan {
                     .presets
                     .iter()
                     .map(|mode| mode.name.clone())
+                    // Home Assistant rejects the ENTIRE fan payload when
+                    // `preset_modes` contains `payload_reset_preset_mode`, and
+                    // these names are raw vendor strings.
+                    .filter(|name| name != RESET_PAYLOAD)
                     .collect();
                 presets.sort();
                 (controls.axis, presets)
@@ -145,29 +149,36 @@ impl Fan {
             None => (None, vec![]),
         };
 
+        // `classify_fan_controls` already bounds the axis to something Home
+        // Assistant and the `u8` command encoding can both express. Degrade
+        // rather than error if that ever stops holding: an `Err` here would
+        // propagate through `advise_hass_of_light_state`, which re-enumerates
+        // on EVERY state change, costing the device not just its fan but every
+        // entity it has -- permanently, not just at discovery.
+        let axis = axis.filter(|axis| {
+            let expressible = u8::try_from(axis.max_ordinal()).is_ok() && axis.max_ordinal() >= 2;
+            if !expressible {
+                log::warn!(
+                    "{device} produced a {n}-step fan speed axis, which Home \
+                     Assistant cannot express; falling back to a preset-only fan",
+                    n = axis.max_ordinal()
+                );
+            }
+            expressible
+        });
+
         let (
             percentage_command_topic,
             percentage_state_topic,
             speed_range_max,
             payload_reset_percentage,
         ) = match &axis {
-            Some(axis) => {
-                // A speed scale wider than a u8 is not a real device; refuse to
-                // advertise a range we cannot command.
-                let max = u8::try_from(axis.max_ordinal()).map_err(|_| {
-                    anyhow!(
-                        "{device} advertises {n} fan speeds, which does not fit \
-                         Home Assistant's speed range",
-                        n = axis.max_ordinal()
-                    )
-                })?;
-                (
-                    Some(instantiate_route(FAN_SET_PERCENTAGE_ROUTE, &[("id", &id)])?),
-                    Some(format!("gv2mqtt/fan/{id}/notify-percentage")),
-                    Some(max),
-                    Some(RESET_PAYLOAD),
-                )
-            }
+            Some(axis) => (
+                Some(instantiate_route(FAN_SET_PERCENTAGE_ROUTE, &[("id", &id)])?),
+                Some(format!("gv2mqtt/fan/{id}/notify-percentage")),
+                Some(axis.speed_range_max()),
+                Some(RESET_PAYLOAD),
+            ),
             None => (None, None, None, None),
         };
 
@@ -302,6 +313,25 @@ impl Fan {
         publishes
     }
 
+    /// Map one publish onto the topic it belongs to.
+    ///
+    /// Separate from `notify_state` so the wiring is testable: swapping the
+    /// percentage and preset topics here would be invisible to every
+    /// `state_publishes` test, because none of them reach this mapping.
+    fn topic_and_payload<'a>(&'a self, publish: &'a FanPublish) -> Option<(&'a str, &'a str)> {
+        match publish {
+            FanPublish::Power(payload) => Some((self.fan.state_topic.as_str(), payload)),
+            FanPublish::Percentage(payload) => Some((
+                self.fan.percentage_state_topic.as_deref()?,
+                payload.as_str(),
+            )),
+            FanPublish::PresetMode(payload) => Some((
+                self.fan.preset_mode_state_topic.as_deref()?,
+                payload.as_str(),
+            )),
+        }
+    }
+
     /// The reported `(workMode, modeValue)` pair, when the device has told us.
     fn reported_work_mode(device: &ServiceDevice) -> Option<(i64, Option<i64>)> {
         let cap = device.get_state_capability_by_instance("workMode")?;
@@ -335,36 +365,33 @@ impl EntityInstance for Fan {
         for publish in
             self.state_publishes(is_on, Self::reported_work_mode(&device), parsed.as_ref())
         {
-            let (topic, payload) = match &publish {
-                FanPublish::Power(payload) => (&self.fan.state_topic, *payload),
-                FanPublish::Percentage(payload) => {
-                    let Some(topic) = &self.fan.percentage_state_topic else {
-                        continue;
-                    };
-                    (topic, payload.as_str())
-                }
-                FanPublish::PresetMode(payload) => {
-                    let Some(topic) = &self.fan.preset_mode_state_topic else {
-                        continue;
-                    };
-                    (topic, payload.as_str())
-                }
+            // An axis with no advertised state topic is skipped rather than
+            // published to a topic Home Assistant never subscribed to.
+            let Some((topic, payload)) = self.topic_and_payload(&publish) else {
+                continue;
             };
             client.publish(topic, payload).await?;
         }
 
         if let Some(topic) = &self.fan.oscillation_state_topic {
             if let Some(cap) = device.get_state_capability_by_instance(OSCILLATION_INSTANCE) {
-                if let Some(value) = cap.state.pointer("/value").and_then(|v| v.as_i64()) {
-                    client
-                        .publish(topic, if value != 0 { "ON" } else { "OFF" })
-                        .await?;
+                if let Some(payload) = oscillation_payload(&cap.state) {
+                    client.publish(topic, payload).await?;
                 }
             }
         }
 
         Ok(())
     }
+}
+
+/// Govee reports a toggle as an integer; anything non-zero is on.
+///
+/// `None` when the capability carries no integer under `/value`, so a
+/// malformed reading leaves the previous state rather than forcing "OFF".
+fn oscillation_payload(cap_state: &JsonValue) -> Option<&'static str> {
+    let value = cap_state.pointer("/value")?.as_i64()?;
+    Some(if value != 0 { "ON" } else { "OFF" })
 }
 
 /// Resolve a Home Assistant fan percentage ordinal into a Govee work-mode
@@ -397,6 +424,36 @@ pub fn fan_percentage_command(axis: &SpeedAxis, ordinal: i64) -> anyhow::Result<
     Ok((work_mode, mode_value))
 }
 
+/// What an inbound percentage ordinal means for the device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanSpeedAction {
+    /// Home Assistant published `speed_range_min - 1`, i.e. the slider was
+    /// dragged to zero. That is a power-off request, not an invalid speed.
+    PowerOff,
+    SetSpeed {
+        work_mode: i64,
+        mode_value: i64,
+    },
+}
+
+/// Decide what an ordinal means, without needing a device or a broker.
+///
+/// Kept out of the MQTT handler so the 0-means-off rule is covered. Folded
+/// into the handler it was invisible to the suite: deleting the branch
+/// entirely left every test green while silently turning slide-to-off into an
+/// error.
+pub fn fan_speed_action(axis: Option<&SpeedAxis>, ordinal: i64) -> anyhow::Result<FanSpeedAction> {
+    if ordinal == 0 {
+        return Ok(FanSpeedAction::PowerOff);
+    }
+    let axis = axis.ok_or_else(|| anyhow!("device has no fan speed axis to set"))?;
+    let (work_mode, mode_value) = fan_percentage_command(axis, ordinal)?;
+    Ok(FanSpeedAction::SetSpeed {
+        work_mode,
+        mode_value,
+    })
+}
+
 pub async fn mqtt_fan_set_percentage(
     Payload(ordinal): Payload<i64>,
     Params(IdParameter { id }): Params<IdParameter>,
@@ -405,22 +462,23 @@ pub async fn mqtt_fan_set_percentage(
     log::info!("mqtt_fan_set_percentage: {id}: {ordinal}");
     let device = state.resolve_device_for_control(&id).await?;
 
-    // HA publishes `speed_range_min - 1` (0) when the slider is dragged to
-    // zero. That is a power-off request, not an invalid speed.
-    if ordinal == 0 {
-        return state.device_power_on(&device, false).await;
+    // `with_device` fails when there is no workMode capability at all, but an
+    // on/off-only fan can still legitimately receive ordinal 0.
+    let axis = ParsedWorkMode::with_device(&device)
+        .ok()
+        .and_then(|work_modes| work_modes.classify_fan_controls().axis);
+
+    match fan_speed_action(axis.as_ref(), ordinal)? {
+        FanSpeedAction::PowerOff => state.device_power_on(&device, false).await,
+        FanSpeedAction::SetSpeed {
+            work_mode,
+            mode_value,
+        } => {
+            state
+                .humidifier_set_parameter(&device, work_mode, mode_value)
+                .await
+        }
     }
-
-    let work_modes = ParsedWorkMode::with_device(&device)?;
-    let controls = work_modes.classify_fan_controls();
-    let axis = controls
-        .axis
-        .ok_or_else(|| anyhow!("{id} has no fan speed axis to set"))?;
-
-    let (work_mode, mode_value) = fan_percentage_command(&axis, ordinal)?;
-    state
-        .humidifier_set_parameter(&device, work_mode, mode_value)
-        .await
 }
 
 #[cfg(test)]
@@ -830,6 +888,123 @@ mod test {
                 FanPublish::PresetMode("None".to_string()),
                 FanPublish::Percentage("2".to_string()),
             ]
+        );
+    }
+
+    /// Dragging the HA slider to zero publishes `speed_range_min - 1`. That is
+    /// a power-off, not an invalid speed. Mutation-checked: deleting the branch
+    /// used to leave every test green while breaking slide-to-off.
+    #[test]
+    fn ordinal_zero_is_a_power_off_not_a_speed() {
+        let axis = owned_axis();
+        assert_eq!(
+            fan_speed_action(Some(&axis), 0).unwrap(),
+            FanSpeedAction::PowerOff
+        );
+        // Still a power-off on a fan that has no speed axis at all, which is
+        // the only control such a device has.
+        assert_eq!(fan_speed_action(None, 0).unwrap(), FanSpeedAction::PowerOff);
+    }
+
+    #[test]
+    fn a_real_ordinal_becomes_a_speed_command() {
+        let axis = owned_axis();
+        assert_eq!(
+            fan_speed_action(Some(&axis), 2).unwrap(),
+            FanSpeedAction::SetSpeed {
+                work_mode: 1,
+                mode_value: 2
+            }
+        );
+        assert!(
+            fan_speed_action(None, 2).is_err(),
+            "a non-zero speed on an axis-less fan is an error, not a silent no-op"
+        );
+    }
+
+    /// The wiring `state_publishes` tests cannot see: which topic each publish
+    /// lands on. Swapping percentage and preset here would be invisible to
+    /// every ordering test.
+    #[tokio::test]
+    async fn each_publish_maps_to_its_own_topic() {
+        let fan = fan_for("H7111").await;
+
+        let (topic, payload) = fan.topic_and_payload(&FanPublish::Power("ON")).unwrap();
+        assert_eq!(topic, fan.fan.state_topic);
+        assert_eq!(payload, "ON");
+
+        // Bound so the borrow outlives the call.
+        let percentage = FanPublish::Percentage("3".to_string());
+        let (topic, payload) = fan.topic_and_payload(&percentage).unwrap();
+        assert!(topic.ends_with("/notify-percentage"), "got {topic}");
+        assert_eq!(payload, "3");
+
+        let preset = FanPublish::PresetMode("Auto".to_string());
+        let (topic, payload) = fan.topic_and_payload(&preset).unwrap();
+        assert!(topic.ends_with("/notify-preset-mode"), "got {topic}");
+        assert_eq!(payload, "Auto");
+    }
+
+    /// An on/off-only fan advertises neither axis topic, so those publishes are
+    /// dropped rather than sent somewhere Home Assistant never subscribed.
+    #[tokio::test]
+    async fn publishes_for_unadvertised_axes_are_dropped() {
+        let device = device_with_capabilities(vec![on_off("powerSwitch")]);
+        let fan = Fan::new(&device, &empty_state()).await.unwrap().unwrap();
+
+        assert!(fan.topic_and_payload(&FanPublish::Power("OFF")).is_some());
+        let percentage = FanPublish::Percentage("None".to_string());
+        assert!(
+            fan.topic_and_payload(&percentage).is_none(),
+            "no percentage topic was advertised, so nothing may be published to one"
+        );
+        let preset = FanPublish::PresetMode("None".to_string());
+        assert!(fan.topic_and_payload(&preset).is_none());
+    }
+
+    /// Govee reports toggles as integers. A malformed reading publishes
+    /// nothing rather than asserting "OFF" on no evidence.
+    #[test]
+    fn oscillation_readback_maps_integers_and_ignores_junk() {
+        assert_eq!(oscillation_payload(&json!({"value": 1})), Some("ON"));
+        assert_eq!(oscillation_payload(&json!({"value": 2})), Some("ON"));
+        assert_eq!(oscillation_payload(&json!({"value": 0})), Some("OFF"));
+        assert_eq!(oscillation_payload(&json!({"value": "on"})), None);
+        assert_eq!(oscillation_payload(&json!({})), None);
+    }
+
+    /// A Govee mode literally named "None" would collide with
+    /// `payload_reset_preset_mode`, and Home Assistant discards the ENTIRE fan
+    /// payload when `preset_modes` contains it. These are raw vendor strings.
+    #[tokio::test]
+    async fn a_mode_named_none_is_kept_out_of_the_preset_list() {
+        let mut device = device_from_fixture("H7111");
+        let info = device.http_device_info.as_mut().unwrap();
+        let cap = info
+            .capabilities
+            .iter_mut()
+            .find(|cap| cap.instance == "workMode")
+            .unwrap();
+        if let Some(crate::platform_api::DeviceParameters::Struct { fields }) = &mut cap.parameters
+        {
+            for field in fields.iter_mut() {
+                if let crate::platform_api::DeviceParameters::Enum { options } =
+                    &mut field.field_type
+                {
+                    for option in options.iter_mut() {
+                        if option.name == "Auto" {
+                            option.name = "None".to_string();
+                        }
+                    }
+                }
+            }
+        }
+
+        let json = config_for(&device).await;
+        let presets = json["preset_modes"].as_array().unwrap();
+        assert!(
+            !presets.iter().any(|p| p == "None"),
+            "a preset named None would make HA drop the whole payload: {presets:?}"
         );
     }
 

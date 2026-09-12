@@ -317,6 +317,77 @@ mod test {
         entities.len()
     }
 
+    /// The H7124 purifier this feature was built for, with its `device_type`
+    /// swapped so the same capability list can be enumerated as two different
+    /// device kinds.
+    fn h7124_as(device_type: DeviceType) -> ServiceDevice {
+        #[derive(serde::Deserialize)]
+        struct DeviceListFixture {
+            data: Vec<HttpDeviceInfo>,
+        }
+        let resp: DeviceListFixture =
+            crate::platform_api::from_json(include_str!("../../test-data/purifier-h7124.json"))
+                .unwrap();
+        let mut info = resp.data.into_iter().next().unwrap();
+        info.device_type = device_type;
+        info.device = DEVICE_ID.to_string();
+
+        let mut device = ServiceDevice::new("H7124", DEVICE_ID);
+        device.http_device_info = Some(info);
+        device
+    }
+
+    /// An `AirPurifier` gains exactly one entity over the same capabilities
+    /// enumerated as a `Heater`: the fan.
+    ///
+    /// `Heater` is the comparison because it shares every other branch --
+    /// both are non-`Light` (so both get a scene-mode select) and neither is a
+    /// humidifier -- so the delta isolates the fan dispatch arm itself.
+    ///
+    /// This is the test that was missing: every other fan test calls
+    /// `Fan::new` directly, so deleting the `DeviceType::Fan | AirPurifier`
+    /// arm from `enumerate_entities_for_device` left the whole suite green
+    /// while the feature was entirely unreachable in production.
+    #[tokio::test]
+    async fn an_air_purifier_gains_exactly_one_entity_the_fan() {
+        let as_heater = entity_count(&h7124_as(DeviceType::Heater)).await;
+        let as_purifier = entity_count(&h7124_as(DeviceType::AirPurifier)).await;
+
+        assert_eq!(
+            as_purifier,
+            as_heater + 1,
+            "an air purifier must gain the fan entity and nothing else \
+             (heater: {as_heater}, purifier: {as_purifier})"
+        );
+    }
+
+    /// `DeviceType::Fan` takes the same arm. Asserted separately because the
+    /// match covers two variants and a typo could drop either one.
+    #[tokio::test]
+    async fn a_fan_device_type_also_gains_the_fan_entity() {
+        let as_heater = entity_count(&h7124_as(DeviceType::Heater)).await;
+        let as_fan = entity_count(&h7124_as(DeviceType::Fan)).await;
+
+        assert_eq!(as_fan, as_heater + 1);
+    }
+
+    /// The fan is additive. A purifier keeps the power switch, work-mode
+    /// entities and scene select it had before, so existing automations that
+    /// reference them keep working (upstream wez/govee2mqtt#283).
+    #[tokio::test]
+    async fn the_fan_is_additive_and_removes_nothing() {
+        let as_purifier = entity_count(&h7124_as(DeviceType::AirPurifier)).await;
+
+        // The H7124 carries powerSwitch, workMode, nightlightToggle,
+        // brightness, colorRgb, nightlightScene, filterLifeTime and airQuality,
+        // so its entity set is substantial. A regression that replaced the
+        // pre-existing entities with the fan would collapse this number.
+        assert!(
+            as_purifier >= 10,
+            "expected the pre-existing entity set plus the fan, got {as_purifier}"
+        );
+    }
+
     /// A Platform-API device that advertises `musicMode` gains exactly two
     /// extra entities: the sensitivity slider and the button that clears it.
     /// They ship together on purpose, because Home Assistant cannot return a

@@ -274,6 +274,33 @@ impl WorkMode {
     }
 }
 
+/// The command encoding is a `u8`, so a speed past 255 is uncommandable.
+const MAX_AXIS_STEPS: i64 = 255;
+
+/// Govee's `modeValue` is not always a speed scale, and its length is entirely
+/// vendor-controlled. An axis is usable only with at least two steps and at
+/// most [`MAX_AXIS_STEPS`].
+///
+/// Both bounds exist for concrete reasons, not defensiveness:
+///
+/// - **Fewer than two steps** makes Home Assistant reject the *entire* fan
+///   discovery payload (`speed_range_max must be > speed_range_min`), so the
+///   device ends up with no fan entity at all rather than a preset-only one.
+///   `classify_fan_controls` already refuses a one-element run for the
+///   top-level shape; this applies the same rule to the other two.
+/// - **More than 255** cannot be commanded anyway, because
+///   `humidifier_set_parameter` encodes the value as a `u8`. Rejecting it here
+///   keeps `Fan::new` infallible instead of erroring and costing the device
+///   every entity it has.
+fn usable_axis_len(len: Option<i64>) -> Option<usize> {
+    let len = len?;
+    if (2..=MAX_AXIS_STEPS).contains(&len) {
+        usize::try_from(len).ok()
+    } else {
+        None
+    }
+}
+
 /// How a Home Assistant fan's percentage maps onto Govee's `workMode` command.
 ///
 /// Govee exposes fan speed in three incompatible shapes, and only one of them
@@ -299,6 +326,15 @@ impl SpeedAxis {
     /// HA for "off" and is never a step.
     pub fn max_ordinal(&self) -> usize {
         self.steps.len()
+    }
+
+    /// `max_ordinal` as the `u8` the discovery payload carries.
+    ///
+    /// Saturating rather than fallible: `usable_axis_len` already bounds every
+    /// constructed axis to `2..=255`, and a panic or an error on this path
+    /// would cost the device every entity it has (see `Fan::new`).
+    pub fn speed_range_max(&self) -> u8 {
+        u8::try_from(self.max_ordinal()).unwrap_or(u8::MAX)
     }
 
     /// The command pair for a 1-based ordinal, or `None` when out of range.
@@ -372,22 +408,17 @@ impl ParsedWorkMode {
             };
 
             if let Some(range) = &mode.value_range {
-                let steps = range.clone().map(|value| (mode_num, value)).collect();
-                candidates.push((
-                    mode_num,
-                    SpeedAxis {
-                        owner: Some(mode_num),
-                        steps,
-                    },
-                ));
-            } else if !mode.values.is_empty() {
-                let values: Option<Vec<i64>> = mode
-                    .values
-                    .iter()
-                    .map(|value| value.value.as_i64())
-                    .collect();
-                if let Some(values) = values {
-                    let steps = values.into_iter().map(|value| (mode_num, value)).collect();
+                // Check the length BEFORE materializing. `value_range` comes
+                // straight from Govee JSON with no bound, and a 24-bit range
+                // (a size Govee really does use elsewhere, for colorRgb) would
+                // be 16.7M tuples -- on a path that runs for every state
+                // change via `advise_hass_of_light_state`.
+                if let Some(len) = usable_axis_len(range.end.checked_sub(range.start)) {
+                    let steps = range
+                        .clone()
+                        .take(len)
+                        .map(|value| (mode_num, value))
+                        .collect();
                     candidates.push((
                         mode_num,
                         SpeedAxis {
@@ -395,6 +426,24 @@ impl ParsedWorkMode {
                             steps,
                         },
                     ));
+                }
+            } else if !mode.values.is_empty() {
+                let values: Option<Vec<i64>> = mode
+                    .values
+                    .iter()
+                    .map(|value| value.value.as_i64())
+                    .collect();
+                if let Some(values) = values {
+                    if usable_axis_len(i64::try_from(values.len()).ok()).is_some() {
+                        let steps = values.into_iter().map(|value| (mode_num, value)).collect();
+                        candidates.push((
+                            mode_num,
+                            SpeedAxis {
+                                owner: Some(mode_num),
+                                steps,
+                            },
+                        ));
+                    }
                 }
             }
         }
@@ -435,10 +484,22 @@ impl ParsedWorkMode {
             .collect();
         numbered.sort_by_key(|(value, _)| *value);
 
+        // Two modes can share one integer value -- `modes` is keyed by NAME,
+        // and localized duplicates are a documented reality here (see the join
+        // warning in `with_capability`). Deduplicate before walking the run, or
+        // a duplicate at the minimum breaks contiguity and silently costs a
+        // three-speed fan its slider.
+        numbered.dedup_by_key(|(value, _)| *value);
+
         let mut run_len = 0usize;
         for (index, (value, _)) in numbered.iter().enumerate() {
-            match numbered.first() {
-                Some((first, _)) if *value == first + index as i64 => run_len = index + 1,
+            // `first + index` would overflow for a mode value near i64::MAX:
+            // a panic in debug, a silent wrap in release.
+            let expected = numbered.first().and_then(|(first, _)| {
+                i64::try_from(index).ok().and_then(|i| first.checked_add(i))
+            });
+            match expected {
+                Some(expected) if *value == expected => run_len = index + 1,
                 _ => break,
             }
         }
@@ -628,6 +689,121 @@ mod test {
             "Sleep is a preset, so the speed axis reports nothing"
         );
         assert_eq!(axis.ordinal_for_state(gear_mode, Some(2)), Some(2));
+    }
+
+    /// Home Assistant rejects the ENTIRE fan discovery payload when
+    /// `speed_range_max` is not greater than `speed_range_min`, so a one-step
+    /// axis costs the device its fan entity altogether rather than degrading to
+    /// a preset-only one. `classify_fan_controls` already refused a one-element
+    /// run for the top-level shape; these are the other two shapes.
+    #[test]
+    fn a_one_step_axis_is_not_an_axis() {
+        let mut wm = ParsedWorkMode::default();
+        wm.add("Solo".to_string(), 1.into());
+        wm.get_mut("Solo").unwrap().value_range = Some(5..6);
+        assert!(
+            wm.classify_fan_controls().axis.is_none(),
+            "a single-value range is a button, not a slider"
+        );
+
+        let mut wm = ParsedWorkMode::default();
+        wm.add("Solo".to_string(), 1.into());
+        wm.get_mut("Solo").unwrap().values = vec![WorkModeValue {
+            value: 1.into(),
+            name: Some("Only".to_string()),
+            computed_label: String::new(),
+        }];
+        assert!(
+            wm.classify_fan_controls().axis.is_none(),
+            "a single named sub-option is a button, not a slider"
+        );
+    }
+
+    /// A reversed range yields no steps at all, which HA rejects the same way.
+    #[test]
+    fn a_reversed_range_is_not_an_axis() {
+        let mut wm = ParsedWorkMode::default();
+        wm.add("Backwards".to_string(), 1.into());
+        wm.get_mut("Backwards").unwrap().value_range = Some(9..2);
+        assert!(wm.classify_fan_controls().axis.is_none());
+    }
+
+    /// `value_range` is vendor-controlled and unbounded. Govee uses 24-bit
+    /// ranges elsewhere (colorRgb), and this runs on EVERY state change via
+    /// `advise_hass_of_light_state` -- materialising 16.7M tuples there would
+    /// be ~268 MB per notify. It is also uncommandable: the wire encoding is a
+    /// u8.
+    #[test]
+    fn an_absurdly_wide_range_is_refused_without_materialising_it() {
+        let mut wm = ParsedWorkMode::default();
+        wm.add("Huge".to_string(), 1.into());
+        wm.get_mut("Huge").unwrap().value_range = Some(0..16_777_216);
+
+        let controls = wm.classify_fan_controls();
+        assert!(
+            controls.axis.is_none(),
+            "a 16.7M-step range is neither commandable nor allocatable"
+        );
+        assert_eq!(preset_names(&controls), vec!["Huge"]);
+    }
+
+    #[test]
+    fn an_axis_at_the_u8_boundary_is_still_usable() {
+        let mut wm = ParsedWorkMode::default();
+        wm.add("Wide".to_string(), 1.into());
+        wm.get_mut("Wide").unwrap().value_range = Some(1..256); // 255 steps
+        let axis = wm
+            .classify_fan_controls()
+            .axis
+            .expect("255 steps is usable");
+        assert_eq!(axis.max_ordinal(), 255);
+        assert_eq!(axis.speed_range_max(), 255);
+
+        let mut wm = ParsedWorkMode::default();
+        wm.add("TooWide".to_string(), 1.into());
+        wm.get_mut("TooWide").unwrap().value_range = Some(1..257); // 256 steps
+        assert!(
+            wm.classify_fan_controls().axis.is_none(),
+            "256 steps cannot be commanded through the u8 encoding"
+        );
+    }
+
+    /// `modes` is keyed by NAME, so two names can carry one value -- and
+    /// localized duplicates are the documented reality here. A duplicate at the
+    /// minimum used to break contiguity and silently cost a three-speed fan its
+    /// slider.
+    #[test]
+    fn duplicate_mode_values_do_not_destroy_the_run() {
+        let wm = modes_only(&[("Low", 1), ("Niedrig", 1), ("Medium", 2), ("High", 3)]);
+        let axis = wm
+            .classify_fan_controls()
+            .axis
+            .expect("1,1,2,3 still contains the run 1,2,3");
+        assert_eq!(axis.max_ordinal(), 3);
+    }
+
+    /// Large mode values still classify correctly.
+    ///
+    /// Note on the `checked_add` in the contiguity walk: after `dedup_by_key`
+    /// the values are distinct and ascending, so `first + index` is bounded by
+    /// `values[index]` and can never overflow. The checked arithmetic is kept
+    /// because that invariant lives in a different statement than the addition
+    /// and a future change to the dedup would silently reintroduce the hazard
+    /// -- but it is unreachable today, and mutation-testing confirms no test
+    /// can distinguish it. This test pins the classification, not the
+    /// arithmetic; claiming otherwise would be the fake coverage this file has
+    /// already been bitten by.
+    #[test]
+    fn large_mode_values_still_classify() {
+        let wm = modes_only(&[("A", i64::MAX - 1), ("B", i64::MAX)]);
+        let axis = wm
+            .classify_fan_controls()
+            .axis
+            .expect("two contiguous values");
+        assert_eq!(axis.max_ordinal(), 2);
+
+        let wm = modes_only(&[("A", i64::MAX)]);
+        assert!(wm.classify_fan_controls().axis.is_none());
     }
 
     fn modes_only(entries: &[(&str, i64)]) -> ParsedWorkMode {

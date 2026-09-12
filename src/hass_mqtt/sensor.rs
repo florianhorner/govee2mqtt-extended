@@ -281,6 +281,20 @@ impl EntityInstance for CapabilitySensor {
                 self.state.get_temperature_scale().await.into(),
             );
 
+            // A `state_class` sensor is a statistics source: Home Assistant's
+            // recorder rejects a non-numeric state and logs it on every
+            // statistics cycle. The scalar fallback deliberately publishes the
+            // whole object for a shape it does not recognise, which is the
+            // right answer for a plain diagnostic and the wrong one here.
+            if self.sensor.state_class.is_some() && value.parse::<f64>().is_err() {
+                log::trace!(
+                    "{instance} reported a non-numeric value ({value}); not \
+                     publishing it to a measurement sensor",
+                    instance = self.instance_name
+                );
+                return Ok(());
+            }
+
             return self.sensor.notify_state(client, &value).await;
         }
         log::trace!(
