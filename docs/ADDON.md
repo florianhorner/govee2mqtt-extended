@@ -88,7 +88,12 @@ Once Govee2MQTT starts, here's what happens in Home Assistant:
 - **"Scene Next" / "Scene Previous" buttons** for cycling through scenes (this fork only)
 - **Segment entities** (e.g. "Segment 001") if your device supports segment control (requires API key)
 
-**For humidifiers, heaters, fans**, etc.: a climate or humidifier entity with the controls Govee's API exposes for that model.
+**For fans and air purifiers**: a **fan entity** with power, a speed slider, and
+preset modes (Auto, Sleep, and whatever else your model exposes), plus an
+oscillation switch if the fan oscillates. Purifiers also get air-quality and
+filter-life sensors.
+
+**For humidifiers, heaters**, etc.: a climate or humidifier entity with the controls Govee's API exposes for that model.
 
 **Status updates** arrive within a few seconds when you control devices from the Govee app or physical buttons. Devices with LAN API enabled update the fastest.
 

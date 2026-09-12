@@ -30,7 +30,8 @@ limitation, not a Govee2MQTT limitation.
 |**Lights / LED Strips**|Newer Wi-Fi models — enable in the Govee Home app for local control of color, brightness, and power|Most Wi-Fi models — required for scenes and effects|Most Wi-Fi models — enables fast status updates|
 |**Humidifiers**|Not supported|Most models work, but control may be limited. Some night lights can't be fully controlled due to Govee firmware bugs.|H7160 only (night light control)|
 |**Kettles**|Not supported|Tested with H7171, H7173|Not supported|
-|**Heaters, Fans, Purifiers**|Not supported|Tested with H7101, H7102, H7111, H7121, H7130, H7131, H713A, H7135|Not supported|
+|**Fans, Purifiers**|Not supported|Exposed as a Home Assistant `fan` entity: power, speed, presets, and oscillation where the model has it. Speed detection is derived from each model's own work-mode metadata rather than a per-SKU list, so untested models are expected to work. Verified against H7111 and H7121 metadata.|Not supported|
+|**Heaters**|Not supported|Tested with H7130, H7131, H713A, H7135|Not supported|
 |**Plugs**|Not supported|Limited — Govee's API for plugs has known bugs|Not supported|
 
 ## My device isn't listed

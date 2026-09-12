@@ -1,10 +1,11 @@
 use crate::hass_mqtt::climate::mqtt_set_temperature;
 use crate::hass_mqtt::command_routes::{
-    device_id_segment, CommandTopic, HUMIDIFIER_SET_MODE_ROUTE, HUMIDIFIER_SET_TARGET_ROUTE,
-    LIGHT_COMMAND_ROUTE, LIGHT_SEGMENT_COMMAND_ROUTE, MUSIC_SENSITIVITY_CLEAR_ROUTE,
-    MUSIC_SENSITIVITY_COMMAND_ROUTE, NUMBER_COMMAND_ROUTE, ONECLICK_ROUTE, PURGE_CACHES_ROUTE,
-    REQUEST_PLATFORM_DATA_ROUTE, SCENE_NEXT_ROUTE, SCENE_PREV_ROUTE, SET_MODE_SCENE_ROUTE,
-    SET_MUSIC_PALETTE_ROUTE, SET_TEMPERATURE_ROUTE, SET_WORK_MODE_ROUTE, SWITCH_COMMAND_ROUTE,
+    device_id_segment, CommandTopic, FAN_SET_PERCENTAGE_ROUTE, HUMIDIFIER_SET_MODE_ROUTE,
+    HUMIDIFIER_SET_TARGET_ROUTE, LIGHT_COMMAND_ROUTE, LIGHT_SEGMENT_COMMAND_ROUTE,
+    MUSIC_SENSITIVITY_CLEAR_ROUTE, MUSIC_SENSITIVITY_COMMAND_ROUTE, NUMBER_COMMAND_ROUTE,
+    ONECLICK_ROUTE, PURGE_CACHES_ROUTE, REQUEST_PLATFORM_DATA_ROUTE, SCENE_NEXT_ROUTE,
+    SCENE_PREV_ROUTE, SET_MODE_SCENE_ROUTE, SET_MUSIC_PALETTE_ROUTE, SET_TEMPERATURE_ROUTE,
+    SET_WORK_MODE_ROUTE, SWITCH_COMMAND_ROUTE,
 };
 use crate::hass_mqtt::enumerator::{enumerate_all_entites, enumerate_entities_for_device};
 use crate::hass_mqtt::humidifier::{mqtt_device_set_work_mode, mqtt_humidifier_set_target};
@@ -72,6 +73,7 @@ macro_rules! mqtt_routes {
             SET_TEMPERATURE_ROUTE => mqtt_set_temperature,
             SET_MODE_SCENE_ROUTE => mqtt_set_mode_scene,
             SET_MUSIC_PALETTE_ROUTE => mqtt_set_music_palette,
+            FAN_SET_PERCENTAGE_ROUTE => crate::hass_mqtt::fan::mqtt_fan_set_percentage,
         }
     };
 }
@@ -1150,6 +1152,7 @@ mod tests {
             ),
             ("gv2mqtt/:id/set-mode-scene", "mqtt_set_mode_scene"),
             ("gv2mqtt/:id/set-music-palette", "mqtt_set_music_palette"),
+            ("gv2mqtt/fan/:id/set-percentage", "mqtt_fan_set_percentage"),
         ];
 
         assert_eq!(MQTT_ROUTE_PAIRINGS.len(), EXPECTED.len());

@@ -1,6 +1,7 @@
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
 use crate::hass_mqtt::button::ButtonConfig;
 use crate::hass_mqtt::climate::TargetTemperatureEntity;
+use crate::hass_mqtt::fan::Fan;
 use crate::hass_mqtt::humidifier::Humidifier;
 use crate::hass_mqtt::instance::EntityList;
 use crate::hass_mqtt::light::DeviceLight;
@@ -178,6 +179,15 @@ pub async fn enumerate_entities_for_device(
 
     if d.supports_rgb() || d.get_color_temperature_range().is_some() || d.supports_brightness() {
         entities.add(DeviceLight::for_device(d, state, None).await?);
+    }
+
+    // A fan or purifier gets a native `fan.*` entity. Additive: the switch,
+    // work-mode buttons and select all still appear, because users automate
+    // against them today (upstream wez/govee2mqtt#283).
+    if matches!(d.device_type(), DeviceType::Fan | DeviceType::AirPurifier) {
+        if let Some(fan) = Fan::new(d, state).await? {
+            entities.add(fan);
+        }
     }
 
     if matches!(

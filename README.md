@@ -37,6 +37,7 @@ Choose the installation method that matches your Home Assistant setup:
 * **Scenes and modes** — DIY scenes, music modes, and Tap-to-Run shortcuts from the Govee app all work in Home Assistant.
 * **Real-time status** — Devices report state changes (on/off, color, brightness) within seconds via LAN or Govee's cloud.
 * **Broad device support** — Lights, LED strips, humidifiers, heaters, fans, purifiers, and kettles.
+* **Native fan entities** — Fans and air purifiers appear as Home Assistant `fan` entities with a speed slider, preset modes, and oscillation, so `fan.set_percentage` and `fan.set_preset_mode` work directly (this fork only).
 
 **What the "Requires" column means:**
 
