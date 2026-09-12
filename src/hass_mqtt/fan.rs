@@ -440,18 +440,29 @@ mod test {
         Arc::new(ServiceState::new())
     }
 
+    #[derive(serde::Deserialize)]
+    struct DeviceListFixture {
+        data: Vec<HttpDeviceInfo>,
+    }
+
     /// Pull one SKU's real metadata out of the shared device-list fixture.
     fn device_info_for(sku: &str) -> HttpDeviceInfo {
-        #[derive(serde::Deserialize)]
-        struct DeviceListFixture {
-            data: Vec<HttpDeviceInfo>,
-        }
         let resp: DeviceListFixture =
             from_json(include_str!("../../test-data/list_devices_issue4.json")).unwrap();
         resp.data
             .into_iter()
             .find(|device| device.sku == sku)
             .unwrap_or_else(|| panic!("{sku} is in list_devices_issue4.json"))
+    }
+
+    /// The H7124 purifier this feature was built for, captured from a live
+    /// unit's Platform API metadata.
+    fn h7124() -> ServiceDevice {
+        let resp: DeviceListFixture =
+            from_json(include_str!("../../test-data/purifier-h7124.json")).unwrap();
+        let mut device = ServiceDevice::new("H7124", DEVICE_ID);
+        device.http_device_info = Some(resp.data.into_iter().next().unwrap());
+        device
     }
 
     /// A `ServiceDevice` carrying real fixture capabilities, so the entity is
@@ -758,6 +769,66 @@ mod test {
                 FanPublish::Power("ON"),
                 FanPublish::Percentage("None".to_string()),
                 FanPublish::PresetMode("Sleep".to_string()),
+            ]
+        );
+    }
+
+    /// End-to-end for the real device: what Home Assistant is actually handed.
+    ///
+    /// Before this change the purifier had a switch, a 0-255 `number` for
+    /// gearMode, three preset buttons and two JSON-string sensors -- verified
+    /// live against the unit. It gains a `fan` entity with a three-step slider
+    /// and the three real presets.
+    #[tokio::test]
+    async fn the_h7124_purifier_gets_a_three_step_fan_with_three_presets() {
+        let json = config_for(&h7124()).await;
+
+        assert_eq!(json["speed_range_min"], 1);
+        assert_eq!(
+            json["speed_range_max"], 3,
+            "Low/Medium/High -- the old number entity advertised 0..255"
+        );
+        assert_eq!(
+            json["preset_modes"],
+            serde_json::json!(["Auto", "Sleep", "Turbo"])
+        );
+        assert_eq!(json["payload_reset_percentage"], "None");
+        assert_eq!(json["payload_reset_preset_mode"], "None");
+        assert!(
+            json.get("oscillation_command_topic").is_none(),
+            "the H7124 has no oscillationToggle: {json}"
+        );
+        assert!(json["percentage_command_topic"]
+            .as_str()
+            .unwrap()
+            .ends_with("/set-percentage"));
+    }
+
+    /// The live device was in Sleep (`{workMode: 5, modeValue: 0}`) when this
+    /// was written. That must read back as the Sleep preset with the speed
+    /// axis explicitly cleared, not as a stale speed.
+    #[tokio::test]
+    async fn the_h7124_reports_its_live_sleep_state_as_a_preset() {
+        let device = h7124();
+        let fan = Fan::new(&device, &empty_state()).await.unwrap().unwrap();
+        let parsed = ParsedWorkMode::with_device(&device).unwrap();
+
+        assert_eq!(
+            fan.state_publishes(true, Some((5, Some(0))), Some(&parsed)),
+            vec![
+                FanPublish::Power("ON"),
+                FanPublish::Percentage("None".to_string()),
+                FanPublish::PresetMode("Sleep".to_string()),
+            ]
+        );
+
+        // And gearMode 2 reads back as speed 2.
+        assert_eq!(
+            fan.state_publishes(true, Some((1, Some(2))), Some(&parsed)),
+            vec![
+                FanPublish::Power("ON"),
+                FanPublish::PresetMode("None".to_string()),
+                FanPublish::Percentage("2".to_string()),
             ]
         );
     }

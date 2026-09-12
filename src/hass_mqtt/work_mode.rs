@@ -575,6 +575,61 @@ mod test {
         assert_eq!(axis.command_for_ordinal(3), Some((gear_mode, 3)));
     }
 
+    /// The real device this feature was built for: an H7124 air purifier,
+    /// metadata captured verbatim from the Platform API via a live unit.
+    ///
+    /// `gearMode` carries named Low/Medium/High sub-options while Sleep, Auto
+    /// and Turbo carry only a `defaultValue`. Today that renders as a 0-255
+    /// number entity (confirmed live: `number.<device>_gearmode` advertises
+    /// `min: 0, max: 255` while only 1-3 do anything), which is upstream
+    /// wez/govee2mqtt#297 exactly.
+    #[test]
+    fn h7124_purifier_gear_mode_becomes_a_three_step_axis() {
+        #[derive(serde::Deserialize)]
+        struct DeviceListFixture {
+            data: Vec<HttpDeviceInfo>,
+        }
+        let resp: DeviceListFixture =
+            from_json(include_str!("../../test-data/purifier-h7124.json")).unwrap();
+        let cap = resp.data[0]
+            .capabilities
+            .iter()
+            .find(|cap| cap.instance == "workMode")
+            .expect("H7124 has a workMode capability")
+            .clone();
+
+        let wm = ParsedWorkMode::with_capability(&cap).unwrap();
+        let controls = wm.classify_fan_controls();
+        let presets = preset_names(&controls);
+        let axis = controls.axis.expect("gearMode is a speed axis");
+
+        let gear_mode = wm.mode_by_name("gearMode").unwrap().value.as_i64().unwrap();
+        assert_eq!(axis.owner, Some(gear_mode));
+        assert_eq!(axis.max_ordinal(), 3, "Low, Medium, High -- never 255");
+        assert_eq!(axis.command_for_ordinal(1), Some((gear_mode, 1)));
+        assert_eq!(axis.command_for_ordinal(2), Some((gear_mode, 2)));
+        assert_eq!(axis.command_for_ordinal(3), Some((gear_mode, 3)));
+        assert_eq!(
+            axis.command_for_ordinal(4),
+            None,
+            "the old slider offered up to 255; only three values ever worked"
+        );
+        assert_eq!(
+            presets,
+            vec!["Auto", "Sleep", "Turbo"],
+            "the three modes that carry no speed value"
+        );
+
+        // The live device reported `{workMode: 5, modeValue: 0}` (Sleep) while
+        // this was written: it must read back as a preset, not as a speed.
+        assert_eq!(
+            axis.ordinal_for_state(5, Some(0)),
+            None,
+            "Sleep is a preset, so the speed axis reports nothing"
+        );
+        assert_eq!(axis.ordinal_for_state(gear_mode, Some(2)), Some(2));
+    }
+
     fn modes_only(entries: &[(&str, i64)]) -> ParsedWorkMode {
         let mut wm = ParsedWorkMode::default();
         for (name, value) in entries {
