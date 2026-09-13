@@ -1,0 +1,203 @@
+{
+  "code": 200,
+  "message": "success",
+  "data": [
+    {
+      "sku": "H7124",
+      "device": "AA:BB:CC:DD:EE:FF:00:11",
+      "deviceName": "Smart Air Purifier",
+      "type": "devices.types.air_purifier",
+      "capabilities": [
+        {
+          "alarmType": null,
+          "eventState": null,
+          "instance": "powerSwitch",
+          "parameters": {
+            "dataType": "ENUM",
+            "options": [
+              {
+                "name": "on",
+                "value": 1
+              },
+              {
+                "name": "off",
+                "value": 0
+              }
+            ]
+          },
+          "type": "devices.capabilities.on_off"
+        },
+        {
+          "alarmType": null,
+          "eventState": null,
+          "instance": "workMode",
+          "parameters": {
+            "dataType": "STRUCT",
+            "fields": [
+              {
+                "dataType": "ENUM",
+                "defaultValue": null,
+                "fieldName": "workMode",
+                "options": [
+                  {
+                    "name": "gearMode",
+                    "value": 1
+                  },
+                  {
+                    "name": "Sleep",
+                    "value": 5
+                  },
+                  {
+                    "name": "Auto",
+                    "value": 3
+                  },
+                  {
+                    "name": "Turbo",
+                    "value": 7
+                  }
+                ],
+                "required": true
+              },
+              {
+                "dataType": "ENUM",
+                "defaultValue": null,
+                "fieldName": "modeValue",
+                "options": [
+                  {
+                    "name": "gearMode",
+                    "options": [
+                      {
+                        "name": "Low",
+                        "value": 1
+                      },
+                      {
+                        "name": "Medium",
+                        "value": 2
+                      },
+                      {
+                        "name": "High",
+                        "value": 3
+                      }
+                    ],
+                    "value": null
+                  },
+                  {
+                    "defaultValue": 0,
+                    "name": "Sleep",
+                    "value": null
+                  },
+                  {
+                    "defaultValue": 0,
+                    "name": "Auto",
+                    "value": null
+                  },
+                  {
+                    "defaultValue": 0,
+                    "name": "Turbo",
+                    "value": null
+                  }
+                ],
+                "required": true
+              }
+            ]
+          },
+          "type": "devices.capabilities.work_mode"
+        },
+        {
+          "alarmType": null,
+          "eventState": null,
+          "instance": "nightlightToggle",
+          "parameters": {
+            "dataType": "ENUM",
+            "options": [
+              {
+                "name": "on",
+                "value": 1
+              },
+              {
+                "name": "off",
+                "value": 0
+              }
+            ]
+          },
+          "type": "devices.capabilities.toggle"
+        },
+        {
+          "alarmType": null,
+          "eventState": null,
+          "instance": "brightness",
+          "parameters": {
+            "dataType": "INTEGER",
+            "range": {
+              "max": 100,
+              "min": 1,
+              "precision": 1
+            },
+            "unit": null
+          },
+          "type": "devices.capabilities.range"
+        },
+        {
+          "alarmType": null,
+          "eventState": null,
+          "instance": "colorRgb",
+          "parameters": {
+            "dataType": "INTEGER",
+            "range": {
+              "max": 16777215,
+              "min": 0,
+              "precision": 1
+            },
+            "unit": null
+          },
+          "type": "devices.capabilities.color_setting"
+        },
+        {
+          "alarmType": null,
+          "eventState": null,
+          "instance": "nightlightScene",
+          "parameters": {
+            "dataType": "ENUM",
+            "options": [
+              {
+                "name": "Forest",
+                "value": 1
+              },
+              {
+                "name": "Ocean",
+                "value": 2
+              },
+              {
+                "name": "Wetland",
+                "value": 3
+              },
+              {
+                "name": "Leisurely",
+                "value": 4
+              },
+              {
+                "name": "Asleep",
+                "value": 5
+              }
+            ]
+          },
+          "type": "devices.capabilities.mode"
+        },
+        {
+          "alarmType": null,
+          "eventState": null,
+          "instance": "filterLifeTime",
+          "parameters": null,
+          "type": "devices.capabilities.property"
+        },
+        {
+          "alarmType": null,
+          "eventState": null,
+          "instance": "airQuality",
+          "parameters": null,
+          "type": "devices.capabilities.property"
+        }
+      ]
+    }
+  ]
+}

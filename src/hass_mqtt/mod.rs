@@ -4,6 +4,7 @@ pub mod climate;
 pub mod command_routes;
 pub mod cover;
 pub mod enumerator;
+pub mod fan;
 pub mod humidifier;
 pub mod instance;
 pub mod light;

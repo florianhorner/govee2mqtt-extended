@@ -201,3 +201,62 @@ still reach a Music effect — so with those in play the slider is not strictly 
 Deliberately not fixed alongside the feature: it is a new conditional that needs its own tests and
 interacts with scene cycling.
 **Effort:** Small-medium.
+
+## Fan `optimistic` can report a speed the device never took
+**What:** `Fan::new` sets `optimistic: !use_iot` (`fan.rs`), mirroring `humidifier.rs`. But
+`mqtt_fan_set_percentage` routes through `humidifier_set_parameter`, whose BLE/IoT codec is
+registered for `"H7160"` only (`ble.rs:175-183`), so every fan and purifier falls through to the
+Platform API and `bail!`s when there is no Platform client. With no IoT client `use_iot` is false,
+so `optimistic` is true and Home Assistant writes the percentage locally — showing a speed the
+device never accepted.
+**Why:** Silent divergence between the card and the hardware, which is worse than an error toast.
+**Pros:** The fan card stops lying when a command cannot be delivered.
+**Cons:** The honest fix is to publish state only after a confirmed command, which means either
+non-optimistic mode plus a forced notify, or plumbing a delivery result back. Both are larger than
+they look; `humidifier.rs` has the same shape and has lived with it.
+**Context:** Found by the pre-ship adversarial review on the fan platform branch. Not fixed there
+because it is a pre-existing pattern, not a regression the fan introduced.
+**Depends on:** the fan platform landing first.
+**Effort:** Medium.
+
+## Fan discovery goes stale against a live metadata refresh
+**What:** `speed_range_max` and `preset_modes` are published once by `register_with_hass`;
+`publish_config` is never called again. But `advise_hass_of_light_state` rebuilds the `Fan` and its
+axis on every state change, and `mqtt_fan_set_percentage` re-derives the axis per command. After
+`purge-caches`, `request-platform-data`, or a platform poll that changes `workMode` metadata, Home
+Assistant converts percentage to an ordinal against the OLD range while the bridge maps that
+ordinal against the NEW axis.
+**Why:** 100% on an old 3-step range publishes `3`, which a new 8-step axis commands as 37.5% —
+silent mis-scaling until the next HA birth message. The same cause can emit a preset name HA no
+longer lists, logging `is not a valid preset mode` on every update.
+**Pros:** Removes a whole class of silent wrong-speed bugs.
+**Cons:** Needs a republish-on-metadata-change path that does not spam discovery. Affects every
+entity type, not just the fan — this is an architectural gap the fan merely made visible.
+**Context:** Found by the pre-ship adversarial review. Pre-existing for other entity types.
+**Effort:** Medium-large. Its own change.
+
+## `set-percentage` is not gated on the device being a fan
+**What:** `mqtt_fan_set_percentage` calls `resolve_device_for_control(&id)`, which resolves by
+name, computed name, id, label or IP. Any MQTT client, or a mistyped automation, can publish to
+`gv2mqtt/fan/<humidifier name>/set-percentage` and drive that device's `workMode`.
+**Why:** A new entry point that does not check the device is the kind it claims to control.
+**Pros:** Commands can only reach devices that actually advertise the entity.
+**Cons:** The pre-existing `set-work-mode` and `switch` routes have the same shape, so fixing only
+the fan route is inconsistent; the useful version covers all of them.
+**Context:** Found by the pre-ship adversarial review. Consistency with existing routes rather than
+a new class of hole, which is why it was not fixed inline.
+**Effort:** Small per route, medium to do uniformly.
+
+## A dehumidifier's light is not named "Night Light"
+**What:** `light.rs` names an appliance's light "Night Light" for `Humidifier`, `Fan` and
+`AirPurifier`, but not `Dehumidifier`. `enumerate_entities_for_device` creates a `Humidifier`
+entity for `Humidifier | Dehumidifier` alike, so a dehumidifier with a nightlight renders a
+`light.*` and a `humidifier.*` under the same friendly name.
+**Why:** Same confusion the guard exists to prevent for humidifiers; a one-token omission.
+**Pros:** One variant in an existing `matches!`. Display-name only — `unique_id` and therefore
+`entity_id` are untouched, so no automation breaks.
+**Cons:** It renames an entity for existing dehumidifier owners, who did not ask for it.
+**Context:** Noticed while extending that guard for the fan platform. Deliberately NOT included
+there: the fan PR has no other reason to touch dehumidifiers, and scope discipline beats a
+drive-by fix that changes what a user sees.
+**Effort:** Trivial, but wants its own change so the rename is visible in its own diff.

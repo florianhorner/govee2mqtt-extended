@@ -1,6 +1,7 @@
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
 use crate::hass_mqtt::button::ButtonConfig;
 use crate::hass_mqtt::climate::TargetTemperatureEntity;
+use crate::hass_mqtt::fan::Fan;
 use crate::hass_mqtt::humidifier::Humidifier;
 use crate::hass_mqtt::instance::EntityList;
 use crate::hass_mqtt::light::DeviceLight;
@@ -180,6 +181,15 @@ pub async fn enumerate_entities_for_device(
         entities.add(DeviceLight::for_device(d, state, None).await?);
     }
 
+    // A fan or purifier gets a native `fan.*` entity. Additive: the switch,
+    // work-mode buttons and select all still appear, because users automate
+    // against them today (upstream wez/govee2mqtt#283).
+    if matches!(d.device_type(), DeviceType::Fan | DeviceType::AirPurifier) {
+        if let Some(fan) = Fan::new(d, state).await? {
+            entities.add(fan);
+        }
+    }
+
     if matches!(
         d.device_type(),
         DeviceType::Humidifier | DeviceType::Dehumidifier
@@ -227,7 +237,22 @@ pub async fn enumerate_entities_for_device(
                 DeviceCapabilityKind::Range if cap.instance == "brightness" => {}
                 DeviceCapabilityKind::Range if cap.instance == "humidity" => {}
                 DeviceCapabilityKind::WorkMode => {
-                    entities_for_work_mode(d, state, cap, entities).await?;
+                    // Isolated, not propagated. `Fan::new` promises a device
+                    // with unparseable work-mode metadata still gets its power
+                    // switch, sensors and an on/off-only fan -- but that
+                    // promise was hollow while this `?` aborted the whole
+                    // device's enumeration two arms later, discarding the
+                    // scratch list `enumerate_all_entites` had built.
+                    //
+                    // Same isolation the per-device loop already applies, one
+                    // level down: one malformed capability costs its own
+                    // entities, not the device's.
+                    if let Err(err) = entities_for_work_mode(d, state, cap, entities).await {
+                        log::error!(
+                            "Skipping work-mode entities for {d}: {err:#}. The \
+                             device keeps its other entities."
+                        );
+                    }
                 }
 
                 DeviceCapabilityKind::Property => {
@@ -305,6 +330,138 @@ mod test {
             .await
             .expect("enumeration must not fail");
         entities.len()
+    }
+
+    /// The H7124 purifier this feature was built for, with its `device_type`
+    /// swapped so the same capability list can be enumerated as two different
+    /// device kinds.
+    fn h7124_as(device_type: DeviceType) -> ServiceDevice {
+        #[derive(serde::Deserialize)]
+        struct DeviceListFixture {
+            data: Vec<HttpDeviceInfo>,
+        }
+        let resp: DeviceListFixture =
+            crate::platform_api::from_json(include_str!("../../test-data/purifier-h7124.json"))
+                .unwrap();
+        let mut info = resp.data.into_iter().next().unwrap();
+        info.device_type = device_type;
+        info.device = DEVICE_ID.to_string();
+
+        let mut device = ServiceDevice::new("H7124", DEVICE_ID);
+        device.http_device_info = Some(info);
+        device
+    }
+
+    /// Give the H7124 fixture a `workMode` capability that the parser rejects,
+    /// while leaving every other capability identical for differential tests.
+    fn h7124_with_malformed_work_mode(device_type: DeviceType) -> ServiceDevice {
+        let mut device = h7124_as(device_type);
+        let info = device
+            .http_device_info
+            .as_mut()
+            .expect("H7124 fixture has Platform API metadata");
+        let work_mode = info
+            .capabilities
+            .iter_mut()
+            .find(|cap| cap.instance == "workMode")
+            .expect("H7124 fixture has a workMode capability");
+        *work_mode = DeviceCapability {
+            kind: DeviceCapabilityKind::WorkMode,
+            instance: "workMode".to_string(),
+            parameters: Some(DeviceParameters::Struct { fields: vec![] }),
+            alarm_type: None,
+            event_state: None,
+        };
+        device
+    }
+
+    /// An `AirPurifier` gains exactly one entity over the same capabilities
+    /// enumerated as a `Heater`: the fan.
+    ///
+    /// `Heater` is the comparison because it shares every other branch --
+    /// both are non-`Light` (so both get a scene-mode select) and neither is a
+    /// humidifier -- so the delta isolates the fan dispatch arm itself.
+    ///
+    /// This is the test that was missing: every other fan test calls
+    /// `Fan::new` directly, so deleting the `DeviceType::Fan | AirPurifier`
+    /// arm from `enumerate_entities_for_device` left the whole suite green
+    /// while the feature was entirely unreachable in production.
+    #[tokio::test]
+    async fn an_air_purifier_gains_exactly_one_entity_the_fan() {
+        let as_heater = entity_count(&h7124_as(DeviceType::Heater)).await;
+        let as_purifier = entity_count(&h7124_as(DeviceType::AirPurifier)).await;
+
+        assert_eq!(
+            as_purifier,
+            as_heater + 1,
+            "an air purifier must gain the fan entity and nothing else \
+             (heater: {as_heater}, purifier: {as_purifier})"
+        );
+    }
+
+    /// `DeviceType::Fan` takes the same arm. Asserted separately because the
+    /// match covers two variants and a typo could drop either one.
+    #[tokio::test]
+    async fn a_fan_device_type_also_gains_the_fan_entity() {
+        let as_heater = entity_count(&h7124_as(DeviceType::Heater)).await;
+        let as_fan = entity_count(&h7124_as(DeviceType::Fan)).await;
+
+        assert_eq!(as_fan, as_heater + 1);
+    }
+
+    /// The fan is additive. A purifier keeps the power switch, work-mode
+    /// entities and scene select it had before, so existing automations that
+    /// reference them keep working (upstream wez/govee2mqtt#283).
+    #[tokio::test]
+    async fn the_fan_is_additive_and_removes_nothing() {
+        // The sibling test already pins the purifier-vs-heater delta. Asserting
+        // it again here would make this test a duplicate, and a duplicate of a
+        // DIFFERENTIAL check cannot see a regression that removes an entity
+        // from BOTH device types -- which nearly every enumeration branch is,
+        // since most are device-type independent.
+        //
+        // So this one keeps an absolute count instead. It is brittle by
+        // design: it must be updated deliberately when the H7124's entity set
+        // legitimately changes, which is the point.
+        let as_purifier = entity_count(&h7124_as(DeviceType::AirPurifier)).await;
+
+        assert_eq!(
+            as_purifier, 16,
+            "the H7124 publishes a fixed set from powerSwitch, workMode, \
+             nightlightToggle, brightness, colorRgb, nightlightScene, \
+             filterLifeTime and airQuality, plus the fan. A change here means \
+             an entity appeared or vanished -- confirm which before updating \
+             this number.\n\
+             \n\
+             The same device on real hardware publishes 17: `entity_count` \
+             seeds an EMPTY scene catalog, so `SceneModeSelect` returns None \
+             here and `select.<device>_mode_scene` is the one entity a live \
+             run has and this test does not. Verified against an H7124 via \
+             scripts/live_mqtt.py."
+        );
+    }
+
+    /// A work-mode capability that cannot be parsed costs its own entities and
+    /// nothing else.
+    ///
+    /// `Fan::new` promises a device with unusable work-mode metadata still gets
+    /// its power switch, sensors and an on/off-only fan. That promise was
+    /// hollow: `entities_for_work_mode(..)?` two arms later aborted the whole
+    /// device, and `enumerate_all_entites` discarded the scratch list. Found by
+    /// Copilot on PR #56.
+    #[tokio::test]
+    async fn a_malformed_work_mode_does_not_cost_the_device_its_other_entities() {
+        let as_heater = entity_count(&h7124_with_malformed_work_mode(DeviceType::Heater)).await;
+        let as_purifier =
+            entity_count(&h7124_with_malformed_work_mode(DeviceType::AirPurifier)).await;
+
+        assert_eq!(
+            as_purifier,
+            as_heater + 1,
+            "the malformed capability must cost only its own work-mode entities; \
+             the purifier must retain the same non-fan baseline plus its \
+             on/off-only fan (heater: {as_heater}, purifier: {as_purifier})"
+        );
     }
 
     /// A Platform-API device that advertises `musicMode` gains exactly two

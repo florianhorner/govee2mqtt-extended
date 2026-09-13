@@ -5,13 +5,13 @@ use crate::hass_mqtt::instance::{publish_entity_config, EntityInstance};
 use crate::platform_api::DeviceCapability;
 use crate::service::device::Device as ServiceDevice;
 use crate::service::hass::{availability_topic, topic_safe_id, topic_safe_string, HassClient};
-use crate::service::quirks::HumidityUnits;
+use crate::service::quirks::{HumidityUnits, Quirk};
 use crate::service::state::StateHandle;
 use crate::temperature::{TemperatureUnits, TemperatureValue, DEVICE_CLASS_TEMPERATURE};
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value as JsonValue};
 
 #[derive(Serialize, Clone, Debug)]
 pub struct SensorConfig {
@@ -92,6 +92,104 @@ impl GlobalFixedDiagnostic {
     }
 }
 
+/// Resolve the exact string a capability publishes to Home Assistant.
+///
+/// Lifted out of `CapabilitySensor::notify_state` so the *dispatch* is
+/// testable, not just its pieces. Testing `scalar_state_value` alone proves
+/// the helper works while saying nothing about whether anything calls it --
+/// reverting the default arm to `cap_state.to_string()` left a suite of
+/// helper-only tests fully green, which is the fake-coverage shape this
+/// project has been bitten by before.
+///
+/// `target_scale` is resolved by the caller because reading it is async and
+/// this needs to stay a plain function.
+fn capability_state_value(
+    instance_name: &str,
+    cap_state: &JsonValue,
+    quirk: Option<&Quirk>,
+    target_scale: TemperatureUnits,
+) -> String {
+    match instance_name {
+        "sensorTemperature" => {
+            let units = quirk
+                .and_then(|q| q.platform_temperature_sensor_units)
+                .unwrap_or(TemperatureUnits::Fahrenheit);
+
+            match cap_state
+                .pointer("/value")
+                .and_then(|v| v.as_f64())
+                .map(|v| TemperatureValue::new(v, units))
+            {
+                Some(v) => {
+                    let value = v.as_unit(target_scale).value();
+                    format!("{value:.2}")
+                }
+                None => "".to_string(),
+            }
+        }
+        "sensorHumidity" => {
+            let units = quirk
+                .and_then(|q| q.platform_humidity_sensor_units)
+                .unwrap_or(HumidityUnits::RelativePercent);
+            match cap_state
+                .pointer("/value")
+                .and_then(|v| v.as_f64())
+                .map(|v| units.from_reading_to_relative_percent(v))
+            {
+                Some(v) => format!("{v:.2}"),
+                None => "".to_string(),
+            }
+        }
+        _ => scalar_state_value(cap_state),
+    }
+}
+
+/// What Home Assistant reads as "this numeric sensor has no current value".
+///
+/// Publishing this clears a stale reading without adding an invalid sample to
+/// long-term statistics. An empty payload would simply be ignored, leaving the
+/// previous value in place.
+const UNKNOWN_MEASUREMENT: &str = "None";
+
+/// Whether a value must be withheld from a statistics sensor.
+///
+/// A `state_class` sensor is a recorder source: Home Assistant rejects a
+/// non-numeric state and logs it on every statistics cycle. The scalar
+/// fallback deliberately publishes the whole object for a shape it does not
+/// recognise, which is right for a plain diagnostic and wrong here.
+///
+/// Extracted rather than left inline in `notify_state`, which needs a live
+/// broker and so cannot be tested -- the same reason `capability_state_value`
+/// was pulled out.
+fn should_skip_measurement(state_class: Option<StateClass>, value: &str) -> bool {
+    if state_class.is_none() {
+        return false;
+    }
+    // `f64: FromStr` accepts "NaN", "inf" and "infinity" -- precisely the
+    // values Home Assistant's recorder rejects hardest -- so parsing alone is
+    // not the test. Finiteness is.
+    !value.parse::<f64>().is_ok_and(f64::is_finite)
+}
+
+/// Publish the scalar a capability carries, not the JSON wrapper around it.
+///
+/// Govee's Platform API reports property state as `{"value": 6}`. Publishing
+/// that verbatim gives Home Assistant the literal string `{"value":6}` for an
+/// entity it expects to be a number, which is why `airQuality` and
+/// `filterLifeTime` have been unusable without a hand-written `value_template`
+/// (upstream wez/govee2mqtt#369, #510, #667).
+///
+/// Anything that is not a scalar under `/value` -- a nested `workMode` struct,
+/// a null, or a shape we do not recognise -- falls back to the whole object, so
+/// an unfamiliar capability still shows *something* rather than going blank.
+fn scalar_state_value(state: &JsonValue) -> String {
+    match state.pointer("/value") {
+        Some(JsonValue::String(s)) => s.clone(),
+        Some(v @ JsonValue::Number(_)) | Some(v @ JsonValue::Bool(_)) => v.to_string(),
+        _ => state.to_string(),
+    }
+}
+
 #[derive(Clone)]
 pub struct CapabilitySensor {
     sensor: SensorConfig,
@@ -115,18 +213,30 @@ impl CapabilitySensor {
         let unit_of_measurement = match instance.instance.as_str() {
             "sensorTemperature" => Some(state.get_temperature_scale().await.unit_of_measurement()),
             "sensorHumidity" => Some("%"),
+            // Deliberately no unit for filterLifeTime. The instance name says
+            // *time*, the one live H7124 reading was `100`, and nothing in the
+            // repo pins the scale -- so `%` would be the same unverified claim
+            // the airQuality arm below refuses to make. It matters more here:
+            // `state_class: Measurement` makes this a long-term-statistics
+            // source, and a wrong unit is written into HA's statistics tables
+            // and needs a manual purge to correct.
             _ => None,
         };
 
         let device_class = match instance.instance.as_str() {
             "sensorTemperature" => Some(DEVICE_CLASS_TEMPERATURE),
             "sensorHumidity" => Some(DEVICE_CLASS_HUMIDITY),
+            // Deliberately no `aqi` device class for airQuality: Govee reports a
+            // vendor-specific index, and nobody has confirmed how it maps onto a
+            // standard AQI scale (upstream wez/govee2mqtt#369). Claiming the class
+            // would assert a mapping we have not verified.
             _ => None,
         };
 
         let state_class = match instance.instance.as_str() {
-            "sensorTemperature" => Some(StateClass::Measurement),
-            "sensorHumidity" => Some(StateClass::Measurement),
+            "sensorTemperature" | "sensorHumidity" | "airQuality" | "filterLifeTime" => {
+                Some(StateClass::Measurement)
+            }
             _ => None,
         };
 
@@ -134,7 +244,24 @@ impl CapabilitySensor {
             "sensorTemperature" => "Temperature".to_string(),
             "sensorHumidity" => "Humidity".to_string(),
             "online" => "Connected to Govee Cloud".to_string(),
+            "airQuality" => "Air Quality".to_string(),
+            "filterLifeTime" => "Filter Life".to_string(),
             _ => instance.instance.to_string(),
+        };
+
+        let icon = match instance.instance.as_str() {
+            "airQuality" => Some("mdi:air-purifier".to_string()),
+            "filterLifeTime" => Some("mdi:air-filter".to_string()),
+            _ => None,
+        };
+
+        // Air quality is the reading a purifier owner actually looks at, so it
+        // belongs on the device card rather than buried under Diagnostics.
+        // Everything else here stays diagnostic -- including filter life, which
+        // is consumable wear and is conventionally filed that way in HA.
+        let entity_category = match instance.instance.as_str() {
+            "airQuality" => None,
+            _ => Some("diagnostic".to_string()),
         };
 
         Ok(Self {
@@ -142,12 +269,12 @@ impl CapabilitySensor {
                 base: EntityConfig {
                     availability_topic: availability_topic(),
                     name: Some(name),
-                    entity_category: Some("diagnostic".to_string()),
+                    entity_category,
                     origin: Origin::default(),
                     device: Device::for_device(device),
                     unique_id: unique_id.clone(),
                     device_class,
-                    icon: None,
+                    icon,
                 },
                 state_topic: format!("gv2mqtt/sensor/{unique_id}/state"),
                 state_class,
@@ -179,43 +306,37 @@ impl EntityInstance for CapabilitySensor {
         let quirk = device.resolve_quirk();
 
         if let Some(cap) = device.get_state_capability_by_instance(&self.instance_name) {
-            let value = match self.instance_name.as_str() {
-                "sensorTemperature" => {
-                    let units = quirk
-                        .and_then(|q| q.platform_temperature_sensor_units)
-                        .unwrap_or(TemperatureUnits::Fahrenheit);
+            let value = capability_state_value(
+                &self.instance_name,
+                &cap.state,
+                quirk.as_ref(),
+                self.state.get_temperature_scale().await.into(),
+            );
 
-                    match cap
-                        .state
-                        .pointer("/value")
-                        .and_then(|v| v.as_f64())
-                        .map(|v| TemperatureValue::new(v, units))
-                    {
-                        Some(v) => {
-                            let value = v
-                                .as_unit(self.state.get_temperature_scale().await.into())
-                                .value();
-                            format!("{value:.2}")
-                        }
-                        None => "".to_string(),
-                    }
-                }
-                "sensorHumidity" => {
-                    let units = quirk
-                        .and_then(|q| q.platform_humidity_sensor_units)
-                        .unwrap_or(HumidityUnits::RelativePercent);
-                    match cap
-                        .state
-                        .pointer("/value")
-                        .and_then(|v| v.as_f64())
-                        .map(|v| units.from_reading_to_relative_percent(v))
-                    {
-                        Some(v) => format!("{v:.2}"),
-                        None => "".to_string(),
-                    }
-                }
-                _ => cap.state.to_string(),
-            };
+            // A `state_class` sensor is a statistics source: Home Assistant's
+            // recorder rejects a non-numeric state and logs it on every
+            // statistics cycle. The scalar fallback deliberately publishes the
+            // whole object for a shape it does not recognise, which is the
+            // right answer for a plain diagnostic and the wrong one here.
+            if should_skip_measurement(self.sensor.state_class, &value) {
+                // Publish `None` rather than nothing. Home Assistant reads it
+                // as "unknown" on a numeric sensor, which clears the previous
+                // reading without contributing an invalid statistics sample.
+                // Skipping the publish instead leaves the last good value on
+                // screen indefinitely, which is a worse lie than "unknown".
+                // An empty string would be ignored outright.
+                // Data is being dropped, not merely reformatted: at the
+                // default `RUST_LOG=govee=info` a trace line is invisible, and
+                // the user sees a sensor that never updates with no reason
+                // given anywhere.
+                log::warn!(
+                    "{instance} reported {value:?}, which is not a finite \
+                     number; reporting the measurement as unknown rather than \
+                     feeding the recorder a value it will reject",
+                    instance = self.instance_name
+                );
+                return self.sensor.notify_state(client, UNKNOWN_MEASUREMENT).await;
+            }
 
             return self.sensor.notify_state(client, &value).await;
         }
@@ -461,5 +582,310 @@ impl EntityInstance for SceneInfoSensor {
             client.publish_obj(topic, attributes).await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::platform_api::DeviceCapabilityKind;
+    use crate::service::state::State as ServiceState;
+    use std::sync::Arc;
+
+    const DEVICE_ID: &str = "AA:BB:CC:DD:EE:FF:11:22";
+    const SKU: &str = "H7121";
+
+    fn test_device() -> ServiceDevice {
+        ServiceDevice::new(SKU, DEVICE_ID)
+    }
+
+    fn empty_state() -> StateHandle {
+        Arc::new(ServiceState::new())
+    }
+
+    fn property(instance: &str) -> DeviceCapability {
+        DeviceCapability {
+            kind: DeviceCapabilityKind::Property,
+            instance: instance.to_string(),
+            parameters: None,
+            alarm_type: None,
+            event_state: None,
+        }
+    }
+
+    async fn discovery_payload_for(instance: &str) -> serde_json::Value {
+        let entity = CapabilitySensor::new(&test_device(), &empty_state(), &property(instance))
+            .await
+            .expect("capability sensor is constructible");
+        serde_json::to_value(&entity.sensor).expect("SensorConfig serializes")
+    }
+
+    /// A `state_class` sensor feeds Home Assistant's recorder, which rejects a
+    /// non-numeric state and logs it on every statistics cycle. The scalar
+    /// fallback still publishes a whole object for a shape it does not
+    /// recognise, so such a value has to be withheld rather than published.
+    #[test]
+    fn non_numeric_values_are_withheld_from_measurement_sensors() {
+        // airQuality carries a state_class, and `{}` is exactly what
+        // `capability_state_value` produces for an unrecognised shape.
+        assert!(should_skip_measurement(Some(StateClass::Measurement), "{}"));
+        assert!(should_skip_measurement(
+            Some(StateClass::Measurement),
+            "{\"value\":null}"
+        ));
+        assert!(should_skip_measurement(Some(StateClass::Measurement), ""));
+
+        // Numbers are fine, including the decimals temperature publishes.
+        assert!(!should_skip_measurement(Some(StateClass::Measurement), "6"));
+
+        // `f64::from_str` accepts these; Home Assistant's recorder does not.
+        for non_finite in ["NaN", "inf", "-inf", "infinity"] {
+            assert!(
+                should_skip_measurement(Some(StateClass::Measurement), non_finite),
+                "{non_finite} parses as f64 but is not a usable statistic"
+            );
+        }
+        assert!(!should_skip_measurement(
+            Some(StateClass::Measurement),
+            "-5.83"
+        ));
+
+        // A plain diagnostic has no state_class and no recorder to upset, so
+        // the object fallback must still reach Home Assistant.
+        assert!(!should_skip_measurement(None, "{}"));
+        assert!(!should_skip_measurement(None, "anything"));
+
+        // The sentinel is what HA reads as "unknown" on a numeric sensor.
+        // An empty payload would be ignored, leaving the stale value on screen.
+        assert_eq!(UNKNOWN_MEASUREMENT, "None");
+        assert!(!UNKNOWN_MEASUREMENT.is_empty());
+    }
+
+    /// A withheld measurement is reported as unknown, not silently dropped.
+    ///
+    /// Publishing nothing leaves the last good reading on screen forever,
+    /// which is a worse lie than "unknown". An empty payload would be ignored
+    /// by Home Assistant for the same reason. Raised by CodeRabbit on PR #56.
+    #[test]
+    fn a_withheld_measurement_is_cleared_not_left_stale() {
+        assert_eq!(
+            UNKNOWN_MEASUREMENT, "None",
+            "Home Assistant reads this as unknown on a numeric sensor"
+        );
+        assert!(
+            !UNKNOWN_MEASUREMENT.is_empty(),
+            "an empty payload is ignored, leaving the stale value in place"
+        );
+        // And it must not itself look like a finite number, or it would be
+        // published as a statistic.
+        assert!(should_skip_measurement(
+            Some(StateClass::Measurement),
+            UNKNOWN_MEASUREMENT
+        ));
+    }
+
+    /// Drives the real dispatch, not just the helper. Mutation-checked:
+    /// reverting the default arm to `cap_state.to_string()` turns this red,
+    /// which the helper-only tests below do NOT do.
+    #[test]
+    fn notify_dispatch_publishes_scalars_for_purifier_properties() {
+        let scale = TemperatureUnits::Celsius;
+
+        assert_eq!(
+            capability_state_value("airQuality", &json!({"value": 6}), None, scale),
+            "6"
+        );
+        assert_eq!(
+            capability_state_value("filterLifeTime", &json!({"value": 78}), None, scale),
+            "78"
+        );
+        assert_eq!(
+            capability_state_value("online", &json!({"value": true}), None, scale),
+            "true"
+        );
+        assert_eq!(
+            capability_state_value("somethingNovel", &json!({"value": 3}), None, scale),
+            "3"
+        );
+    }
+
+    /// The two instances with bespoke arms keep their own formatting -- the
+    /// extraction must not have folded them into the scalar path, which would
+    /// publish a bare "21.5" and skip the unit conversion entirely.
+    ///
+    /// With no quirk the SOURCE units default to Fahrenheit (see the
+    /// `unwrap_or` in `capability_state_value`), so 21.5 is 21.5 F. Asserting
+    /// both directions pins that default: it is the reason a device without a
+    /// `platform_temperature_sensor_units` quirk can report nonsense if Govee
+    /// actually sent Celsius.
+    #[test]
+    fn notify_dispatch_keeps_temperature_and_humidity_formatting() {
+        // 21.5 F -> F is the identity, and still gets 2-decimal formatting.
+        assert_eq!(
+            capability_state_value(
+                "sensorTemperature",
+                &json!({"value": 21.5}),
+                None,
+                TemperatureUnits::Fahrenheit
+            ),
+            "21.50"
+        );
+        // 21.5 F -> C actually converts: (21.5 - 32) * 5 / 9 = -5.833...
+        assert_eq!(
+            capability_state_value(
+                "sensorTemperature",
+                &json!({"value": 21.5}),
+                None,
+                TemperatureUnits::Celsius
+            ),
+            "-5.83"
+        );
+        // Humidity has no scale conversion, but keeps the same 2-decimal shape.
+        assert_eq!(
+            capability_state_value(
+                "sensorHumidity",
+                &json!({"value": 44.0}),
+                None,
+                TemperatureUnits::Celsius
+            ),
+            "44.00"
+        );
+    }
+
+    /// A missing reading yields an empty string on the bespoke arms, but the
+    /// scalar path falls back to the object. Pinning both so the extraction
+    /// cannot quietly unify them.
+    #[test]
+    fn notify_dispatch_handles_absent_readings_per_arm() {
+        let scale = TemperatureUnits::Celsius;
+        assert_eq!(
+            capability_state_value("sensorTemperature", &json!({}), None, scale),
+            ""
+        );
+        assert_eq!(
+            capability_state_value("sensorHumidity", &json!({}), None, scale),
+            ""
+        );
+        assert_eq!(
+            capability_state_value("airQuality", &json!({}), None, scale),
+            "{}"
+        );
+    }
+
+    /// The whole point of the change: Govee wraps property readings in
+    /// `{"value": N}`, and Home Assistant wants the bare `N`.
+    #[test]
+    fn scalar_value_is_unwrapped_from_the_govee_envelope() {
+        assert_eq!(scalar_state_value(&json!({"value": 6})), "6");
+        assert_eq!(scalar_state_value(&json!({"value": 100})), "100");
+        assert_eq!(scalar_state_value(&json!({"value": 78.5})), "78.5");
+        assert_eq!(scalar_state_value(&json!({"value": false})), "false");
+        assert_eq!(scalar_state_value(&json!({"value": "Auto"})), "Auto");
+    }
+
+    /// A string comes back unquoted. `Value::to_string()` on a JSON string
+    /// keeps the quotes, which would surface in HA as `"Auto"` rather than
+    /// `Auto`, so the String arm cannot be folded into the numeric one.
+    #[test]
+    fn string_values_are_published_without_json_quotes() {
+        let published = scalar_state_value(&json!({"value": "Auto"}));
+        assert!(
+            !published.contains('"'),
+            "string state must not carry JSON quotes: {published}"
+        );
+    }
+
+    /// Anything we do not recognise still shows *something*. A nested struct
+    /// (`workMode` is the real case) has no scalar at `/value`, so the whole
+    /// object is published rather than a blank sensor.
+    #[test]
+    fn non_scalar_and_missing_values_fall_back_to_the_whole_object() {
+        let nested = json!({"value": {"workMode": 3, "modeValue": 9}});
+        assert_eq!(scalar_state_value(&nested), nested.to_string());
+
+        let no_value_key = json!({"other": 1});
+        assert_eq!(scalar_state_value(&no_value_key), no_value_key.to_string());
+
+        let null_value = json!({ "value": null });
+        assert_eq!(scalar_state_value(&null_value), null_value.to_string());
+
+        let not_an_object = json!(5);
+        assert_eq!(scalar_state_value(&not_an_object), "5");
+    }
+
+    /// Air quality is what a purifier owner opens the app to look at, so it
+    /// gets the device card. `entity_category` must be ABSENT, not empty --
+    /// HA files any diagnostic-categorised entity away from the main card.
+    #[tokio::test]
+    async fn air_quality_is_a_primary_measurement() {
+        let json = discovery_payload_for("airQuality").await;
+
+        assert!(
+            json.get("entity_category").is_none(),
+            "airQuality belongs on the device card, not under Diagnostics: {json}"
+        );
+        assert_eq!(json["name"], "Air Quality");
+        assert_eq!(json["state_class"], "measurement");
+        assert_eq!(json["icon"], "mdi:air-purifier");
+        assert!(
+            json.get("unit_of_measurement").is_none(),
+            "Govee's air-quality index has no confirmed unit; claiming one would \
+             assert a mapping we have not verified: {json}"
+        );
+        assert!(
+            json.get("device_class").is_none(),
+            "no `aqi` device class until the Govee index is mapped to a real AQI scale: {json}"
+        );
+    }
+
+    /// Filter life is consumable wear. HA convention files that as a
+    /// diagnostic, so unlike air quality it deliberately stays off the card.
+    #[tokio::test]
+    async fn filter_life_is_a_diagnostic_percentage() {
+        let json = discovery_payload_for("filterLifeTime").await;
+
+        assert_eq!(json["entity_category"], "diagnostic");
+        assert_eq!(json["name"], "Filter Life");
+        assert_eq!(json["state_class"], "measurement");
+        assert_eq!(json["icon"], "mdi:air-filter");
+        assert!(
+            json.get("unit_of_measurement").is_none(),
+            "the instance name says *time* and no live reading pins the scale, \
+             so claiming `%` would be the same unverified assertion the \
+             airQuality arm refuses to make -- and a wrong unit on a \
+             statistics source needs a manual purge to correct: {json}"
+        );
+    }
+
+    /// Regression guard: the new arms must not reclassify every other
+    /// `Property` capability the bridge already exposes.
+    #[tokio::test]
+    async fn unrecognised_properties_keep_their_diagnostic_defaults() {
+        let json = discovery_payload_for("somethingNovel").await;
+
+        assert_eq!(json["entity_category"], "diagnostic");
+        assert_eq!(json["name"], "somethingNovel");
+        assert!(json.get("state_class").is_none(), "{json}");
+        assert!(json.get("unit_of_measurement").is_none(), "{json}");
+        assert!(json.get("icon").is_none(), "{json}");
+        assert!(json.get("device_class").is_none(), "{json}");
+    }
+
+    /// Regression guard for the two instances that already had bespoke
+    /// handling before this change.
+    #[tokio::test]
+    async fn temperature_and_humidity_metadata_is_unchanged() {
+        let humidity = discovery_payload_for("sensorHumidity").await;
+        assert_eq!(humidity["entity_category"], "diagnostic");
+        assert_eq!(humidity["name"], "Humidity");
+        assert_eq!(humidity["unit_of_measurement"], "%");
+        assert_eq!(humidity["state_class"], "measurement");
+        assert_eq!(humidity["device_class"], DEVICE_CLASS_HUMIDITY);
+
+        let temperature = discovery_payload_for("sensorTemperature").await;
+        assert_eq!(temperature["entity_category"], "diagnostic");
+        assert_eq!(temperature["name"], "Temperature");
+        assert_eq!(temperature["state_class"], "measurement");
+        assert_eq!(temperature["device_class"], DEVICE_CLASS_TEMPERATURE);
     }
 }
