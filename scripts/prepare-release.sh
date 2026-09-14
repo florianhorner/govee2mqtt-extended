@@ -313,7 +313,9 @@ ci_run=$(
     --json databaseId,status,conclusion,headSha,url \
     --jq '.[0] | [.databaseId, .status, .conclusion, .headSha, .url] | join("|")'
 ) || fail "cannot read Container Build status for $candidate"
-[ -n "$ci_run" ] && [ "$ci_run" != '||||' ] || fail "no Container Build run exists for $candidate"
+if [ -z "$ci_run" ] || [ "$ci_run" = '||||' ]; then
+  fail "no Container Build run exists for $candidate"
+fi
 ci_field_count=$(printf '%s\n' "$ci_run" | awk -F '|' 'NF == 5 { print 5 }')
 [ "$ci_field_count" = 5 ] || fail "GitHub returned malformed Container Build data"
 ci_run_id=$(printf '%s\n' "$ci_run" | awk -F '|' '{ print $1 }')
