@@ -52,17 +52,18 @@ commit_preprocessors = [
 ]
 # regex for parsing and grouping commits
 commit_parsers = [
+  { body = "NOCHANGELOG", skip = true },
+  { message = "Tag 20.*", skip = true },
+  { message = "^Merge pull request", skip = true },
+  { message = "^Merge remote-tracking", skip = true },
+  { message = "(rustfmt|cargo update|Bump the .* group)", skip = true },
   { message = "^feat", group = "🚀 Features" },
   { message = "^fix", group = "🐛 Bug Fixes" },
   { message = "^doc", group = "📚 Documentation" },
   { message = "^perf", group = "⚡ Performance" },
   { message = "^refactor", group = "🧹 Refactor" },
-  { message = "^chore|ci", group = "⚙️ Miscellaneous" },
+  { message = "^(chore|ci)", group = "⚙️ Miscellaneous" },
   { body = ".*security", group = "🔒Security" },
-  { message = "Tag 20.*", skip = true },
-  { message = "^Merge remote-tracking", skip = true },
-  { message = "(rustfmt|cargo update|Bump the .* group)", skip = true },
-  { body = "NOCHANGELOG", skip = true },
   { message = ".*", group = "⚙️ Miscellaneous" },
 ]
 # protect breaking changes from being skipped due to matching a skipping commit_parser

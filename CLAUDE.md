@@ -111,6 +111,33 @@ diverged before (git tag `2026.03.22` published `govee2mqtt-amd64:2026.03.22-ba2
 default, which is the path a Supervisor local build takes. A green `test-addon` does not
 cover the publish path, which runs only on a tag.
 
+### Preparing a release
+
+Release preparation is dry-run-first and safe to run from an attached, non-`main`
+Conductor branch whose `HEAD` exactly matches the remote `main` commit. It does not
+require the local `main` branch to be current.
+
+```bash
+./scripts/prepare-release.sh --check
+./scripts/prepare-release.sh --prepare --expected-head "$(git rev-parse HEAD)"
+```
+
+`--prepare` runs the full Rust and Python gates, then creates one local commit containing
+only `addon/config.yaml` and `addon/CHANGELOG.md`. It deliberately creates no tag and makes
+no external write. Open the metadata PR and get it green, but do not merge it yet: merging
+would advertise a version before its images exist. After publication is explicitly approved,
+reverify that the PR is mergeable with exactly the two metadata files, `origin/main` is still
+the candidate, the tag is absent, and every push URL is owned. Create and push the single
+printed tag; never use `git push --tags`. Require both tag-only add-on architecture jobs and
+both versioned images to succeed, then merge the metadata PR and publish the curated GitHub
+Release.
+
+On a tag event, `build.yml` runs `scripts/validate-release-publication.sh` before any
+registry-writing job. It rejects a tag that is not derived from the checked-out commit or a
+tagged commit that is no longer the exact remote `main` head. The add-on job binds
+`TAG_NAME` to `github.ref_name` again before rewriting `addon/config.yaml`; keep both checks
+ahead of publication when changing the workflow.
+
 ## Pre-commit Hooks
 
 The repo includes `.pre-commit-config.yaml` with local hooks for `cargo fmt` and `cargo clippy`. To enable:

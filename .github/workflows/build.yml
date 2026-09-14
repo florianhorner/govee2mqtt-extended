@@ -18,6 +18,11 @@ on:
       - ".cargo/config.toml"
       - "scripts/build-cross.sh"
       - "scripts/build-docker.sh"
+      - "scripts/apply-tag.sh"
+      - "scripts/prepare-release.sh"
+      - "scripts/tag-release.sh"
+      - "scripts/validate-release-publication.sh"
+      - "scripts/cliff.toml"
       - "Dockerfile"
       - ".dockerignore"
 
@@ -37,7 +42,29 @@ env:
   ADDON_BASE_IDENTITY: https://github.com/home-assistant/docker-base/.*
 
 jobs:
+  release-preflight:
+    name: Release publication preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Continue for a non-release event
+        if: ${{ github.ref_type != 'tag' }}
+        run: echo "No release publication requested"
+      - name: Check out the tagged commit
+        if: ${{ github.ref_type == 'tag' }}
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Validate the release tag and current main
+        if: ${{ github.ref_type == 'tag' }}
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: ./scripts/validate-release-publication.sh "$RELEASE_TAG"
+
   build:
+    needs:
+      - release-preflight
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -203,6 +230,8 @@ jobs:
       # is deliberate — change both or neither.
       - name: Apply tag to version
         id: version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
         run: |
           ./scripts/apply-tag.sh
           version="$(sed -n 's/^version: *"\([^"]*\)".*/\1/p' addon/config.yaml)"
