@@ -33,8 +33,15 @@ jobs:
       run: python3 -m unittest scripts/test_live_2fa.py
     - name: Test release preparation
       run: |
-        sh -n scripts/apply-tag.sh scripts/prepare-release.sh scripts/tag-release.sh scripts/validate-release-publication.sh
-        dash -n scripts/apply-tag.sh scripts/prepare-release.sh scripts/tag-release.sh scripts/validate-release-publication.sh
+        for script in \
+          scripts/apply-tag.sh \
+          scripts/prepare-release.sh \
+          scripts/tag-release.sh \
+          scripts/validate-release-publication.sh
+        do
+          sh -n "$script"
+          dash -n "$script"
+        done
         shellcheck -s sh scripts/apply-tag.sh scripts/prepare-release.sh scripts/tag-release.sh scripts/validate-release-publication.sh
         python3 -m unittest scripts/test_prepare_release.py
     - name: Check formatting

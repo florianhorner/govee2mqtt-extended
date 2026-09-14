@@ -229,13 +229,11 @@ if [ "$mode" = prepare ]; then
   assert_prepare_branch
 fi
 
-tag_name=$(
-  git -c core.abbrev=8 show -s \
-    --format='%cd-%h' \
-    --date=format:%Y.%m.%d \
-    "$candidate"
-) || fail "cannot derive a release tag from the candidate"
-if ! printf '%s\n' "$tag_name" | grep -Eq '^20[0-9]{2}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{8,}$'; then
+release_date=$(git show -s --format='%cd' --date=format:%Y.%m.%d "$candidate") ||
+  fail "cannot derive the release date from the candidate"
+candidate_prefix=$(printf '%.8s' "$candidate")
+tag_name=$release_date-$candidate_prefix
+if ! printf '%s\n' "$tag_name" | grep -Eq '^20[0-9]{2}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{8}$'; then
   fail "derived release tag is malformed: $tag_name"
 fi
 if [ "${TAG_NAME+x}" = x ] && [ "$TAG_NAME" != "$tag_name" ]; then

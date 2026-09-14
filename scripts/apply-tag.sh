@@ -13,14 +13,12 @@ config_file="$repo_root/addon/config.yaml"
 [ -f "$config_file" ] || fail "missing addon/config.yaml"
 
 candidate=$(git rev-parse HEAD) || fail "cannot resolve HEAD"
-derived_tag=$(
-  git -c core.abbrev=8 show -s \
-    --format='%cd-%h' \
-    --date=format:%Y.%m.%d \
-    "$candidate"
-) || fail "cannot derive the release tag from HEAD"
+release_date=$(git show -s --format='%cd' --date=format:%Y.%m.%d "$candidate") ||
+  fail "cannot derive the release date from HEAD"
+candidate_prefix=$(printf '%.8s' "$candidate")
+derived_tag=$release_date-$candidate_prefix
 
-if ! printf '%s\n' "$derived_tag" | grep -Eq '^20[0-9]{2}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{8,}$'; then
+if ! printf '%s\n' "$derived_tag" | grep -Eq '^20[0-9]{2}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{8}$'; then
   fail "derived release tag is malformed: $derived_tag"
 fi
 

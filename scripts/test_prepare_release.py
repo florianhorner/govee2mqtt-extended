@@ -100,15 +100,7 @@ class ReleaseFixture:
         self._git("add", "payload.txt", cwd=self.work)
         self._git("commit", "-m", "feat(test): add release candidate", cwd=self.work)
         self.candidate = self.git("rev-parse", "HEAD")
-        self.tag = self.git(
-            "-c",
-            "core.abbrev=8",
-            "show",
-            "-s",
-            "--format=%cd-%h",
-            "--date=format:%Y.%m.%d",
-            self.candidate,
-        )
+        self.tag = self.release_tag(self.candidate)
         self._git("push", "origin", "main", cwd=self.work)
         self._git("switch", "-c", "florianhorner/chore/release-test", cwd=self.work)
         self._git("branch", "-f", "main", self.prior_sha, cwd=self.work)
@@ -130,6 +122,12 @@ class ReleaseFixture:
 
     def git(self, *args: str) -> str:
         return self._git(*args, cwd=self.work).stdout.strip()
+
+    def release_tag(self, candidate: str) -> str:
+        release_date = self.git(
+            "show", "-s", "--format=%cd", "--date=format:%Y.%m.%d", candidate
+        )
+        return f"{release_date}-{candidate[:8]}"
 
     def _write_executable(self, name: str, body: str) -> None:
         path = self.bin_dir / name
@@ -482,15 +480,7 @@ class PrepareReleaseTests(unittest.TestCase):
             "commit", "-m", "test: select unrelated baseline", cwd=nonancestor.work
         )
         nonancestor.candidate = nonancestor.git("rev-parse", "HEAD")
-        nonancestor.tag = nonancestor.git(
-            "-c",
-            "core.abbrev=8",
-            "show",
-            "-s",
-            "--format=%cd-%h",
-            "--date=format:%Y.%m.%d",
-            nonancestor.candidate,
-        )
+        nonancestor.tag = nonancestor.release_tag(nonancestor.candidate)
         nonancestor._git("push", "origin", "HEAD:main", cwd=nonancestor.work)
 
         result = nonancestor.run(
@@ -830,6 +820,23 @@ class PrepareReleaseTests(unittest.TestCase):
         self.assertIn("exactly one root version key", result.stderr)
         self.assertEqual(2, config_path.read_text(encoding="utf-8").count("version:"))
 
+    def test_release_tag_uses_fixed_full_sha_prefix_in_every_script(self) -> None:
+        for relative in (
+            "scripts/apply-tag.sh",
+            "scripts/prepare-release.sh",
+            "scripts/validate-release-publication.sh",
+        ):
+            with self.subTest(script=relative):
+                script = (REPO_ROOT / relative).read_text(encoding="utf-8")
+                self.assertNotIn("%h", script)
+                self.assertIn("candidate_prefix=$(printf '%.8s'", script)
+                self.assertIn("[0-9a-f]{8}$", script)
+
+        build_script = (REPO_ROOT / "build.rs").read_text(encoding="utf-8")
+        self.assertNotIn("%h", build_script)
+        self.assertIn('"--format=%cd%n%H"', build_script)
+        self.assertIn("commit.get(..8)", build_script)
+
     def test_tag_release_delegates_arguments_to_prepare(self) -> None:
         fixture = self.fixture()
 
@@ -937,6 +944,34 @@ class PrepareReleaseTests(unittest.TestCase):
         self.assertIn("github.ref_type == 'tag'", preflight)
         self.assertIn("needs:\n      - release-preflight", build)
         self.assertIn("TAG_NAME: ${{ github.ref_name }}", workflow)
+
+        pinned_checkout = (
+            "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10"
+        )
+        self.assertEqual(4, workflow.count(pinned_checkout))
+        self.assertNotIn("uses: actions/checkout@v6", workflow)
+        self.assertFalse(
+            any(line.lstrip().startswith("ref:") for line in workflow.splitlines())
+        )
+
+    def test_pr_workflow_syntax_checks_each_release_script(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "pr.yml").read_text(
+            encoding="utf-8"
+        )
+        loop_start = workflow.index("        for script in \\\n")
+        loop_end = workflow.index("        done", loop_start)
+        syntax_loop = workflow[loop_start:loop_end]
+        for script in (
+            "scripts/apply-tag.sh",
+            "scripts/prepare-release.sh",
+            "scripts/tag-release.sh",
+            "scripts/validate-release-publication.sh",
+        ):
+            self.assertIn(script, syntax_loop)
+        self.assertIn('sh -n "$script"', syntax_loop)
+        self.assertIn('dash -n "$script"', syntax_loop)
+        self.assertNotIn("sh -n scripts/apply-tag.sh scripts/prepare-release.sh", workflow)
+        self.assertNotIn("dash -n scripts/apply-tag.sh scripts/prepare-release.sh", workflow)
 
     def test_nochangelog_skip_precedes_git_cliff_grouping(self) -> None:
         config = (REPO_ROOT / "scripts" / "cliff.toml").read_text(encoding="utf-8")

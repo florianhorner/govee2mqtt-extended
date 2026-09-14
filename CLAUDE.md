@@ -137,9 +137,10 @@ or abandoned `20*` tag cannot truncate the generated notes.
 
 On a tag event, `build.yml` runs `scripts/validate-release-publication.sh` before any
 registry-writing job. It requires the remote tag to resolve to the checked-out commit and
-that commit to remain at the head of remote `main`. The add-on job binds `TAG_NAME` to
-`github.ref_name` before rewriting `addon/config.yaml`. Keep both checks before registry
-writes.
+that commit to remain at the head of remote `main`. The workflow pins `actions/checkout` to
+v6.0.3's commit and leaves its `ref` input unset so the action verifies the fetched tag ref
+against the immutable event SHA. The add-on job binds `TAG_NAME` to `github.ref_name` before
+rewriting `addon/config.yaml`. Keep these checks before registry writes.
 
 ## Pre-commit Hooks
 

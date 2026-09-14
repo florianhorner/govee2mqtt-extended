@@ -42,6 +42,8 @@ env:
   ADDON_BASE_IDENTITY: https://github.com/home-assistant/docker-base/.*
 
 jobs:
+  # Keep checkout's ref input unset: v6 verifies the event ref still resolves
+  # to the immutable event SHA and fails if a release tag moved.
   release-preflight:
     name: Release publication preflight
     runs-on: ubuntu-latest
@@ -53,7 +55,7 @@ jobs:
         run: echo "No release publication requested"
       - name: Check out the tagged commit
         if: ${{ github.ref_type == 'tag' }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
       - name: Validate the release tag and current main
@@ -76,7 +78,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Docker meta
         if: ${{ github.event_name != 'pull_request' }}
         id: meta
@@ -215,7 +217,7 @@ jobs:
       # persist-credentials: false — nothing here runs an authenticated git
       # command. apply-tag.sh only reads local history (git show -s), and the
       # registry login is a separate docker/login-action inside build-image.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
       # The published image tag is the addon/config.yaml version, NOT the git
@@ -235,7 +237,7 @@ jobs:
         run: |
           ./scripts/apply-tag.sh
           version="$(sed -n 's/^version: *"\([^"]*\)".*/\1/p' addon/config.yaml)"
-          if ! printf '%s' "$version" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{7,}$'; then
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{8}$'; then
             echo "::error::addon/config.yaml version is missing or malformed: '$version'"
             exit 1
           fi
@@ -310,7 +312,7 @@ jobs:
             image: ghcr.io/florianhorner/govee2mqtt-aarch64
     steps:
       # persist-credentials: false — same rationale as the addon job above.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
       # build-image only logs in when push is true, and addon/Dockerfile pulls
@@ -365,7 +367,7 @@ jobs:
         run: |
           ./scripts/apply-tag.sh
           version="$(sed -n 's/^version: *"\([^"]*\)".*/\1/p' addon/config.yaml)"
-          if ! printf '%s' "$version" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{7,}$'; then
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{8}$'; then
             echo "::error::addon/config.yaml version is missing or malformed: '$version'"
             exit 1
           fi

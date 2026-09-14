@@ -26,7 +26,7 @@ fail() {
 }
 release_tag=$1
 
-if ! printf '%s\n' "$release_tag" | grep -Eq '^20[0-9]{2}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{8,}$'; then
+if ! printf '%s\n' "$release_tag" | grep -Eq '^20[0-9]{2}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{8}$'; then
   fail "release tag is malformed: $release_tag"
 fi
 
@@ -46,12 +46,10 @@ case "$remote_url" in
 esac
 
 candidate=$(git rev-parse HEAD) || fail "cannot resolve HEAD"
-derived_tag=$(
-  git -c core.abbrev=8 show -s \
-    --format='%cd-%h' \
-    --date=format:%Y.%m.%d \
-    "$candidate"
-) || fail "cannot derive the release tag from HEAD"
+release_date=$(git show -s --format='%cd' --date=format:%Y.%m.%d "$candidate") ||
+  fail "cannot derive the release date from HEAD"
+candidate_prefix=$(printf '%.8s' "$candidate")
+derived_tag=$release_date-$candidate_prefix
 [ "$release_tag" = "$derived_tag" ] ||
   fail "release tag $release_tag does not match HEAD-derived tag $derived_tag"
 
