@@ -371,9 +371,7 @@ class PrepareReleaseTests(unittest.TestCase):
             )
         )
 
-    def test_check_is_read_only_on_a_conductor_branch_with_stale_local_main(
-        self,
-    ) -> None:
+    def test_check_is_read_only_with_stale_local_main(self) -> None:
         fixture = self.fixture()
 
         result = fixture.run("--check", "--expected-head", fixture.candidate)

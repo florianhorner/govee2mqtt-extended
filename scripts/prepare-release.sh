@@ -29,7 +29,7 @@ Usage:
 --check is the default and does not change Git refs or tracked files.
 --prepare requires an attached non-main branch, runs the full local gates,
 and creates one two-file metadata commit.
-It never creates or pushes a tag and never creates a GitHub Release.
+It creates no tag or GitHub Release and pushes nothing.
 EOF
 }
 
@@ -381,7 +381,7 @@ printf '\nGenerated add-on changelog preview\n\n'
 sed -n '1,240p' "$tmp_changelog"
 
 if [ "$mode" = check ]; then
-  printf '\nCHECK PASSED — no tag, commit, push, release, or tracked-file change was made.\n'
+  printf '\nCHECK PASSED: --check changed no Git refs or tracked files and made no external writes.\n'
   printf 'To prepare the metadata commit after review:\n'
   printf '  scripts/prepare-release.sh --prepare --expected-head %s\n' "$candidate"
   mutation_started=false
