@@ -14,6 +14,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REAL_GIT = shutil.which("git")
 REAL_GIT_CLIFF = shutil.which("git-cliff")
+REAL_DOCKER = shutil.which("docker")
+GIT_CLIFF_IMAGE = (
+    "ghcr.io/orhun/git-cliff/git-cliff:2.13.1@"
+    "sha256:d49216b61658fc1b10bab6c5f82dfca03b8e37278618fdc3db235d95cf3c33f5"
+)
 
 
 class ReleaseFixture:
@@ -65,9 +70,27 @@ class ReleaseFixture:
         (self.work / "payload.txt").write_text("baseline\n", encoding="utf-8")
         self._git("add", ".", cwd=self.work)
         self._git("commit", "-m", "test: establish prior release", cwd=self.work)
-        self.prior_sha = self.git("rev-parse", "HEAD")
-        self.previous_tag = f"2026.01.01-{self.prior_sha[:8]}"
+        self.previous_tag_commit = self.git("rev-parse", "HEAD")
+        self.previous_tag = f"2026.01.01-{self.previous_tag_commit[:8]}"
         self._git("tag", self.previous_tag, cwd=self.work)
+
+        (self.work / "addon" / "config.yaml").write_text(
+            f'name: Test Add-on\nversion: "{self.previous_tag}"\nslug: test\n',
+            encoding="utf-8",
+        )
+        (self.work / "addon" / "CHANGELOG.md").write_text(
+            f"# Changelog\n\n## [{self.previous_tag}]\n", encoding="utf-8"
+        )
+        self._git("add", "addon/config.yaml", "addon/CHANGELOG.md", cwd=self.work)
+        self._git(
+            "commit",
+            "-m",
+            f"chore(release): prepare {self.previous_tag}",
+            "-m",
+            "NOCHANGELOG",
+            cwd=self.work,
+        )
+        self.prior_sha = self.git("rev-parse", "HEAD")
 
         self._git("remote", "add", "origin", str(self.remote), cwd=self.work)
         self._git("push", "origin", "main", cwd=self.work)
@@ -389,6 +412,96 @@ class PrepareReleaseTests(unittest.TestCase):
         )
         self.assertIn(f"{fixture.previous_tag}..{fixture.candidate}", cliff_call)
 
+    def test_addon_version_selects_changelog_base_over_newer_20_tag(self) -> None:
+        fixture = self.fixture()
+        aborted_tag = "20-aborted-candidate"
+        fixture._git("tag", aborted_tag, fixture.candidate, cwd=fixture.work)
+        fixture._git(
+            "push", "origin", f"refs/tags/{aborted_tag}", cwd=fixture.work
+        )
+
+        result = fixture.run("--check", "--expected-head", fixture.candidate)
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        cliff_call = next(
+            command
+            for command in fixture.commands()
+            if command.startswith("git-cliff|--offline")
+        )
+        self.assertIn(f"{fixture.previous_tag}..{fixture.candidate}", cliff_call)
+        self.assertNotIn(f"{aborted_tag}..{fixture.candidate}", cliff_call)
+        self.assert_candidate_untouched(fixture)
+        self.assert_no_external_writes(fixture)
+
+    def test_addon_version_baseline_must_resolve_and_be_ancestor(self) -> None:
+        missing = self.fixture()
+        missing._git("tag", "-d", missing.previous_tag, cwd=missing.work)
+
+        result = missing.run("--check", "--expected-head", missing.candidate)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("add-on baseline tag is missing locally", result.stderr)
+        self.assert_candidate_untouched(missing)
+        self.assert_no_external_writes(missing)
+
+        missing_remote = self.fixture()
+        missing_remote._git(
+            "--git-dir",
+            str(missing_remote.remote),
+            "update-ref",
+            "-d",
+            f"refs/tags/{missing_remote.previous_tag}",
+            cwd=missing_remote.root,
+        )
+
+        result = missing_remote.run(
+            "--check", "--expected-head", missing_remote.candidate
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("add-on baseline tag is missing remotely", result.stderr)
+        self.assert_candidate_untouched(missing_remote)
+        self.assert_no_external_writes(missing_remote)
+
+        nonancestor = self.fixture()
+        unrelated = nonancestor.git(
+            "commit-tree", "HEAD^{tree}", "-m", "test: unrelated release"
+        )
+        unrelated_tag = f"2026.02.02-{unrelated[:8]}"
+        nonancestor._git("tag", unrelated_tag, unrelated, cwd=nonancestor.work)
+        nonancestor._git(
+            "push", "origin", f"refs/tags/{unrelated_tag}", cwd=nonancestor.work
+        )
+        config_path = nonancestor.work / "addon" / "config.yaml"
+        config_path.write_text(
+            f'name: Test Add-on\nversion: "{unrelated_tag}"\nslug: test\n',
+            encoding="utf-8",
+        )
+        nonancestor._git("add", "addon/config.yaml", cwd=nonancestor.work)
+        nonancestor._git(
+            "commit", "-m", "test: select unrelated baseline", cwd=nonancestor.work
+        )
+        nonancestor.candidate = nonancestor.git("rev-parse", "HEAD")
+        nonancestor.tag = nonancestor.git(
+            "-c",
+            "core.abbrev=8",
+            "show",
+            "-s",
+            "--format=%cd-%h",
+            "--date=format:%Y.%m.%d",
+            nonancestor.candidate,
+        )
+        nonancestor._git("push", "origin", "HEAD:main", cwd=nonancestor.work)
+
+        result = nonancestor.run(
+            "--check", "--expected-head", nonancestor.candidate
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("is not an ancestor of the candidate", result.stderr)
+        self.assert_candidate_untouched(nonancestor)
+        self.assert_no_external_writes(nonancestor)
+
     def test_prepare_creates_only_the_metadata_commit_and_no_tag(self) -> None:
         fixture = self.fixture()
 
@@ -416,6 +529,22 @@ class PrepareReleaseTests(unittest.TestCase):
         self.assertNotIn(fixture.tag, fixture.git("tag", "--list").splitlines())
         self.assertEqual(
             "", fixture.git("status", "--porcelain=v1", "--untracked-files=normal")
+        )
+        self.assertEqual(
+            [
+                "cargo|build --all",
+                "cargo|clippy --all -- -D warnings",
+                "cargo|clippy --all --all-features -- -D warnings",
+                "cargo|test --all -- --show-output --test-threads=1",
+                "cargo|test --all --all-features -- --show-output --test-threads=1",
+                "python3|-m unittest scripts/test_live_2fa.py scripts/test_prepare_release.py",
+                "cargo|fmt --all -- --check",
+            ],
+            [
+                command
+                for command in fixture.commands()
+                if command.startswith(("cargo|", "python3|"))
+            ],
         )
         remote_main = self._remote_ref(fixture, "refs/heads/main")
         self.assertEqual(fixture.candidate, remote_main)
@@ -701,16 +830,49 @@ class PrepareReleaseTests(unittest.TestCase):
         self.assertIn("exactly one root version key", result.stderr)
         self.assertEqual(2, config_path.read_text(encoding="utf-8").count("version:"))
 
-    def test_publication_preflight_binds_tag_to_current_remote_main(self) -> None:
+    def test_tag_release_delegates_arguments_to_prepare(self) -> None:
         fixture = self.fixture()
 
-        result = fixture.validate_publication()
+        result = subprocess.run(
+            [
+                str(fixture.work / "scripts" / "tag-release.sh"),
+                "--check",
+                "--expected-head",
+                fixture.candidate,
+            ],
+            cwd=fixture.work,
+            env=fixture.environment(),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("RELEASE PREFLIGHT PASSED", result.stdout)
-        self.assertIn(fixture.tag, result.stdout)
-        self.assertIn(fixture.candidate, result.stdout)
+        self.assertIn("CHECK PASSED", result.stdout)
+        self.assert_candidate_untouched(fixture)
         self.assert_no_external_writes(fixture)
+
+    def test_publication_preflight_binds_tag_to_current_remote_main(self) -> None:
+        for annotated in (False, True):
+            with self.subTest(annotated=annotated):
+                fixture = self.fixture()
+                tag_args = ["tag"]
+                if annotated:
+                    tag_args.extend(("-a", "-m", "release test"))
+                tag_args.extend((fixture.tag, fixture.candidate))
+                fixture._git(*tag_args, cwd=fixture.work)
+                fixture._git(
+                    "push", "origin", f"refs/tags/{fixture.tag}", cwd=fixture.work
+                )
+
+                result = fixture.validate_publication()
+
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn("RELEASE PREFLIGHT PASSED", result.stdout)
+                self.assertIn(fixture.tag, result.stdout)
+                self.assertIn(fixture.candidate, result.stdout)
+                self.assert_no_external_writes(fixture)
 
     def test_publication_preflight_rejects_wrong_tag_and_stale_main(self) -> None:
         wrong_tag = self.fixture()
@@ -728,10 +890,37 @@ class PrepareReleaseTests(unittest.TestCase):
             stale_main.prior_sha,
             cwd=stale_main.root,
         )
+        stale_main._git("tag", stale_main.tag, stale_main.candidate, cwd=stale_main.work)
+        stale_main._git(
+            "push", "origin", f"refs/tags/{stale_main.tag}", cwd=stale_main.work
+        )
         result = stale_main.validate_publication()
         self.assertNotEqual(0, result.returncode)
         self.assertIn("is not the current origin/main", result.stderr)
         self.assert_no_external_writes(stale_main)
+
+    def test_publication_preflight_rejects_absent_or_moved_remote_tag(self) -> None:
+        absent = self.fixture()
+        result = absent.validate_publication()
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("cannot resolve release tag on origin", result.stderr)
+        self.assert_no_external_writes(absent)
+
+        for annotated in (False, True):
+            with self.subTest(moved_annotated=annotated):
+                moved = self.fixture()
+                tag_args = ["tag"]
+                if annotated:
+                    tag_args.extend(("-a", "-m", "moved release test"))
+                tag_args.extend((moved.tag, moved.prior_sha))
+                moved._git(*tag_args, cwd=moved.work)
+                moved._git(
+                    "push", "origin", f"refs/tags/{moved.tag}", cwd=moved.work
+                )
+                result = moved.validate_publication()
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("release tag resolves to", result.stderr)
+                self.assert_no_external_writes(moved)
 
     def test_publication_preflight_precedes_registry_writes(self) -> None:
         workflow = (REPO_ROOT / ".github" / "workflows" / "build.yml").read_text(
@@ -762,17 +951,10 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertLess(skip_position, config.index(grouping_rule))
 
     def test_real_git_cliff_skips_the_release_metadata_commit(self) -> None:
-        if REAL_GIT_CLIFF is None:
-            self.skipTest("git-cliff is not installed")
-        version = subprocess.run(
-            [REAL_GIT_CLIFF, "--version"],
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        ).stdout.strip()
-        if version != "git-cliff 2.13.1":
-            self.skipTest(f"git-cliff 2.13.1 is required, found {version}")
+        prepare_script = (REPO_ROOT / "scripts" / "prepare-release.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(f"git_cliff_image='{GIT_CLIFF_IMAGE}'", prepare_script)
 
         fixture = self.fixture()
         (fixture.work / "payload.txt").write_text(
@@ -789,18 +971,34 @@ class PrepareReleaseTests(unittest.TestCase):
         )
         release_commit = fixture.git("rev-parse", "HEAD")
 
+        cliff_args = [
+            "--offline",
+            "--repository",
+            str(fixture.work),
+            "--config",
+            str(REPO_ROOT / "scripts" / "cliff.toml"),
+            "--tag",
+            "2026.02.01-cafebabe",
+            f"{fixture.previous_tag}..{release_commit}",
+        ]
+        cliff_command: list[str]
+        if REAL_GIT_CLIFF is not None:
+            version = subprocess.run(
+                [REAL_GIT_CLIFF, "--version"],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).stdout.strip()
+            if version == "git-cliff 2.13.1":
+                cliff_command = [REAL_GIT_CLIFF, *cliff_args]
+            else:
+                cliff_command = self._docker_git_cliff_command(fixture, release_commit)
+        else:
+            cliff_command = self._docker_git_cliff_command(fixture, release_commit)
+
         result = subprocess.run(
-            [
-                REAL_GIT_CLIFF,
-                "--offline",
-                "--repository",
-                str(fixture.work),
-                "--config",
-                str(REPO_ROOT / "scripts" / "cliff.toml"),
-                "--tag",
-                "2026.02.01-cafebabe",
-                f"{fixture.previous_tag}..{release_commit}",
-            ],
+            cliff_command,
             check=True,
             text=True,
             stdout=subprocess.PIPE,
@@ -809,6 +1007,44 @@ class PrepareReleaseTests(unittest.TestCase):
 
         self.assertNotIn("Prepare 2026.02.01-cafebabe", result.stdout)
         self.assertNotIn("chore(release): prepare", result.stdout)
+
+    def _docker_git_cliff_command(
+        self, fixture: ReleaseFixture, release_commit: str
+    ) -> list[str]:
+        if REAL_DOCKER is None:
+            self.skipTest("git-cliff 2.13.1 or Docker is required")
+        docker_info = subprocess.run(
+            [REAL_DOCKER, "info"],
+            check=False,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if docker_info.returncode != 0:
+            self.skipTest("git-cliff 2.13.1 or a running Docker daemon is required")
+        git_common_dir = fixture.git(
+            "rev-parse", "--path-format=absolute", "--git-common-dir"
+        )
+        return [
+            REAL_DOCKER,
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--mount",
+            f"type=bind,src={git_common_dir},dst=/repo.git,readonly",
+            "--mount",
+            f"type=bind,src={REPO_ROOT / 'scripts' / 'cliff.toml'},dst=/cliff.toml,readonly",
+            GIT_CLIFF_IMAGE,
+            "--offline",
+            "--repository",
+            "/repo.git",
+            "--config",
+            "/cliff.toml",
+            "--tag",
+            "2026.02.01-cafebabe",
+            f"{fixture.previous_tag}..{release_commit}",
+        ]
 
     def _remote_ref(self, fixture: ReleaseFixture, ref: str) -> str:
         result = fixture._git("ls-remote", "origin", ref, cwd=fixture.work)

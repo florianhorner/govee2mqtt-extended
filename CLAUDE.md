@@ -123,6 +123,8 @@ remote `main`. The local `main` branch may be stale.
 
 `--prepare` runs the Rust and Python gates, then creates one local commit containing only
 `addon/config.yaml` and `addon/CHANGELOG.md`. It creates no tag and makes no external write.
+The current `addon/config.yaml` version selects the changelog baseline, so an unrelated
+or abandoned `20*` tag cannot truncate the generated notes.
 
 1. Open the metadata PR and wait for CI to pass. Keep it unmerged so the add-on does not
    advertise a version before its images exist.
@@ -134,8 +136,8 @@ remote `main`. The local `main` branch may be stale.
    exist. Then merge the metadata PR and publish the curated GitHub Release.
 
 On a tag event, `build.yml` runs `scripts/validate-release-publication.sh` before any
-registry-writing job. It requires the tag to match the checked-out commit and the tagged
-commit to remain at the head of remote `main`. The add-on job binds `TAG_NAME` to
+registry-writing job. It requires the remote tag to resolve to the checked-out commit and
+that commit to remain at the head of remote `main`. The add-on job binds `TAG_NAME` to
 `github.ref_name` before rewriting `addon/config.yaml`. Keep both checks before registry
 writes.
 

@@ -243,6 +243,39 @@ if [ "${TAG_NAME+x}" = x ] && [ "$TAG_NAME" != "$tag_name" ]; then
 fi
 assert_tag_absent "$tag_name"
 
+version_count=$(awk '/^version:/ { count += 1 } END { print count + 0 }' addon/config.yaml)
+[ "$version_count" -eq 1 ] || fail "addon/config.yaml must contain exactly one root version key"
+previous_tag=$(sed -n 's/^version:[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' addon/config.yaml)
+[ -n "$previous_tag" ] || fail "addon/config.yaml root version is missing or malformed"
+if ! printf '%s\n' "$previous_tag" | grep -Eq '^20[0-9]{2}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{8,}$'; then
+  fail "addon/config.yaml root version is not a release tag: $previous_tag"
+fi
+git show-ref --verify --quiet "refs/tags/$previous_tag" ||
+  fail "add-on baseline tag is missing locally: $previous_tag"
+previous_tag_commit=$(git rev-parse "$previous_tag^{commit}") ||
+  fail "add-on baseline tag does not resolve to a commit: $previous_tag"
+git merge-base --is-ancestor "$previous_tag_commit" "$candidate" ||
+  fail "add-on baseline tag is not an ancestor of the candidate: $previous_tag"
+
+remote_previous_tag_output=$(
+  git ls-remote --exit-code "$release_remote" \
+    "refs/tags/$previous_tag" "refs/tags/$previous_tag^{}"
+) || fail "add-on baseline tag is missing remotely: $previous_tag"
+remote_previous_tag_commit=$(
+  printf '%s\n' "$remote_previous_tag_output" |
+    awk -v ref="refs/tags/$previous_tag" '
+      $2 == ref { direct_count += 1; direct = $1 }
+      $2 == ref "^{}" { peeled_count += 1; peeled = $1 }
+      END {
+        if (direct_count != 1 || peeled_count > 1) exit 1
+        if (peeled_count == 1) print peeled
+        else print direct
+      }
+    '
+) || fail "remote add-on baseline tag did not resolve to exactly one commit: $previous_tag"
+[ "$remote_previous_tag_commit" = "$previous_tag_commit" ] ||
+  fail "local and remote add-on baseline tags resolve to different commits: $previous_tag"
+
 remote_release_tags=$(git ls-remote --refs --tags "$release_remote" 'refs/tags/20*') ||
   fail "cannot read the remote release-tag inventory"
 remote_release_inventory=$(
@@ -257,10 +290,6 @@ local_release_inventory=$(
 [ -n "$remote_release_inventory" ] || fail "the remote has no release-tag baseline"
 [ "$local_release_inventory" = "$remote_release_inventory" ] ||
   fail "local release tags differ from the remote; synchronize tags before continuing"
-
-previous_tag=$(git describe --tags --match '20*' --abbrev=0 "$candidate") ||
-  fail "cannot find the previous release tag"
-[ "$previous_tag" != "$tag_name" ] || fail "candidate is already tagged as $tag_name"
 
 latest_release_tag=$(
   gh release list --repo "$expected_repository" --limit 100 \

@@ -55,6 +55,25 @@ derived_tag=$(
 [ "$release_tag" = "$derived_tag" ] ||
   fail "release tag $release_tag does not match HEAD-derived tag $derived_tag"
 
+remote_tag_output=$(
+  git ls-remote --exit-code "$release_remote" \
+    "refs/tags/$release_tag" "refs/tags/$release_tag^{}"
+) || fail "cannot resolve release tag on $release_remote: $release_tag"
+remote_tag_commit=$(
+  printf '%s\n' "$remote_tag_output" |
+    awk -v ref="refs/tags/$release_tag" '
+      $2 == ref { direct_count += 1; direct = $1 }
+      $2 == ref "^{}" { peeled_count += 1; peeled = $1 }
+      END {
+        if (direct_count != 1 || peeled_count > 1) exit 1
+        if (peeled_count == 1) print peeled
+        else print direct
+      }
+    '
+) || fail "$release_remote release tag did not resolve to exactly one commit: $release_tag"
+[ "$remote_tag_commit" = "$candidate" ] ||
+  fail "$release_remote release tag resolves to $remote_tag_commit, expected $candidate"
+
 remote_output=$(git ls-remote --exit-code "$release_remote" "refs/heads/$release_branch") ||
   fail "cannot read $release_remote/$release_branch"
 remote_head=$(
