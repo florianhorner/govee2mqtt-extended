@@ -949,10 +949,23 @@ class PrepareReleaseTests(unittest.TestCase):
             "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10"
         )
         self.assertEqual(4, workflow.count(pinned_checkout))
+        self.assertEqual(
+            4,
+            sum(
+                line.strip() == "persist-credentials: false"
+                for line in workflow.splitlines()
+            ),
+        )
         self.assertNotIn("uses: actions/checkout@v6", workflow)
         self.assertFalse(
             any(line.lstrip().startswith("ref:") for line in workflow.splitlines())
         )
+
+        build_executable = build.index("      - name: Build executable")
+        registry_login = build.index("      - name: Log in to the Container registry")
+        image_push = build.index("      - name: Build and push by digest")
+        self.assertLess(build_executable, registry_login)
+        self.assertLess(registry_login, image_push)
 
     def test_pr_workflow_syntax_checks_each_release_script(self) -> None:
         workflow = (REPO_ROOT / ".github" / "workflows" / "pr.yml").read_text(
