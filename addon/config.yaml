@@ -1,6 +1,6 @@
 name: Govee2MQTT Bridge (Fork)
 image: ghcr.io/florianhorner/govee2mqtt-{arch}
-version: "2026.08.06-bf75797f"
+version: "2026.09.15-2dad7cf2"
 slug: govee2mqtt
 stage: experimental
 description: Fork of wez/govee2mqtt with device fixes, crash hardening, and scene cycling. Prefer upstream unless you need these specific changes.
