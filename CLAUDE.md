@@ -111,6 +111,37 @@ diverged before (git tag `2026.03.22` published `govee2mqtt-amd64:2026.03.22-ba2
 default, which is the path a Supervisor local build takes. A green `test-addon` does not
 cover the publish path, which runs only on a tag.
 
+### Preparing a release
+
+Run release preparation from an attached, non-`main` branch whose `HEAD` matches
+remote `main`. The local `main` branch may be stale.
+
+```bash
+./scripts/prepare-release.sh --check
+./scripts/prepare-release.sh --prepare --expected-head "$(git rev-parse HEAD)"
+```
+
+`--prepare` runs the Rust and Python gates, then creates one local commit containing only
+`addon/config.yaml` and `addon/CHANGELOG.md`. It creates no tag and makes no external write.
+The current `addon/config.yaml` version selects the changelog baseline, so an unrelated
+or abandoned `20*` tag cannot truncate the generated notes.
+
+1. Open the metadata PR and wait for CI to pass. Keep it unmerged so the add-on does not
+   advertise a version before its images exist.
+2. After explicit publication approval, confirm that the PR contains exactly the
+   two metadata files, `origin/main` is still the candidate, the tag is absent, and every
+   push URL is owned.
+3. Create and push only the printed tag. Do not use `git push --tags`.
+4. Wait for both tag-only architecture jobs to pass and confirm that both versioned images
+   exist. Then merge the metadata PR and publish the curated GitHub Release.
+
+On a tag event, `build.yml` runs `scripts/validate-release-publication.sh` before any
+registry-writing job. It requires the remote tag to resolve to the checked-out commit and
+that commit to remain at the head of remote `main`. The workflow pins `actions/checkout` to
+v6.0.3's commit and leaves its `ref` input unset so the action verifies the fetched tag ref
+against the immutable event SHA. The add-on job binds `TAG_NAME` to `github.ref_name` before
+rewriting `addon/config.yaml`. Keep these checks before registry writes.
+
 ## Pre-commit Hooks
 
 The repo includes `.pre-commit-config.yaml` with local hooks for `cargo fmt` and `cargo clippy`. To enable:
