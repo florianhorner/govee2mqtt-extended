@@ -1,25 +1,25 @@
 //! Home Assistant `fan` entity for Govee fans and air purifiers.
 //!
 //! Modelled on [`crate::hass_mqtt::humidifier`], which solves the same problem
-//! for a different HA domain. Power and oscillation reuse the generic switch
-//! route and presets reuse `set-work-mode`, so the only new MQTT route this
-//! adds is `set-percentage` -- speed is the one control no existing route can
-//! express for every device shape (see
+//! for a different HA domain. Oscillation reuses the generic switch route and
+//! presets reuse `set-work-mode`. Fan power has its own route so it can preserve
+//! a purifier's independent nightlight instead of acting as a master switch.
+//! `set-percentage` handles the different speed shapes (see
 //! [`crate::hass_mqtt::work_mode::SpeedAxis`]).
 //!
 //! <https://www.home-assistant.io/integrations/fan.mqtt/>
 
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
 use crate::hass_mqtt::command_routes::{
-    instantiate_route, CommandTopic, FAN_SET_PERCENTAGE_ROUTE, SET_WORK_MODE_ROUTE,
-    SWITCH_COMMAND_ROUTE,
+    instantiate_route, CommandTopic, FAN_COMMAND_ROUTE, FAN_SET_PERCENTAGE_ROUTE,
+    SET_WORK_MODE_ROUTE, SWITCH_COMMAND_ROUTE,
 };
 use crate::hass_mqtt::instance::{publish_entity_config, EntityInstance};
 use crate::hass_mqtt::work_mode::{ParsedWorkMode, SpeedAxis};
 use crate::service::device::Device as ServiceDevice;
 use crate::service::hass::{availability_topic, topic_safe_id, HassClient, IdParameter};
 use crate::service::state::StateHandle;
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use mosquitto_rs::router::{Params, Payload, State};
 use serde::Serialize;
@@ -54,7 +54,7 @@ pub struct FanConfig {
     #[serde(flatten)]
     pub base: EntityConfig,
 
-    /// Power. Routed to the generic switch handler rather than owning a route.
+    /// Fan-only power, distinct from the device's generic master-power switch.
     pub command_topic: CommandTopic,
     pub state_topic: String,
 
@@ -125,10 +125,7 @@ impl Fan {
         let id = topic_safe_id(device);
         let use_iot = device.iot_api_supported() && state.get_iot_client().await.is_some();
 
-        let command_topic = instantiate_route(
-            SWITCH_COMMAND_ROUTE,
-            &[("id", &id), ("instance", "powerSwitch")],
-        )?;
+        let command_topic = instantiate_route(FAN_COMMAND_ROUTE, &[("id", &id)])?;
 
         // A device whose workMode cannot be parsed still gets an on/off fan.
         let parsed = ParsedWorkMode::with_device(device).ok();
@@ -452,6 +449,91 @@ pub fn fan_speed_action(axis: Option<&SpeedAxis>, ordinal: i64) -> anyhow::Resul
     })
 }
 
+async fn fan_power(state: &StateHandle, device: &ServiceDevice, on: bool) -> anyhow::Result<()> {
+    // The H7124's master power changes both the fan and its nightlight. Keep
+    // this measured quirk model-specific; other fans retain their transports.
+    if device.sku != "H7124" {
+        return state.device_power_on(device, on).await;
+    }
+
+    let info = device
+        .http_device_info
+        .as_ref()
+        .context("H7124 fan metadata unavailable")?;
+    let nightlight = info
+        .capability_by_instance("nightlightToggle")
+        .context("H7124 nightlight capability unavailable; refusing master-power change")?;
+    let light_on = nightlight
+        .enum_parameter_by_name("on")
+        .context("nightlight has no on value")?;
+    let light_off = nightlight
+        .enum_parameter_by_name("off")
+        .context("nightlight has no off value")?;
+    anyhow::ensure!(
+        light_on != light_off,
+        "nightlight on/off values are ambiguous"
+    );
+    let power = info
+        .capability_by_instance("powerSwitch")
+        .context("H7124 has no power switch")?;
+    let power_value = power
+        .enum_parameter_by_name(if on { "on" } else { "off" })
+        .context("H7124 power switch has no requested value")?;
+    let client = state
+        .get_platform_client()
+        .await
+        .context("Platform API unavailable; cannot preserve the H7124 nightlight")?;
+
+    // The Coordinator serializes bridge controls, but its Device snapshot can
+    // predate an earlier queued command. Never restore from that stale cache.
+    let before = client
+        .get_device_state(info)
+        .await
+        .context("read nightlight before fan power")?;
+    anyhow::ensure!(
+        before.sku == info.sku && before.device == info.device,
+        "nightlight readback belongs to a different device"
+    );
+    let value = before
+        .capability_by_instance("nightlightToggle")
+        .and_then(|cap| cap.state.get("value"))
+        .filter(|value| **value == light_on || **value == light_off)
+        .context("nightlight state is unknown; refusing master-power change")?;
+
+    // Use the same ordered transport for both writes. Restore even if the
+    // power response fails: the command may already have reached the device.
+    // These are separate requests, not an atomic/no-flicker hardware primitive.
+    let powered = client.control_device(info, power, power_value).await;
+    let restored = client.control_device(info, nightlight, value.clone()).await;
+    match (powered, restored) {
+        (Ok(_), Ok(_)) => Ok(()),
+        (Err(error), Ok(_)) => {
+            Err(error.context("fan power failed; nightlight restoration acknowledged"))
+        }
+        (Ok(_), Err(error)) => {
+            Err(error.context("fan power acknowledged, but nightlight restoration failed"))
+        }
+        (Err(power), Err(light)) => anyhow::bail!(
+            "fan power failed: {power:#}; nightlight restoration also failed: {light:#}"
+        ),
+    }
+}
+
+pub async fn mqtt_fan_command(
+    Payload(command): Payload<String>,
+    Params(IdParameter { id }): Params<IdParameter>,
+    State(state): State<StateHandle>,
+) -> anyhow::Result<()> {
+    let on = match command.as_str() {
+        "ON" | "on" => true,
+        "OFF" | "off" => false,
+        _ => anyhow::bail!("invalid fan power command for {id}: {command}"),
+    };
+    log::info!("mqtt_fan_command: {id}: {command}");
+    let device = state.resolve_device_for_control(&id).await?;
+    fan_power(&state, &device, on).await
+}
+
 pub async fn mqtt_fan_set_percentage(
     Payload(ordinal): Payload<i64>,
     Params(IdParameter { id }): Params<IdParameter>,
@@ -467,7 +549,7 @@ pub async fn mqtt_fan_set_percentage(
         .and_then(|work_modes| work_modes.classify_fan_controls().axis);
 
     match fan_speed_action(axis.as_ref(), ordinal)? {
-        FanSpeedAction::PowerOff => state.device_power_on(&device, false).await,
+        FanSpeedAction::PowerOff => fan_power(&state, &device, false).await,
         FanSpeedAction::SetSpeed {
             work_mode,
             mode_value,
@@ -571,6 +653,346 @@ mod test {
         serde_json::to_value(&fan.fan).expect("FanConfig serializes")
     }
 
+    /// Model the observed H7124 coupling: master power changes BOTH actuators,
+    /// while nightlightToggle changes only the light. No device/cloud credentials.
+    struct PowerBackend {
+        power: bool,
+        nightlight: Option<JsonValue>,
+        work_mode: i64,
+        requests: Vec<(String, JsonValue)>,
+        fail: Option<&'static str>,
+    }
+
+    type Backend = Arc<tokio::sync::Mutex<PowerBackend>>;
+
+    struct PowerFixture {
+        state: StateHandle,
+        backend: Backend,
+        server: tokio::task::JoinHandle<std::io::Result<()>>,
+    }
+
+    impl Drop for PowerFixture {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    fn power_readback(power: bool, nightlight: Option<JsonValue>, work_mode: i64) -> JsonValue {
+        let mut caps = vec![
+            json!({"type": "devices.capabilities.on_off", "instance": "powerSwitch",
+                   "state": {"value": u8::from(power)}}),
+            json!({"type": "devices.capabilities.work_mode", "instance": "workMode",
+                   "state": {"value": {"workMode": work_mode, "modeValue": 1}}}),
+        ];
+        if let Some(value) = nightlight {
+            caps.push(
+                json!({"type": "devices.capabilities.toggle", "instance": "nightlightToggle",
+                             "state": {"value": value}}),
+            );
+        }
+        json!({"sku": "H7124", "device": DEVICE_ID, "capabilities": caps})
+    }
+
+    async fn power_fixture(power: bool, nightlight: bool) -> anyhow::Result<PowerFixture> {
+        use axum::{extract::State as AxumState, http::StatusCode, routing::post, Json, Router};
+
+        async fn read(AxumState(backend): AxumState<Backend>) -> (StatusCode, Json<JsonValue>) {
+            let mut backend = backend.lock().await;
+            backend.requests.push(("read".into(), JsonValue::Null));
+            if backend.fail == Some("read") {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"code": 400, "msg": "test read failure"})),
+                );
+            }
+            let payload =
+                power_readback(backend.power, backend.nightlight.clone(), backend.work_mode);
+            (
+                StatusCode::OK,
+                Json(
+                    json!({"requestId": "test", "code": 200, "msg": "success", "payload": payload}),
+                ),
+            )
+        }
+
+        async fn control(
+            AxumState(backend): AxumState<Backend>,
+            Json(body): Json<JsonValue>,
+        ) -> (StatusCode, Json<JsonValue>) {
+            let cap = &body["payload"]["capability"];
+            let instance = cap["instance"].as_str().unwrap_or("unknown");
+            let value = cap["value"].clone();
+            let mut backend = backend.lock().await;
+            backend.requests.push((instance.into(), value.clone()));
+            if instance == "powerSwitch" {
+                // A failed response can still follow an applied power change.
+                backend.power = value == json!(1);
+                backend.nightlight = Some(value.clone());
+            } else if instance == "nightlightToggle" && backend.fail != Some(instance) {
+                backend.nightlight = Some(value.clone());
+            }
+            if backend.fail == Some(instance) || backend.fail == Some("both-controls") {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"code": 400, "msg": "test control failure"})),
+                );
+            }
+            (
+                StatusCode::OK,
+                Json(json!({"requestId": "test", "code": 200, "msg": "success",
+                "capability": {"type": cap["type"], "instance": instance, "value": value, "state": {}}})),
+            )
+        }
+
+        let backend = Arc::new(tokio::sync::Mutex::new(PowerBackend {
+            power,
+            nightlight: Some(json!(u8::from(nightlight))),
+            work_mode: 1,
+            requests: vec![],
+            fail: None,
+        }));
+        let app = Router::new()
+            .route("/router/api/v1/device/state", post(read))
+            .route("/router/api/v1/device/control", post(control))
+            .with_state(backend.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let state = empty_state();
+        state
+            .set_platform_client(crate::platform_api::GoveeApiClient::new_for_test(
+                "test-key",
+                format!("http://{addr}"),
+            ))
+            .await;
+        let mut device = h7124();
+        let info = device
+            .http_device_info
+            .as_mut()
+            .ok_or_else(|| anyhow!("fixture metadata missing"))?;
+        info.device = DEVICE_ID.into();
+        // Deliberately stale cache: using this instead of reading the backend
+        // would restore the wrong light state and still look internally coherent.
+        device.set_http_device_state(serde_json::from_value(power_readback(
+            !power,
+            Some(json!(u8::from(!nightlight))),
+            7,
+        ))?);
+        *state.device_mut(&device.sku, &device.id).await = device.clone();
+        Ok(PowerFixture {
+            state,
+            backend,
+            server,
+        })
+    }
+
+    async fn power_command(fixture: &PowerFixture, command: &str) -> anyhow::Result<()> {
+        if command == "ZERO" {
+            mqtt_fan_set_percentage(
+                Payload(0),
+                Params(IdParameter {
+                    id: DEVICE_ID.into(),
+                }),
+                State(fixture.state.clone()),
+            )
+            .await
+        } else {
+            mqtt_fan_command(
+                Payload(command.into()),
+                Params(IdParameter {
+                    id: DEVICE_ID.into(),
+                }),
+                State(fixture.state.clone()),
+            )
+            .await
+        }
+    }
+
+    #[tokio::test]
+    async fn regression_fan_power_preserves_fresh_nightlight_for_on_off_and_zero(
+    ) -> anyhow::Result<()> {
+        for command in ["ON", "OFF", "ZERO"] {
+            for nightlight in [false, true] {
+                for work_mode in [1, 7] {
+                    let on = command == "ON";
+                    let fixture = power_fixture(!on, nightlight).await?;
+                    fixture.backend.lock().await.work_mode = work_mode;
+                    power_command(&fixture, command).await?;
+                    let backend = fixture.backend.lock().await;
+                    assert_eq!(backend.power, on, "fan {command}");
+                    assert_eq!(backend.nightlight, Some(json!(u8::from(nightlight))),
+                        "{command} must preserve immediate nightlight={nightlight}, mode={work_mode}");
+                    assert_eq!(
+                        backend.requests,
+                        vec![
+                            ("read".into(), JsonValue::Null),
+                            ("powerSwitch".into(), json!(u8::from(on))),
+                            ("nightlightToggle".into(), json!(u8::from(nightlight))),
+                        ]
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn regression_fan_unknown_nightlight_refuses_power_writes() -> anyhow::Result<()> {
+        for value in [None, Some(json!("")), Some(json!(2)), Some(json!(null))] {
+            let fixture = power_fixture(false, false).await?;
+            fixture.backend.lock().await.nightlight = value;
+            assert!(power_command(&fixture, "ON").await.is_err());
+            let backend = fixture.backend.lock().await;
+            assert!(!backend.power);
+            assert_eq!(backend.requests, vec![("read".into(), JsonValue::Null)]);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn regression_fan_read_failure_refuses_power_writes() -> anyhow::Result<()> {
+        let fixture = power_fixture(false, false).await?;
+        fixture.backend.lock().await.fail = Some("read");
+        assert!(power_command(&fixture, "ON").await.is_err());
+        let backend = fixture.backend.lock().await;
+        assert!(!backend.power);
+        assert_eq!(backend.requests, vec![("read".into(), JsonValue::Null)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn regression_fan_restores_even_when_power_response_fails() -> anyhow::Result<()> {
+        let fixture = power_fixture(false, false).await?;
+        fixture.backend.lock().await.fail = Some("powerSwitch");
+        assert!(power_command(&fixture, "ON").await.is_err());
+        let backend = fixture.backend.lock().await;
+        assert!(
+            backend.power,
+            "the failed response followed an applied command"
+        );
+        assert_eq!(backend.nightlight, Some(json!(0)));
+        assert_eq!(
+            backend.requests.last(),
+            Some(&("nightlightToggle".into(), json!(0)))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn regression_fan_restoration_failure_is_not_success() -> anyhow::Result<()> {
+        for fail in ["nightlightToggle", "both-controls"] {
+            let fixture = power_fixture(false, false).await?;
+            fixture.backend.lock().await.fail = Some(fail);
+            let error = power_command(&fixture, "ON")
+                .await
+                .err()
+                .ok_or_else(|| anyhow!("expected failure"))?;
+            assert!(format!("{error:#}").contains("nightlight"), "{error:#}");
+            assert_eq!(
+                fixture.backend.lock().await.requests.last(),
+                Some(&("nightlightToggle".into(), json!(0)))
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn regression_fan_generic_master_power_is_unchanged() -> anyhow::Result<()> {
+        let fixture = power_fixture(false, false).await?;
+        let device = fixture.state.resolve_device_read_only(DEVICE_ID).await?;
+        fixture.state.device_power_on(&device, true).await?;
+        let backend = fixture.backend.lock().await;
+        assert!(backend.power);
+        assert_eq!(
+            backend.nightlight,
+            Some(json!(1)),
+            "master switch still controls the whole device"
+        );
+        assert_eq!(backend.requests, vec![("powerSwitch".into(), json!(1))]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn regression_fan_other_models_keep_existing_power_path() -> anyhow::Result<()> {
+        let fixture = power_fixture(false, false).await?;
+        // An unverified model, even one reporting a nightlight, keeps its transport.
+        fixture.state.device_mut("H7124", DEVICE_ID).await.sku = "H1310".into();
+        power_command(&fixture, "on").await?;
+        assert_eq!(
+            fixture.backend.lock().await.requests,
+            vec![("powerSwitch".into(), json!(1))]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn regression_fan_invalid_power_command_does_not_touch_device() -> anyhow::Result<()> {
+        let fixture = power_fixture(false, false).await?;
+        assert!(power_command(&fixture, "invalid").await.is_err());
+        assert!(fixture.backend.lock().await.requests.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn regression_fan_incomplete_metadata_refuses_master_power() -> anyhow::Result<()> {
+        for missing in [
+            "metadata",
+            "nightlightToggle",
+            "nightlight values",
+            "powerSwitch",
+        ] {
+            let fixture = power_fixture(false, false).await?;
+            {
+                let mut device = fixture.state.device_mut("H7124", DEVICE_ID).await;
+                if missing == "metadata" {
+                    device.http_device_info = None;
+                } else {
+                    let info = device
+                        .http_device_info
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("fixture metadata missing"))?;
+                    if missing == "nightlight values" {
+                        for cap in &mut info.capabilities {
+                            if cap.instance == "nightlightToggle" {
+                                cap.parameters = None;
+                            }
+                        }
+                    } else {
+                        info.capabilities.retain(|cap| cap.instance != missing);
+                    }
+                }
+            }
+            assert!(power_command(&fixture, "ON").await.is_err(), "{missing}");
+            assert!(
+                fixture.backend.lock().await.requests.is_empty(),
+                "{missing}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn regression_fan_missing_platform_client_fails_closed() -> anyhow::Result<()> {
+        let state = empty_state();
+        let device = h7124();
+        *state.device_mut(&device.sku, &device.id).await = device.clone();
+        let error = mqtt_fan_command(
+            Payload("ON".into()),
+            Params(IdParameter {
+                id: DEVICE_ID.into(),
+            }),
+            State(state),
+        )
+        .await
+        .err()
+        .ok_or_else(|| anyhow!("expected missing-client error"))?;
+        assert!(
+            format!("{error:#}").contains("cannot preserve"),
+            "{error:#}"
+        );
+        Ok(())
+    }
+
     /// H7111's speeds live in one mode's own value range, so the fan advertises
     /// an 8-step percentage plus the remaining modes as presets.
     #[tokio::test]
@@ -590,8 +1012,8 @@ mod test {
             .unwrap()
             .ends_with("/set-percentage"));
         assert!(
-            json["command_topic"].as_str().unwrap().contains("/switch/"),
-            "power reuses the switch route: {json}"
+            json["command_topic"].as_str().unwrap().contains("/fan/"),
+            "fan power must not use the whole-device switch route: {json}"
         );
     }
 

@@ -1,11 +1,11 @@
 use crate::hass_mqtt::climate::mqtt_set_temperature;
 use crate::hass_mqtt::command_routes::{
-    device_id_segment, CommandTopic, FAN_SET_PERCENTAGE_ROUTE, HUMIDIFIER_SET_MODE_ROUTE,
-    HUMIDIFIER_SET_TARGET_ROUTE, LIGHT_COMMAND_ROUTE, LIGHT_SEGMENT_COMMAND_ROUTE,
-    MUSIC_SENSITIVITY_CLEAR_ROUTE, MUSIC_SENSITIVITY_COMMAND_ROUTE, NUMBER_COMMAND_ROUTE,
-    ONECLICK_ROUTE, PURGE_CACHES_ROUTE, REQUEST_PLATFORM_DATA_ROUTE, SCENE_NEXT_ROUTE,
-    SCENE_PREV_ROUTE, SET_MODE_SCENE_ROUTE, SET_MUSIC_PALETTE_ROUTE, SET_TEMPERATURE_ROUTE,
-    SET_WORK_MODE_ROUTE, SWITCH_COMMAND_ROUTE,
+    device_id_segment, CommandTopic, FAN_COMMAND_ROUTE, FAN_SET_PERCENTAGE_ROUTE,
+    HUMIDIFIER_SET_MODE_ROUTE, HUMIDIFIER_SET_TARGET_ROUTE, LIGHT_COMMAND_ROUTE,
+    LIGHT_SEGMENT_COMMAND_ROUTE, MUSIC_SENSITIVITY_CLEAR_ROUTE, MUSIC_SENSITIVITY_COMMAND_ROUTE,
+    NUMBER_COMMAND_ROUTE, ONECLICK_ROUTE, PURGE_CACHES_ROUTE, REQUEST_PLATFORM_DATA_ROUTE,
+    SCENE_NEXT_ROUTE, SCENE_PREV_ROUTE, SET_MODE_SCENE_ROUTE, SET_MUSIC_PALETTE_ROUTE,
+    SET_TEMPERATURE_ROUTE, SET_WORK_MODE_ROUTE, SWITCH_COMMAND_ROUTE,
 };
 use crate::hass_mqtt::enumerator::{enumerate_all_entites, enumerate_entities_for_device};
 use crate::hass_mqtt::humidifier::{mqtt_device_set_work_mode, mqtt_humidifier_set_target};
@@ -74,6 +74,7 @@ macro_rules! mqtt_routes {
             SET_MODE_SCENE_ROUTE => mqtt_set_mode_scene,
             SET_MUSIC_PALETTE_ROUTE => mqtt_set_music_palette,
             FAN_SET_PERCENTAGE_ROUTE => crate::hass_mqtt::fan::mqtt_fan_set_percentage,
+            FAN_COMMAND_ROUTE => crate::hass_mqtt::fan::mqtt_fan_command,
         }
     };
 }
@@ -1153,6 +1154,7 @@ mod tests {
             ("gv2mqtt/:id/set-mode-scene", "mqtt_set_mode_scene"),
             ("gv2mqtt/:id/set-music-palette", "mqtt_set_music_palette"),
             ("gv2mqtt/fan/:id/set-percentage", "mqtt_fan_set_percentage"),
+            ("gv2mqtt/fan/:id/command", "mqtt_fan_command"),
         ];
 
         assert_eq!(MQTT_ROUTE_PAIRINGS.len(), EXPECTED.len());
@@ -1194,6 +1196,102 @@ mod tests {
     fn test_scene_cycle_next_from_middle() {
         let scenes: Vec<String> = vec!["A".into(), "B".into(), "C".into()];
         assert_eq!(compute_scene_cycle_index(&scenes, Some("B"), 1), 2);
+    }
+
+    async fn cycle_catalog_fixture(names: &[&str]) -> StateHandle {
+        use crate::service::state::{SceneCatalogCache, SceneCatalogCategory, SceneCatalogEntry};
+        let state = Arc::new(crate::service::state::State::new());
+        state
+            .device_mut("H6062", "cycle-test")
+            .await
+            .set_scene_catalog(SceneCatalogCache {
+                platform_signature: None,
+                categories: vec![SceneCatalogCategory {
+                    name: "Test scenes".into(),
+                    scenes: names
+                        .iter()
+                        .map(|name| SceneCatalogEntry {
+                            name: (*name).into(),
+                            icon_urls: vec![],
+                            hint: None,
+                        })
+                        .collect(),
+                }],
+            });
+        state
+    }
+
+    #[tokio::test]
+    async fn regression_scene_cycle_composes_with_the_executable_catalog() -> anyhow::Result<()> {
+        let state = cycle_catalog_fixture(&["", "A", "", "B", ""]).await;
+        let device = state.resolve_device_read_only("cycle-test").await?;
+        let flat: Vec<String> = state
+            .device_list_scenes_categorized(&device)
+            .await?
+            .into_iter()
+            .flat_map(|cat| cat.scenes.into_iter().map(|scene| scene.name))
+            .collect();
+        assert_eq!(flat, ["A", "B"]);
+        for (current, direction, expected) in [
+            (None, 1, "A"),
+            (None, -1, "B"),
+            (Some("unknown"), 1, "A"),
+            (Some("unknown"), -1, "B"),
+            (Some(""), 1, "A"),
+            (Some(""), -1, "B"),
+            (Some("a"), 1, "B"),
+            (Some("a"), -1, "B"),
+            (Some("B"), 1, "A"),
+            (Some("B"), -1, "A"),
+        ] {
+            assert_eq!(
+                flat[compute_scene_cycle_index(&flat, current, direction)],
+                expected
+            );
+        }
+        assert_eq!(
+            state.device_list_scenes(&device).await?,
+            flat,
+            "selectors and cycling must expose the same executable names"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn regression_scene_cycle_keeps_a_real_none_scene() -> anyhow::Result<()> {
+        let state = cycle_catalog_fixture(&["", "None", ""]).await;
+        let device = state.resolve_device_read_only("cycle-test").await?;
+        let scenes = state.device_list_scenes(&device).await?;
+        assert_eq!(scenes, ["None"]);
+        for current in [None, Some("None"), Some("unknown")] {
+            for direction in [-1, 1] {
+                assert_eq!(compute_scene_cycle_index(&scenes, current, direction), 0);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn regression_scene_cycle_empty_only_catalog_is_not_executable() -> anyhow::Result<()> {
+        let state = cycle_catalog_fixture(&["", ""]).await;
+        let device = state.resolve_device_read_only("cycle-test").await?;
+        assert!(state.device_list_scenes(&device).await?.is_empty());
+        assert!(
+            crate::hass_mqtt::select::SceneModeSelect::new(&device, &state)
+                .await?
+                .is_none()
+        );
+        for direction in [-1, 1] {
+            let error = scene_cycle(&state, "cycle-test", direction)
+                .await
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("empty catalog was accepted"))?;
+            assert!(
+                error.to_string().contains("No scenes available"),
+                "{error:#}"
+            );
+        }
+        Ok(())
     }
 
     #[test]

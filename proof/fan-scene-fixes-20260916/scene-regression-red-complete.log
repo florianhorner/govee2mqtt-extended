@@ -1,0 +1,142 @@
+   Compiling govee v0.1.0 ([workspace])
+warning: unused `tokio::sync::MappedMutexGuard` that must be used
+    --> src/service/state.rs:1596:9
+     |
+1596 |         state.device_mut(&device.sku, &device.id).await;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if unused the Mutex will immediately unlock
+     = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+     |
+1596 |         let _ = state.device_mut(&device.sku, &device.id).await;
+     |         +++++++
+
+warning: `govee` (bin "govee" test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.28s
+     Running unittests src/main.rs (target/debug/deps/govee-9d5efbfc1c54196e)
+
+running 14 tests
+test service::state::tests::regression_scene_catalog_empty_only_cache_returns_no_categories_or_names ... FAILED
+test service::hass::tests::regression_scene_cycle_keeps_a_real_none_scene ... FAILED
+test service::state::tests::regression_scene_catalog_cache_hit_filters_empty_names_and_keeps_metadata ... FAILED
+test service::hass::tests::regression_scene_cycle_empty_only_catalog_is_not_executable ... FAILED
+test service::hass::tests::regression_scene_cycle_composes_with_the_executable_catalog ... FAILED
+test service::state::tests::regression_scene_catalog_empty_undoc_result_stays_uncached ... FAILED
+test service::state::tests::regression_scene_catalog_empty_refresh_preserves_cache_and_adopts_signature ... FAILED
+test service::state::tests::regression_scene_catalog_refresh_error_filters_cached_fallback ... FAILED
+test service::state::tests::regression_scene_catalog_empty_platform_result_stays_uncached_and_recovers ... FAILED
+test platform_api::test::regression_scene_catalog_platform_empty_only_has_no_executable_names ... FAILED
+test service::state::tests::regression_scene_catalog_platform_fetch_filters_empty_and_keeps_media ... FAILED
+test service::state::tests::regression_scene_catalog_undoc_filters_empty_and_keeps_grouping_and_media ... FAILED
+test platform_api::test::regression_scene_catalog_platform_names_exclude_empty_preserve_exact_names ... FAILED
+test platform_api::test::regression_scene_catalog_real_none_still_reaches_the_wire ... ok
+
+successes:
+
+successes:
+    platform_api::test::regression_scene_catalog_real_none_still_reaches_the_wire
+
+failures:
+
+---- service::state::tests::regression_scene_catalog_empty_only_cache_returns_no_categories_or_names stdout ----
+
+thread 'service::state::tests::regression_scene_catalog_empty_only_cache_returns_no_categories_or_names' (17014388) panicked at src/service/state.rs:1440:9:
+assertion failed: state.device_list_scenes_categorized(&device).await.unwrap().is_empty()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- service::hass::tests::regression_scene_cycle_keeps_a_real_none_scene stdout ----
+
+thread 'service::hass::tests::regression_scene_cycle_keeps_a_real_none_scene' (17014386) panicked at src/service/hass.rs:1242:9:
+assertion `left == right` failed
+  left: ["", "None"]
+ right: ["None"]
+
+---- service::state::tests::regression_scene_catalog_cache_hit_filters_empty_names_and_keeps_metadata stdout ----
+
+thread 'service::state::tests::regression_scene_catalog_cache_hit_filters_empty_names_and_keeps_metadata' (17014387) panicked at src/service/state.rs:1368:9:
+assertion `left == right` failed: remove empty entries/categories without losing names, order, grouping or media
+  left: Array [Object {"name": String("Nature"), "scenes": Array [Object {"hint": String("not executable"), "icon_urls": Array [], "name": String("")}, Object {"hint": String("scene metadata"), "icon_urls": Array [String("https://example.com/scene.png")], "name": String("None")}]}, Object {"name": String("Empty"), "scenes": Array [Object {"icon_urls": Array [], "name": String("")}]}, Object {"name": String("Exact names"), "scenes": Array [Object {"hint": String("scene metadata"), "icon_urls": Array [String("https://example.com/scene.png")], "name": String(" AURORA ")}]}, Object {"name": String("Already empty"), "scenes": Array []}]
+ right: Array [Object {"name": String("Nature"), "scenes": Array [Object {"hint": String("scene metadata"), "icon_urls": Array [String("https://example.com/scene.png")], "name": String("None")}]}, Object {"name": String("Exact names"), "scenes": Array [Object {"hint": String("scene metadata"), "icon_urls": Array [String("https://example.com/scene.png")], "name": String(" AURORA ")}]}]
+
+---- service::hass::tests::regression_scene_cycle_empty_only_catalog_is_not_executable stdout ----
+
+thread 'service::hass::tests::regression_scene_cycle_empty_only_catalog_is_not_executable' (17014385) panicked at src/service/hass.rs:1255:9:
+assertion failed: state.device_list_scenes(&device).await?.is_empty()
+
+---- service::hass::tests::regression_scene_cycle_composes_with_the_executable_catalog stdout ----
+
+thread 'service::hass::tests::regression_scene_cycle_composes_with_the_executable_catalog' (17014384) panicked at src/service/hass.rs:1222:9:
+assertion `left == right` failed
+  left: ["", "A", "", "B", ""]
+ right: ["A", "B"]
+
+---- service::state::tests::regression_scene_catalog_empty_undoc_result_stays_uncached stdout ----
+
+thread 'service::state::tests::regression_scene_catalog_empty_undoc_result_stays_uncached' (17014391) panicked at src/service/state.rs:1598:9:
+assertion failed: state.device_list_scenes_categorized(&device).await.unwrap().is_empty()
+
+---- service::state::tests::regression_scene_catalog_empty_refresh_preserves_cache_and_adopts_signature stdout ----
+
+thread 'service::state::tests::regression_scene_catalog_empty_refresh_preserves_cache_and_adopts_signature' (17014390) panicked at src/service/state.rs:1368:9:
+assertion `left == right` failed: remove empty entries/categories without losing names, order, grouping or media
+  left: Array [Object {"name": String("All"), "scenes": Array [Object {"icon_urls": Array [], "name": String("")}]}]
+ right: Array [Object {"name": String("Nature"), "scenes": Array [Object {"hint": String("scene metadata"), "icon_urls": Array [String("https://example.com/scene.png")], "name": String("None")}]}, Object {"name": String("Exact names"), "scenes": Array [Object {"hint": String("scene metadata"), "icon_urls": Array [String("https://example.com/scene.png")], "name": String(" AURORA ")}]}]
+
+---- service::state::tests::regression_scene_catalog_refresh_error_filters_cached_fallback stdout ----
+
+thread 'service::state::tests::regression_scene_catalog_refresh_error_filters_cached_fallback' (17014393) panicked at src/service/state.rs:1368:9:
+assertion `left == right` failed: remove empty entries/categories without losing names, order, grouping or media
+  left: Array [Object {"name": String("Nature"), "scenes": Array [Object {"hint": String("not executable"), "icon_urls": Array [], "name": String("")}, Object {"hint": String("scene metadata"), "icon_urls": Array [String("https://example.com/scene.png")], "name": String("None")}]}, Object {"name": String("Empty"), "scenes": Array [Object {"icon_urls": Array [], "name": String("")}]}, Object {"name": String("Exact names"), "scenes": Array [Object {"hint": String("scene metadata"), "icon_urls": Array [String("https://example.com/scene.png")], "name": String(" AURORA ")}]}, Object {"name": String("Already empty"), "scenes": Array []}]
+ right: Array [Object {"name": String("Nature"), "scenes": Array [Object {"hint": String("scene metadata"), "icon_urls": Array [String("https://example.com/scene.png")], "name": String("None")}]}, Object {"name": String("Exact names"), "scenes": Array [Object {"hint": String("scene metadata"), "icon_urls": Array [String("https://example.com/scene.png")], "name": String(" AURORA ")}]}]
+
+---- service::state::tests::regression_scene_catalog_empty_platform_result_stays_uncached_and_recovers stdout ----
+
+thread 'service::state::tests::regression_scene_catalog_empty_platform_result_stays_uncached_and_recovers' (17014389) panicked at src/service/state.rs:1540:9:
+assertion failed: state.device_list_scenes_categorized(&device).await.unwrap().is_empty()
+
+---- platform_api::test::regression_scene_catalog_platform_empty_only_has_no_executable_names stdout ----
+
+thread 'platform_api::test::regression_scene_catalog_platform_empty_only_has_no_executable_names' (17014381) panicked at src/platform_api.rs:1911:13:
+assertion failed: fixture.client.list_scene_names(&fixture.info).await.unwrap().is_empty()
+
+---- service::state::tests::regression_scene_catalog_platform_fetch_filters_empty_and_keeps_media stdout ----
+
+thread 'service::state::tests::regression_scene_catalog_platform_fetch_filters_empty_and_keeps_media' (17014392) panicked at src/service/state.rs:1520:9:
+assertion `left == right` failed
+  left: ["", "AURORA", "aurora", "None"]
+ right: ["AURORA", "aurora", "None"]
+
+---- service::state::tests::regression_scene_catalog_undoc_filters_empty_and_keeps_grouping_and_media stdout ----
+
+thread 'service::state::tests::regression_scene_catalog_undoc_filters_empty_and_keeps_grouping_and_media' (17014394) panicked at src/service/state.rs:1368:9:
+assertion `left == right` failed: remove empty entries/categories without losing names, order, grouping or media
+  left: Array [Object {"name": String("Nature"), "scenes": Array [Object {"hint": String("scene metadata"), "icon_urls": Array [String("https://example.com/scene.png")], "name": String("")}, Object {"hint": String("scene metadata"), "icon_urls": Array [String("https://example.com/scene.png")], "name": String("None")}]}, Object {"name": String("Empty"), "scenes": Array [Object {"hint": String("scene metadata"), "icon_urls": Array [String("https://example.com/scene.png")], "name": String("")}]}, Object {"name": String("Exact names"), "scenes": Array [Object {"hint": String("scene metadata"), "icon_urls": Array [String("https://example.com/scene.png")], "name": String(" AURORA ")}]}]
+ right: Array [Object {"name": String("Nature"), "scenes": Array [Object {"hint": String("scene metadata"), "icon_urls": Array [String("https://example.com/scene.png")], "name": String("None")}]}, Object {"name": String("Exact names"), "scenes": Array [Object {"hint": String("scene metadata"), "icon_urls": Array [String("https://example.com/scene.png")], "name": String(" AURORA ")}]}]
+
+---- platform_api::test::regression_scene_catalog_platform_names_exclude_empty_preserve_exact_names stdout ----
+
+thread 'platform_api::test::regression_scene_catalog_platform_names_exclude_empty_preserve_exact_names' (17014382) panicked at src/platform_api.rs:1900:9:
+assertion `left == right` failed: only the empty name is non-executable; real None and spacing must survive
+  left: ["", " AURORA ", "None"]
+ right: [" AURORA ", "None"]
+
+
+failures:
+    platform_api::test::regression_scene_catalog_platform_empty_only_has_no_executable_names
+    platform_api::test::regression_scene_catalog_platform_names_exclude_empty_preserve_exact_names
+    service::hass::tests::regression_scene_cycle_composes_with_the_executable_catalog
+    service::hass::tests::regression_scene_cycle_empty_only_catalog_is_not_executable
+    service::hass::tests::regression_scene_cycle_keeps_a_real_none_scene
+    service::state::tests::regression_scene_catalog_cache_hit_filters_empty_names_and_keeps_metadata
+    service::state::tests::regression_scene_catalog_empty_only_cache_returns_no_categories_or_names
+    service::state::tests::regression_scene_catalog_empty_platform_result_stays_uncached_and_recovers
+    service::state::tests::regression_scene_catalog_empty_refresh_preserves_cache_and_adopts_signature
+    service::state::tests::regression_scene_catalog_empty_undoc_result_stays_uncached
+    service::state::tests::regression_scene_catalog_platform_fetch_filters_empty_and_keeps_media
+    service::state::tests::regression_scene_catalog_refresh_error_filters_cached_fallback
+    service::state::tests::regression_scene_catalog_undoc_filters_empty_and_keeps_grouping_and_media
+
+test result: FAILED. 1 passed; 13 failed; 0 ignored; 0 measured; 348 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `--bin govee`
