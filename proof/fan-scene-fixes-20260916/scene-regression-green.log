@@ -1,0 +1,62 @@
+   Compiling govee v0.1.0 ([workspace])
+warning: unused import: `anyhow::Context`
+ --> src/cache.rs:1:5
+  |
+1 | use anyhow::Context;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused `tokio::sync::MappedMutexGuard` that must be used
+    --> src/service/state.rs:1615:9
+     |
+1615 |         state.device_mut(&device.sku, &device.id).await;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: if unused the Mutex will immediately unlock
+     = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+     |
+1615 |         let _ = state.device_mut(&device.sku, &device.id).await;
+     |         +++++++
+
+warning: `govee` (bin "govee" test) generated 2 warnings (run `cargo fix --bin "govee" -p govee --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.53s
+     Running unittests src/main.rs (target/debug/deps/govee-9d5efbfc1c54196e)
+
+running 14 tests
+test service::state::tests::regression_scene_catalog_empty_only_cache_returns_no_categories_or_names ... ok
+test service::hass::tests::regression_scene_cycle_keeps_a_real_none_scene ... ok
+test service::hass::tests::regression_scene_cycle_composes_with_the_executable_catalog ... ok
+test service::state::tests::regression_scene_catalog_cache_hit_filters_empty_names_and_keeps_metadata ... ok
+test service::hass::tests::regression_scene_cycle_empty_only_catalog_is_not_executable ... ok
+test service::state::tests::regression_scene_catalog_refresh_error_filters_cached_fallback ... ok
+test service::state::tests::regression_scene_catalog_undoc_filters_empty_and_keeps_grouping_and_media ... ok
+test service::state::tests::regression_scene_catalog_empty_undoc_result_stays_uncached ... ok
+test platform_api::test::regression_scene_catalog_platform_names_exclude_empty_preserve_exact_names ... ok
+test service::state::tests::regression_scene_catalog_platform_fetch_filters_empty_and_keeps_media ... ok
+test service::state::tests::regression_scene_catalog_empty_refresh_preserves_cache_and_adopts_signature ... ok
+test service::state::tests::regression_scene_catalog_empty_platform_result_stays_uncached_and_recovers ... ok
+test platform_api::test::regression_scene_catalog_platform_empty_only_has_no_executable_names ... ok
+test platform_api::test::regression_scene_catalog_real_none_still_reaches_the_wire ... ok
+
+successes:
+
+successes:
+    platform_api::test::regression_scene_catalog_platform_empty_only_has_no_executable_names
+    platform_api::test::regression_scene_catalog_platform_names_exclude_empty_preserve_exact_names
+    platform_api::test::regression_scene_catalog_real_none_still_reaches_the_wire
+    service::hass::tests::regression_scene_cycle_composes_with_the_executable_catalog
+    service::hass::tests::regression_scene_cycle_empty_only_catalog_is_not_executable
+    service::hass::tests::regression_scene_cycle_keeps_a_real_none_scene
+    service::state::tests::regression_scene_catalog_cache_hit_filters_empty_names_and_keeps_metadata
+    service::state::tests::regression_scene_catalog_empty_only_cache_returns_no_categories_or_names
+    service::state::tests::regression_scene_catalog_empty_platform_result_stays_uncached_and_recovers
+    service::state::tests::regression_scene_catalog_empty_refresh_preserves_cache_and_adopts_signature
+    service::state::tests::regression_scene_catalog_empty_undoc_result_stays_uncached
+    service::state::tests::regression_scene_catalog_platform_fetch_filters_empty_and_keeps_media
+    service::state::tests::regression_scene_catalog_refresh_error_filters_cached_fallback
+    service::state::tests::regression_scene_catalog_undoc_filters_empty_and_keeps_grouping_and_media
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 348 filtered out; finished in 0.02s
+

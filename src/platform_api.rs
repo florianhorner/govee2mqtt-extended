@@ -411,9 +411,8 @@ impl GoveeApiClient {
             }
         }
 
-        if !result.is_empty() {
-            result.insert(0, "".to_string());
-        }
+        // Empty is a no-scene state, not an executable scene name.
+        result.retain(|name| !name.is_empty());
 
         Ok(sort_and_dedup_scenes(result))
     }
@@ -1793,6 +1792,153 @@ pub(crate) mod test {
             .find(|d| d.capability_by_instance("musicMode").is_some())
             .expect("fixture has a device with musicMode")
             .clone()
+    }
+
+    /// Seed the real upstream-cache readers under unique synthetic device keys.
+    /// No process-global cache swap or environment override is needed. Platform
+    /// cache misses can only reach the local capture server; undoc data is seeded
+    /// before any catalog call. Drop removes only this fixture's keys.
+    pub(crate) struct SceneCatalogFixture {
+        pub info: HttpDeviceInfo,
+        pub client: GoveeApiClient,
+        keys: Vec<(&'static str, String)>,
+    }
+
+    impl SceneCatalogFixture {
+        pub(crate) async fn new(
+            names: &[&str],
+            undoc: Vec<crate::undoc_api::LightEffectCategory>,
+        ) -> Self {
+            let (base_url, _) = capture_server();
+            let mut fixture = Self {
+                info: HttpDeviceInfo {
+                    sku: format!("TEST-SCENE-{}", request_id()),
+                    device: "scene-catalog-fixture".to_string(),
+                    device_name: "Scene catalog fixture".to_string(),
+                    device_type: DeviceType::Light,
+                    capabilities: vec![DeviceCapability {
+                        kind: DeviceCapabilityKind::DynamicScene,
+                        instance: "lightScene".to_string(),
+                        parameters: Some(DeviceParameters::Enum {
+                            options: names
+                                .iter()
+                                .enumerate()
+                                .map(|(index, name)| EnumOption {
+                                    name: (*name).to_string(),
+                                    value: json!(index + 1),
+                                    extras: HashMap::new(),
+                                })
+                                .collect(),
+                        }),
+                        alarm_type: None,
+                        event_state: None,
+                    }],
+                },
+                client: GoveeApiClient::new_for_test("test-key", base_url),
+                keys: vec![],
+            };
+            for prefix in ["scene-list", "scene-list-diy"] {
+                let key = format!("{prefix}-{}-{}", fixture.info.sku, fixture.info.device);
+                fixture
+                    .seed("http-api", key, Vec::<DeviceCapability>::new())
+                    .await;
+            }
+            let key = format!("scenes-{}", fixture.info.sku);
+            fixture.seed("undoc-api", key, undoc).await;
+            fixture
+        }
+
+        fn options<'a>(topic: &'a str, key: &'a str) -> CacheGetOptions<'a> {
+            CacheGetOptions {
+                topic,
+                key,
+                soft_ttl: ONE_WEEK,
+                hard_ttl: ONE_WEEK,
+                negative_ttl: ONE_WEEK,
+                allow_stale: false,
+            }
+        }
+
+        async fn seed<T>(&mut self, topic: &'static str, key: String, value: T)
+        where
+            T: Serialize + serde::de::DeserializeOwned + std::fmt::Debug + Clone,
+        {
+            self.keys.push((topic, key.clone()));
+            cache_get(Self::options(topic, &key), async {
+                Ok(CacheComputeResult::Value(value))
+            })
+            .await
+            .expect("seed catalog fixture cache");
+        }
+
+        pub(crate) async fn fail_platform_refresh(&self) {
+            let key = format!("scene-list-{}-{}", self.info.sku, self.info.device);
+            crate::cache::invalidate_key("http-api", &key).expect("replace fixture key");
+            let result =
+                cache_get::<Vec<DeviceCapability>, _>(Self::options("http-api", &key), async {
+                    anyhow::bail!("scene catalog fixture refresh failure")
+                })
+                .await;
+            assert!(result.is_err(), "seed a cached upstream failure");
+        }
+    }
+
+    impl Drop for SceneCatalogFixture {
+        fn drop(&mut self) {
+            for (topic, key) in &self.keys {
+                let _ = crate::cache::invalidate_key(topic, key);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn regression_scene_catalog_platform_names_exclude_empty_preserve_exact_names() {
+        let fixture = SceneCatalogFixture::new(&["", "None", " AURORA ", "None"], vec![]).await;
+
+        assert_eq!(
+            fixture
+                .client
+                .list_scene_names(&fixture.info)
+                .await
+                .unwrap(),
+            vec![" AURORA ", "None"],
+            "only the empty name is non-executable; real None and spacing must survive"
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_scene_catalog_platform_empty_only_has_no_executable_names() {
+        for names in [vec![""], vec![]] {
+            let fixture = SceneCatalogFixture::new(&names, vec![]).await;
+            assert!(fixture
+                .client
+                .list_scene_names(&fixture.info)
+                .await
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn regression_scene_catalog_real_none_still_reaches_the_wire() {
+        let _serialized = live_path_guard();
+        let fixture = SceneCatalogFixture::new(&["None"], vec![]).await;
+        let (_, captured) = capture_server();
+        let before = captured.lock().unwrap_or_else(|e| e.into_inner()).len();
+
+        fixture
+            .client
+            .set_scene_by_name(&fixture.info, "None")
+            .await
+            .expect("a real scene called None remains executable");
+
+        let sent = captured.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(sent.len(), before + 1);
+        assert_eq!(
+            sent[before]["payload"]["capability"]["instance"],
+            "lightScene"
+        );
+        assert_eq!(sent[before]["payload"]["capability"]["value"], 1);
     }
 
     fn live_music_path() -> (

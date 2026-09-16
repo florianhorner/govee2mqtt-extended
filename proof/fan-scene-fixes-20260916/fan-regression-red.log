@@ -1,0 +1,62 @@
+   Compiling govee v0.1.0 ([workspace])
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.03s
+     Running unittests src/main.rs (target/debug/deps/govee-9d5efbfc1c54196e)
+
+running 8 tests
+test hass_mqtt::fan::test::regression_fan_invalid_power_command_does_not_touch_device ... ok
+test hass_mqtt::fan::test::regression_fan_generic_master_power_is_unchanged ... ok
+test hass_mqtt::fan::test::regression_fan_restoration_failure_is_not_success ... FAILED
+test hass_mqtt::fan::test::regression_fan_other_models_keep_existing_power_path ... ok
+test hass_mqtt::fan::test::regression_fan_power_preserves_fresh_nightlight_for_on_off_and_zero ... FAILED
+test hass_mqtt::fan::test::regression_fan_unknown_nightlight_refuses_power_writes ... FAILED
+test hass_mqtt::fan::test::regression_fan_read_failure_refuses_power_writes ... FAILED
+test hass_mqtt::fan::test::regression_fan_restores_even_when_power_response_fails ... FAILED
+
+successes:
+
+successes:
+    hass_mqtt::fan::test::regression_fan_generic_master_power_is_unchanged
+    hass_mqtt::fan::test::regression_fan_invalid_power_command_does_not_touch_device
+    hass_mqtt::fan::test::regression_fan_other_models_keep_existing_power_path
+
+failures:
+
+---- hass_mqtt::fan::test::regression_fan_restoration_failure_is_not_success stdout ----
+Error: expected failure
+
+---- hass_mqtt::fan::test::regression_fan_power_preserves_fresh_nightlight_for_on_off_and_zero stdout ----
+
+thread 'hass_mqtt::fan::test::regression_fan_power_preserves_fresh_nightlight_for_on_off_and_zero' (16973248) panicked at src/hass_mqtt/fan.rs:709:21:
+assertion `left == right` failed: ON must preserve immediate nightlight=false, mode=1
+  left: Some(Number(1))
+ right: Some(Number(0))
+
+---- hass_mqtt::fan::test::regression_fan_unknown_nightlight_refuses_power_writes stdout ----
+
+thread 'hass_mqtt::fan::test::regression_fan_unknown_nightlight_refuses_power_writes' (16973252) panicked at src/hass_mqtt/fan.rs:727:13:
+assertion failed: power_command(&fixture, "ON").await.is_err()
+
+---- hass_mqtt::fan::test::regression_fan_read_failure_refuses_power_writes stdout ----
+
+thread 'hass_mqtt::fan::test::regression_fan_read_failure_refuses_power_writes' (16973249) panicked at src/hass_mqtt/fan.rs:739:9:
+assertion failed: power_command(&fixture, "ON").await.is_err()
+
+---- hass_mqtt::fan::test::regression_fan_restores_even_when_power_response_fails stdout ----
+
+thread 'hass_mqtt::fan::test::regression_fan_restores_even_when_power_response_fails' (16973251) panicked at src/hass_mqtt/fan.rs:753:9:
+assertion `left == right` failed
+  left: Some(Number(1))
+ right: Some(Number(0))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    hass_mqtt::fan::test::regression_fan_power_preserves_fresh_nightlight_for_on_off_and_zero
+    hass_mqtt::fan::test::regression_fan_read_failure_refuses_power_writes
+    hass_mqtt::fan::test::regression_fan_restoration_failure_is_not_success
+    hass_mqtt::fan::test::regression_fan_restores_even_when_power_response_fails
+    hass_mqtt::fan::test::regression_fan_unknown_nightlight_refuses_power_writes
+
+test result: FAILED. 3 passed; 5 failed; 0 ignored; 0 measured; 338 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `--bin govee`

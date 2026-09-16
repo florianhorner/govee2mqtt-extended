@@ -1,3 +1,4 @@
+#[cfg(not(test))]
 use anyhow::Context;
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
@@ -6,6 +7,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sqlite_cache::{Cache, CacheConfig};
 use std::future::Future;
+#[cfg(not(test))]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +15,7 @@ use std::time::Duration;
 pub static CACHE: Lazy<ArcSwap<Cache>> =
     Lazy::new(|| open_cache().expect("failed to initialize cache").into());
 
+#[cfg(not(test))]
 fn cache_file_name() -> PathBuf {
     let cache_dir = std::env::var("GOVEE_CACHE_DIR")
         .ok()
@@ -24,7 +27,13 @@ fn cache_file_name() -> PathBuf {
 }
 
 fn open_cache() -> anyhow::Result<Arc<Cache>> {
+    // Production-path tests seed synthetic scene metadata through the same
+    // global cache API. Never open or modify a developer's persistent cache.
+    #[cfg(test)]
+    let conn = sqlite_cache::rusqlite::Connection::open_in_memory()?;
+    #[cfg(not(test))]
     let cache_file = cache_file_name();
+    #[cfg(not(test))]
     let conn = sqlite_cache::rusqlite::Connection::open(&cache_file)
         .unwrap_or_else(|_| panic!("failed to open {cache_file:?}"));
     Ok(Arc::new(Cache::new(
@@ -39,9 +48,12 @@ fn open_cache() -> anyhow::Result<Arc<Cache>> {
 }
 
 pub fn purge_cache() -> anyhow::Result<()> {
-    let cache_file = cache_file_name();
-    std::fs::remove_file(&cache_file)
-        .with_context(|| format!("removing cache file {cache_file:?}"))?;
+    #[cfg(not(test))]
+    {
+        let cache_file = cache_file_name();
+        std::fs::remove_file(&cache_file)
+            .with_context(|| format!("removing cache file {cache_file:?}"))?;
+    }
     CACHE.store(open_cache()?);
     Ok(())
 }

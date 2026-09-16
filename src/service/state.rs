@@ -723,7 +723,10 @@ impl State {
             .device_by_id(&device.id)
             .await
             .unwrap_or_else(|| device.clone());
-        let cached = device.scene_catalog_cache().cloned();
+        let mut cached = device.scene_catalog_cache().cloned();
+        if let Some(cached) = &mut cached {
+            retain_executable_scenes(&mut cached.categories);
+        }
 
         if let Some(cached) = &cached {
             if !self.should_refresh_scene_catalog(&device, cached).await {
@@ -743,6 +746,9 @@ impl State {
                 return Err(err);
             }
         };
+        // Normalize before testing emptiness so an empty-only upstream catalog
+        // uses the same cached fallback and recovery rules as an empty response.
+        retain_executable_scenes(&mut catalog.categories);
 
         // On refresh, keep the cached scenes if the fresh fetch came back empty (e.g. a
         // transient upstream failure) rather than serving an empty list. The fresh
@@ -992,6 +998,13 @@ impl State {
     }
 }
 
+fn retain_executable_scenes(categories: &mut Vec<SceneCatalogCategory>) {
+    for category in categories.iter_mut() {
+        category.scenes.retain(|scene| !scene.name.is_empty());
+    }
+    categories.retain(|category| !category.scenes.is_empty());
+}
+
 pub fn sort_and_dedup_scenes(mut scenes: Vec<String>) -> Vec<String> {
     scenes.sort_by_key(|s| s.to_ascii_lowercase());
     scenes.dedup();
@@ -1065,6 +1078,7 @@ fn enrich_scene_names(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform_api::test::SceneCatalogFixture;
     use crate::platform_api::{DeviceCapabilityKind, GoveeApiClient, HttpDeviceInfo};
 
     fn test_scene_catalog_cache(
@@ -1341,6 +1355,276 @@ mod tests {
 
         assert_eq!(catalog.len(), 1);
         assert_eq!(catalog[0].scenes[0].name, "Aurora");
+    }
+
+    fn mixed_scene_catalog() -> SceneCatalogCache {
+        SceneCatalogCache {
+            platform_signature: None,
+            categories: serde_json::from_value(serde_json::json!([
+                {"name": "Nature", "scenes": [
+                    {"name": "", "icon_urls": [], "hint": "not executable"},
+                    {"name": "None", "icon_urls": ["https://example.com/scene.png"],
+                     "hint": "scene metadata"}
+                ]},
+                {"name": "Empty", "scenes": [{"name": "", "icon_urls": []}]},
+                {"name": "Exact names", "scenes": [
+                    {"name": " AURORA ", "icon_urls": ["https://example.com/scene.png"],
+                     "hint": "scene metadata"}
+                ]},
+                {"name": "Already empty", "scenes": []}
+            ]))
+            .unwrap(),
+        }
+    }
+
+    fn assert_executable_scene_catalog(catalog: &[SceneCatalogCategory]) {
+        assert_eq!(
+            serde_json::to_value(catalog).unwrap(),
+            serde_json::json!([
+                {"name": "Nature", "scenes": [
+                    {"name": "None", "icon_urls": ["https://example.com/scene.png"],
+                     "hint": "scene metadata"}
+                ]},
+                {"name": "Exact names", "scenes": [
+                    {"name": " AURORA ", "icon_urls": ["https://example.com/scene.png"],
+                     "hint": "scene metadata"}
+                ]}
+            ]),
+            "remove empty entries/categories without losing names, order, grouping or media"
+        );
+    }
+
+    fn undoc_scene(name: &str, code: u16) -> crate::undoc_api::LightEffectScene {
+        serde_json::from_value(serde_json::json!({
+            "sceneId": 1, "sceneName": name, "analyticName": "fixture",
+            "iconUrls": ["https://example.com/scene.png"],
+            "sceneType": 0, "sceneCode": 0, "scenceCategoryId": 1,
+            "popUpPrompt": 0, "scenesHint": "scene metadata", "rule": null,
+            "voiceUrl": "", "createTime": 0,
+            "lightEffects": [{
+                "scenceParamId": 1, "scenceName": name, "scenceParam": "",
+                "sceneCode": code, "specialEffect": [], "cmdVersion": null,
+                "sceneType": 0, "diyEffectCode": [], "diyEffectStr": "",
+                "rules": [], "speedInfo": null
+            }]
+        }))
+        .unwrap()
+    }
+
+    async fn state_with_scene_fixture(fixture: &SceneCatalogFixture) -> (State, Device) {
+        let state = State::new();
+        state.set_platform_client(fixture.client.clone()).await;
+        let device = {
+            let mut device = state
+                .device_mut(&fixture.info.sku, &fixture.info.device)
+                .await;
+            device.set_http_device_info(fixture.info.clone());
+            device.clone()
+        };
+        (state, device)
+    }
+
+    #[tokio::test]
+    async fn regression_scene_catalog_cache_hit_filters_empty_names_and_keeps_metadata() {
+        let state = State::new();
+        let stale = Device::new("TEST-CATALOG", "cached-scene-fixture");
+        state
+            .device_mut(&stale.sku, &stale.id)
+            .await
+            .set_scene_catalog(mixed_scene_catalog());
+
+        let catalog = state.device_list_scenes_categorized(&stale).await.unwrap();
+        assert_executable_scene_catalog(&catalog);
+        assert_eq!(
+            state.device_list_scenes(&stale).await.unwrap(),
+            vec![" AURORA ", "None"]
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_scene_catalog_empty_only_cache_returns_no_categories_or_names() {
+        let state = State::new();
+        let device = Device::new("TEST-CATALOG", "empty-cache-fixture");
+        state
+            .device_mut(&device.sku, &device.id)
+            .await
+            .set_scene_catalog(test_scene_catalog_cache(None, ""));
+
+        assert!(state
+            .device_list_scenes_categorized(&device)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(state.device_list_scenes(&device).await.unwrap().is_empty());
+        assert!(
+            state
+                .device_by_id(&device.id)
+                .await
+                .unwrap()
+                .scene_catalog_cache()
+                .is_some(),
+            "normalization must not invalidate an existing cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_scene_catalog_refresh_error_filters_cached_fallback() {
+        let fixture = SceneCatalogFixture::new(&[], vec![]).await;
+        fixture.fail_platform_refresh().await;
+        let (state, device) = state_with_scene_fixture(&fixture).await;
+        state
+            .device_mut(&device.sku, &device.id)
+            .await
+            .set_scene_catalog(mixed_scene_catalog());
+
+        let catalog = state.device_list_scenes_categorized(&device).await.unwrap();
+        assert_executable_scene_catalog(&catalog);
+        let canonical = state.device_by_id(&device.id).await.unwrap();
+        assert_eq!(
+            canonical.scene_catalog_cache().unwrap().platform_signature,
+            None,
+            "a failed refresh must not adopt a successful-refresh signature"
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_scene_catalog_undoc_filters_empty_and_keeps_grouping_and_media() {
+        let mut undoc: Vec<_> = mixed_scene_catalog()
+            .categories
+            .into_iter()
+            .enumerate()
+            .map(|(index, category)| crate::undoc_api::LightEffectCategory {
+                category_id: index as u32,
+                category_name: category.name,
+                scenes: category
+                    .scenes
+                    .into_iter()
+                    .map(|scene| undoc_scene(&scene.name, 1))
+                    .collect(),
+            })
+            .collect();
+        undoc[0].scenes.push(undoc_scene("Zero code", 0));
+        let fixture = SceneCatalogFixture::new(&[], undoc).await;
+        let state = State::new();
+        let device = Device::new(&fixture.info.sku, &fixture.info.device);
+
+        let catalog = state.device_list_scenes_categorized(&device).await.unwrap();
+        assert_executable_scene_catalog(&catalog);
+        let canonical = state.device_by_id(&device.id).await.unwrap();
+        assert_executable_scene_catalog(&canonical.scene_catalog_cache().unwrap().categories);
+    }
+
+    #[tokio::test]
+    async fn regression_scene_catalog_platform_fetch_filters_empty_and_keeps_media() {
+        let fixture = SceneCatalogFixture::new(
+            &["", "AURORA", "None"],
+            vec![crate::undoc_api::LightEffectCategory {
+                category_id: 1,
+                category_name: "Nature".to_string(),
+                scenes: vec![undoc_scene("", 1), undoc_scene("aurora", 1)],
+            }],
+        )
+        .await;
+        let (state, device) = state_with_scene_fixture(&fixture).await;
+
+        let catalog = state.device_list_scenes_categorized(&device).await.unwrap();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].name, "All");
+        let names: Vec<_> = catalog[0].scenes.iter().map(|s| s.name.as_str()).collect();
+        // The undoc API also contributes a lowercase name via get_scene_caps;
+        // preserve that existing exact-name deduplication behavior.
+        assert_eq!(names, vec!["AURORA", "aurora", "None"]);
+        for scene in &catalog[0].scenes[..2] {
+            assert_eq!(scene.icon_urls, vec!["https://example.com/scene.png"]);
+            assert_eq!(scene.hint.as_deref(), Some("scene metadata"));
+        }
+        assert!(catalog[0].scenes[2].icon_urls.is_empty());
+        assert_eq!(catalog[0].scenes[2].hint, None);
+        let canonical = state.device_by_id(&device.id).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&canonical.scene_catalog_cache().unwrap().categories).unwrap(),
+            serde_json::to_value(&catalog).unwrap(),
+            "freshly stored catalogs must already be executable"
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_scene_catalog_empty_platform_result_stays_uncached_and_recovers() {
+        let fixture = SceneCatalogFixture::new(&[""], vec![]).await;
+        let (state, device) = state_with_scene_fixture(&fixture).await;
+
+        assert!(state
+            .device_list_scenes_categorized(&device)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .device_by_id(&device.id)
+            .await
+            .unwrap()
+            .scene_catalog_cache()
+            .is_none());
+
+        let mut info = fixture.info.clone();
+        if let Some(crate::platform_api::DeviceParameters::Enum { options }) =
+            &mut info.capabilities[0].parameters
+        {
+            options[0].name = "Aurora".to_string();
+        }
+        state
+            .device_mut(&device.sku, &device.id)
+            .await
+            .set_http_device_info(info);
+        assert_eq!(
+            state.device_list_scenes(&device).await.unwrap(),
+            vec!["Aurora"]
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_scene_catalog_empty_refresh_preserves_cache_and_adopts_signature() {
+        let fixture = SceneCatalogFixture::new(&[""], vec![]).await;
+        let (state, device) = state_with_scene_fixture(&fixture).await;
+        state
+            .device_mut(&device.sku, &device.id)
+            .await
+            .set_scene_catalog(mixed_scene_catalog());
+
+        let catalog = state.device_list_scenes_categorized(&device).await.unwrap();
+        assert_executable_scene_catalog(&catalog);
+        let canonical = state.device_by_id(&device.id).await.unwrap();
+        let cached = canonical.scene_catalog_cache().unwrap();
+        assert_executable_scene_catalog(&cached.categories);
+        assert_eq!(cached.platform_signature, scene_platform_signature(&device));
+        assert!(!state.should_refresh_scene_catalog(&canonical, cached).await);
+    }
+
+    #[tokio::test]
+    async fn regression_scene_catalog_empty_undoc_result_stays_uncached() {
+        let fixture = SceneCatalogFixture::new(
+            &[],
+            vec![crate::undoc_api::LightEffectCategory {
+                category_id: 1,
+                category_name: "Empty".to_string(),
+                scenes: vec![undoc_scene("", 1), undoc_scene("Zero code", 0)],
+            }],
+        )
+        .await;
+        let state = State::new();
+        let device = Device::new(&fixture.info.sku, &fixture.info.device);
+        drop(state.device_mut(&device.sku, &device.id).await);
+
+        assert!(state
+            .device_list_scenes_categorized(&device)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .device_by_id(&device.id)
+            .await
+            .unwrap()
+            .scene_catalog_cache()
+            .is_none());
     }
 
     #[tokio::test]

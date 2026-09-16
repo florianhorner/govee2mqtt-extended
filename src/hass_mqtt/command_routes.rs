@@ -41,6 +41,7 @@ command_routes! {
     SET_MODE_SCENE_ROUTE = "gv2mqtt/:id/set-mode-scene";
     SET_MUSIC_PALETTE_ROUTE = "gv2mqtt/:id/set-music-palette";
     FAN_SET_PERCENTAGE_ROUTE = "gv2mqtt/fan/:id/set-percentage";
+    FAN_COMMAND_ROUTE = "gv2mqtt/fan/:id/command";
 }
 
 /// A command topic that was instantiated from a registered route pattern.
