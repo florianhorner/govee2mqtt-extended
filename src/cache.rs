@@ -1,3 +1,4 @@
+#[cfg(not(test))]
 use anyhow::Context;
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};

@@ -2,8 +2,8 @@
 //!
 //! Modelled on [`crate::hass_mqtt::humidifier`], which solves the same problem
 //! for a different HA domain. Oscillation reuses the generic switch route and
-//! presets reuse `set-work-mode`. Fan power has its own route so it can preserve
-//! a purifier's independent nightlight instead of acting as a master switch.
+//! presets reuse `set-work-mode`. Fan power keeps that same switch route except
+//! on H7124, which needs its own handler to preserve the nightlight.
 //! `set-percentage` handles the different speed shapes (see
 //! [`crate::hass_mqtt::work_mode::SpeedAxis`]).
 //!
@@ -125,7 +125,16 @@ impl Fan {
         let id = topic_safe_id(device);
         let use_iot = device.iot_api_supported() && state.get_iot_client().await.is_some();
 
-        let command_topic = instantiate_route(FAN_COMMAND_ROUTE, &[("id", &id)])?;
+        // Only H7124 changes fan-power semantics. Other models keep the
+        // switch route so existing MQTT automations still reach master power.
+        let command_topic = if fan_power_preserves_nightlight(device) {
+            instantiate_route(FAN_COMMAND_ROUTE, &[("id", &id)])?
+        } else {
+            instantiate_route(
+                SWITCH_COMMAND_ROUTE,
+                &[("id", &id), ("instance", "powerSwitch")],
+            )?
+        };
 
         // A device whose workMode cannot be parsed still gets an on/off fan.
         let parsed = ParsedWorkMode::with_device(device).ok();
@@ -449,10 +458,14 @@ pub fn fan_speed_action(axis: Option<&SpeedAxis>, ordinal: i64) -> anyhow::Resul
     })
 }
 
+fn fan_power_preserves_nightlight(device: &ServiceDevice) -> bool {
+    device.sku == "H7124"
+}
+
 async fn fan_power(state: &StateHandle, device: &ServiceDevice, on: bool) -> anyhow::Result<()> {
     // The H7124's master power changes both the fan and its nightlight. Keep
     // this measured quirk model-specific; other fans retain their transports.
-    if device.sku != "H7124" {
+    if !fan_power_preserves_nightlight(device) {
         return state.device_power_on(device, on).await;
     }
 
@@ -1012,8 +1025,8 @@ mod test {
             .unwrap()
             .ends_with("/set-percentage"));
         assert!(
-            json["command_topic"].as_str().unwrap().contains("/fan/"),
-            "fan power must not use the whole-device switch route: {json}"
+            json["command_topic"].as_str().unwrap().contains("/switch/"),
+            "non-H7124 fan power must keep the master-power switch route: {json}"
         );
     }
 
@@ -1294,6 +1307,11 @@ mod test {
             .as_str()
             .unwrap()
             .ends_with("/set-percentage"));
+        assert_eq!(
+            json["command_topic"].as_str().unwrap(),
+            format!("gv2mqtt/fan/{}/command", topic_safe_id(&h7124())),
+            "H7124 fan power must not share the master-power switch topic"
+        );
     }
 
     /// The live device was in Sleep (`{workMode: 5, modeValue: 0}`) when this

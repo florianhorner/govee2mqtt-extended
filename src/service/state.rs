@@ -1612,7 +1612,7 @@ mod tests {
         .await;
         let state = State::new();
         let device = Device::new(&fixture.info.sku, &fixture.info.device);
-        state.device_mut(&device.sku, &device.id).await;
+        drop(state.device_mut(&device.sku, &device.id).await);
 
         assert!(state
             .device_list_scenes_categorized(&device)
