@@ -16,7 +16,7 @@ Files touched:
   CLAUDE.md
   CONTRIBUTING.md
   AUTHOR-NOTES.md
-  /Users/florianhorner/.git-hooks/commit-msg
+  ~/.git-hooks/commit-msg
   proof/2026-05-17-commit-standards-bootstrap-runtime.txt
 
 Verification:

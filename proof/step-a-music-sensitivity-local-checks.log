@@ -100,7 +100,7 @@ It then passed in isolation and 15/15 in a serial rerun with no other cargo
 process on the box, so the failing assertion was never captured. Both the test
 and `Device::device_state()` are unchanged on this branch and present on
 `origin/main`. Suspected cause and the deterministic repro needed to confirm it
-are recorded in TODOS.md rather than guessed at here.
+are recorded in the backlog rather than guessed at here.
 
 Measurement note, because a review pass reported a much higher rate: several
 tests bind fixed ports (`lan_api.rs` uses 4002/4003, and its loopback scenarios
@@ -138,7 +138,7 @@ accuracy, then again by the PR review bots. Nothing blocking. Corrections:
   commit was reverted; a test that only proved the invented behaviour went with
   it.
 
-Deferred with reasons in TODOS.md: no test asserts the MQTT router's route
+Deferred with reasons recorded in the backlog: no test asserts the MQTT router's route
 table (pre-existing, affects all 17 routes, needs a broker or a refactor), and
 `GOVEE_DISABLE_EFFECTS` can leave the slider live with no effect to apply to.
 

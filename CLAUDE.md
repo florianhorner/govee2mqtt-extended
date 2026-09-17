@@ -52,6 +52,12 @@ No Govee credentials or hardware are needed to smoke-test this. The bridge conne
 MQTT, publishes Home Assistant discovery for its own service device, and serves the web
 UI; the device list stays empty, which is expected.
 
+With a live Govee account, build with `--release`. The debug profile turns on
+`serde(deny_unknown_fields)` for the undocumented API's device-list types
+(`src/undoc_api.rs`), so a debug `cargo run` fails at startup as soon as Govee adds a
+field, while release builds, which are what users run, accept it. A device-list parse
+error from a debug build is not evidence that the release is broken.
+
 - **MQTT layout.** Discovery goes under the `homeassistant/` prefix (`--hass-discovery-prefix`).
   The bridge's own topics use `gv2mqtt/` — availability at `gv2mqtt/availability`, commands
   like `gv2mqtt/purge-caches`. Watch it all with `mosquitto_sub -h 127.0.0.1 -t '#' -v`.
@@ -66,7 +72,20 @@ UI; the device list stays empty, which is expected.
 
 ## CI
 
-PRs must pass `cargo build`, `cargo clippy -- -D warnings`, `cargo test`, and `cargo fmt --check` (see `.github/workflows/pr.yml`).
+PRs must pass `cargo build`, `cargo clippy -- -D warnings`, `cargo test`, and `cargo fmt --check` (see `.github/workflows/pr.yml`), plus the public-content job in the same workflow (`scripts/check_public_content.py --all`, its unit tests, and a pinned gitleaks scan) and the editorial lint of the PR body (`.github/workflows/pr-body-lint.yml`, patterns in `scripts/lint-patterns.sh`, read from the base branch).
+
+## Public content boundary
+
+This is a public repository. `CONTRIBUTING.md` (section "Public content") lists what never
+goes in: private network addresses, device identifiers, home-directory paths, personal
+e-mail addresses, and the names, commands and stage vocabulary of internal review or
+coding tools. Evidence under `proof/` records what ran and what it found, not which tool
+found it.
+
+The engineering backlog is private and lives outside the repository. `TODOS.md` at the
+repository root is a gitignored symlink to it: read it through the link, edit it at the
+link's target, and never force-add it. Tools that insist on committing `TODOS.md` are
+wrong for this repository; the public list is `ROADMAP.md`.
 
 The fork also runs Claude Code CI (`.github/workflows/claude.yml`).
 
@@ -97,8 +116,11 @@ reads it back out of the file. Supervisor pulls
 **The add-on copies its binary out of the standalone `govee2mqtt` image, and the release
 job pins which one.** `addon/Dockerfile` takes `ARG GOVEE_IMAGE`, defaulting to
 `:latest`; the `addon` job overrides it with `ghcr.io/florianhorner/govee2mqtt:${{ github.ref_name }}`.
-That pin matters because the `merge` job only refreshes `latest` on `main`, so a tag build
-reading `:latest` would package whatever `main` last published rather than the tagged
+That pin matters because `latest` is a moving tag. The `enable=` line in `build.yml`
+restricts the explicit `latest` entry to `main`, but `docker/metadata-action`'s default
+`latest=auto` flavour still wrote `govee2mqtt:latest` on the 2026.09.16 tag build (the
+merge job's "Docker tags" output listed both the tag and `latest`), so a tag build
+reading `:latest` would package whatever was published last rather than the tagged
 commit. The job passes and the image is signed either way, so nothing flags the mismatch.
 
 The two image families take their tags from different places: the standalone
@@ -144,7 +166,7 @@ rewriting `addon/config.yaml`. Keep these checks before registry writes.
 
 ## Pre-commit Hooks
 
-The repo includes `.pre-commit-config.yaml` with local hooks for `cargo fmt` and `cargo clippy`. To enable:
+The repo includes `.pre-commit-config.yaml` with local hooks for `cargo fmt`, `cargo clippy`, a docs-only warning, and the public-content check on staged files. To enable:
 
 ```bash
 pip install pre-commit

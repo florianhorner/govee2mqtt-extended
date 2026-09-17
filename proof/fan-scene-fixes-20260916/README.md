@@ -1,6 +1,6 @@
 # Fan power and executable-scene fixes
 
-**Status: local fixes validated; hardware retest pending.** Both defects identified by the [earlier A+B run](../ha-green-ab-20260915T2127Z/README.md) are addressed in source. That hardware bundle binds `2dad7cf2`, not this patch.
+**Status: local fixes validated; hardware retest pending.** Both defects identified by the earlier hardware run are addressed in source. That run's evidence is kept outside this repository and binds `2dad7cf2`, not this patch.
 
 ## Changes
 
@@ -42,8 +42,9 @@ Stable rustfmt reports the repository's existing nightly-only `imports_granulari
 
 - `changes.patch` records the six-file source patch against `2dad7cf29565877852a4865172a4f1738e58b942`.
 - `SOURCE_SHA256SUMS` binds the exact source files tested; `manifest.json` records base/patch identity and scope.
+- Refreshed 2026-09-17: the bundle was written at `97ae81a`, one commit before the follow-up `5aeedbb` changed `src/cache.rs`, `src/hass_mqtt/fan.rs` and `src/service/state.rs`. `SOURCE_SHA256SUMS` and `changes.patch` were regenerated against the merged commit `ca4724505e1bf2ef2ef18a031babbfec260bc070` so the verify command below holds for the shipped tree; the logs and test counts are unchanged and still reproduce there.
 - `SHA256SUMS` covers every deliverable in this directory. Logs redact the private workspace path; all device identifiers in new test source are synthetic fixture data.
-- The earlier A+B hardware bundle was not edited. It proves the unpatched runtime, **not this patch**.
+- The earlier hardware evidence is kept outside this repository. It proves the unpatched runtime, **not this patch**.
 
 From the repository root:
 

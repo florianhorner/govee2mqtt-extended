@@ -13,3 +13,6 @@ package-lock.json
 
 # Agent/workspace scratch. PR proof artifacts belong in proof/ instead.
 .context/
+
+# The engineering backlog is private and lives outside the repository; ROADMAP.md is the public list.
+/TODOS.md

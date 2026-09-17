@@ -11,12 +11,12 @@ test result: ok. 140 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fi
 
 == mode-observation pin fix — local checks 2026-08-17T10:19:26Z ==
 $ cargo build --all
-   Compiling govee v0.1.0 (/Users/peas/govee2mqtt-extended)
+   Compiling govee v0.1.0 (<repo>)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.79s
 $ cargo test --all
 test result: ok. 141 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.85s
 $ cargo clippy --all -- -D warnings
-   Compiling govee v0.1.0 (/Users/peas/govee2mqtt-extended)
+   Compiling govee v0.1.0 (<repo>)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.80s
 $ cargo fmt --all -- --check
 fmt: clean

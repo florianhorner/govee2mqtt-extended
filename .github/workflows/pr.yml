@@ -46,3 +46,55 @@ jobs:
         python3 -m unittest scripts/test_prepare_release.py
     - name: Check formatting
       run: cargo fmt --all -- --check
+
+  # Public-content boundary: this is a public repository. The guard is calibrated
+  # against the whole tracked tree (see CONTRIBUTING.md, "Public content"), so a
+  # red run here means something private or internal was added, not noise.
+  public-content:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      with:
+        persist-credentials: false
+    # The guard that judges a pull request is taken from the BASE branch, so a
+    # pull request cannot weaken it in the same change. The head copy is used
+    # only while the base branch does not have the guard yet (bootstrap).
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      with:
+        ref: ${{ github.event.pull_request.base.sha }}
+        path: _base
+        persist-credentials: false
+    - name: Guard unit tests
+      run: python3 -m unittest scripts/test_check_public_content.py
+    - name: Public content check (guard from the base branch)
+      run: |
+        guard=_base/scripts/check_public_content.py
+        if [ ! -r "$guard" ]; then
+          echo "::notice::base branch has no guard yet; using the head copy (bootstrap)"
+          guard=scripts/check_public_content.py
+        fi
+        python3 "$guard" --all
+    - name: PR-body pattern file loads under bash
+      run: |
+        bash -n scripts/lint-patterns.sh
+        bash -c 'source scripts/lint-patterns.sh; for p in "${LINT_PATTERNS[@]}"; do grep -E -- "$p" /dev/null; rc=$?; [ "$rc" -le 1 ] || { echo "pattern does not compile: $p"; exit 1; }; done; echo "${#LINT_PATTERNS[@]} patterns compile"'
+    - name: Install gitleaks
+      env:
+        GITLEAKS_VERSION: "8.30.0"
+        GITLEAKS_SHA256: "79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e"
+      run: |
+        curl -fsSLo /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+        echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+        tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+        sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+        gitleaks version
+    - name: Secret scanner self-test
+      run: |
+        scan_dir="$(mktemp -d)"
+        printf 'api_key = "%s%s"\n' 'abcd1234efgh5678ijkl9012mnop3456' 'qrst7890uvwx' > "$scan_dir/planted.txt"
+        if gitleaks dir --no-banner --redact --exit-code 1 "$scan_dir"; then
+          echo "gitleaks self-test failed: the planted secret was not detected" >&2
+          exit 1
+        fi
+    - name: Secret scan of the checked-out files
+      run: gitleaks dir --no-banner --redact --exit-code 1 .

@@ -20,7 +20,7 @@ Warning: can't set `imports_granularity = Module`, unstable features are only av
 FMT: exit 0
 
 ## cargo clippy --all -- -D warnings
-   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/edinburgh)
+   Compiling govee v0.1.0 (<repo>)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.11s
 
 ## cargo test --all -- --show-output

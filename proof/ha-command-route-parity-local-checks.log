@@ -40,14 +40,11 @@ OK
 
 Test count: 244 on origin/main -> 272 (#[test]/#[tokio::test] attributes), +28 net new.
 
-## Pre-landing review summary
+## Review summary
 
-Ran the full /ship pre-landing pipeline: 5 specialist reviewers (testing, maintainability,
-security, performance, api-contract), a coverage audit subagent, and 3 adversarial passes
-(Claude subagent — stalled/unavailable after 600s, non-blocking per policy; Codex adversarial
-challenge; Codex structured review). Four independent passes (testing specialist, security
-specialist, Codex structured review, Codex adversarial) converged on the same root-cause
-finding, which is fixed in this diff, not just documented:
+Independent review passes (testing, maintainability, security, performance and API contract,
+plus a coverage audit and two automated reviews) converged on the same root-cause finding,
+which is fixed in this diff, not just documented:
 
 - **Fixed:** `enumerate_all_entites` (src/hass_mqtt/enumerator.rs) used to propagate a single
   device's enumeration error with `?`, aborting Home Assistant registration for every device.
@@ -58,27 +55,27 @@ finding, which is fixed in this diff, not just documented:
   `enumerator::test::one_devices_malformed_capability_does_not_abort_the_rest`.
 - **Fixed:** `instantiate_route` (src/hass_mqtt/command_routes.rs) now rejects parameter values
   containing `/`, `+`, `#`, or a NUL byte (MQTT-significant characters that could desync a
-  topic from its own route pattern), in addition to the existing empty-value check. Found by
-  Codex adversarial challenge. Test:
+  topic from its own route pattern), in addition to the existing empty-value check. Found
+  during review. Test:
   `command_routes::test::instantiate_route_rejects_parameter_values_with_mqtt_special_characters`.
 - **Verified, not just assumed:** every `format!()`-to-`instantiate_route()` conversion in this
   diff (button/climate/humidifier/light/number/select/switch + service/hass.rs's
   oneclick/purge-cache helpers) produces a byte-identical topic string to the pre-refactor code
   for the same inputs — checked by hand against `git show origin/main:<file>` during the
-  api-contract specialist pass. No deployed Home Assistant instance's MQTT subscriptions are
+  API-contract review. No deployed Home Assistant instance's MQTT subscriptions are
   desynced by this change.
 - **Verified, not just assumed:** the module's core claim (the router now actually subscribes
   to every registered route) is real behavioral coverage, not text-scanning —
   `bind_mqtt_command_routes` is invoked by both the live router and a test-only
   `MqttRouteBind::Record` variant off one shared table, so a route present in the registry but
   never wired up would fail `mqtt_command_routes_register_the_complete_inventory`. Closes the
-  pre-existing "nothing asserts the MQTT router's route table" gap tracked in TODOS.md.
-- **Considered and dismissed, with reasoning:** Codex adversarial also flagged
+  pre-existing "nothing asserts the MQTT router's route table" gap from the backlog.
+- **Considered and dismissed, with reasoning:** review also flagged
   `device_id_segment`'s per-message allocation cost (up to ~34 short-lived allocations per
-  inbound MQTT message, 17 routes x 2 Vec allocations) as a P2. The performance specialist
-  reviewed this specifically and found no issue at this project's actual scale (a handful to a
+  inbound MQTT message, 17 routes x 2 Vec allocations) as minor. The performance review
+  looked at this specifically and found no issue at this project's actual scale (a handful to a
   few dozen devices per household, a few messages/second, not attacker-reachable in this
-  threat model) — not fixed, judged correctly out of proportion to the project's stability-
+  threat model) — not fixed, judged out of proportion to the project's stability-
   over-micro-optimization preference.
 
 New tests covering the route-registry contract (this branch's own commit):
@@ -94,7 +91,7 @@ New tests covering the route-registry contract (this branch's own commit):
 - service::hass::test::mqtt_route_handlers_match_their_patterns
 - service::hass::test::mqtt_command_routes_register_the_complete_inventory
 
-Additional tests from the /ship pre-landing coverage audit and adversarial-fix passes:
+Additional tests from the coverage audit and review fixes:
 - command_routes::test::instantiate_route_rejects_an_empty_parameter_value
 - command_routes::test::instantiate_route_rejects_parameter_values_with_mqtt_special_characters
 - command_routes::test::device_id_segment_returns_none_for_a_topic_shaped_like_no_route
@@ -106,5 +103,5 @@ Additional tests from the /ship pre-landing coverage audit and adversarial-fix p
   files had zero tests at all before the coverage audit, despite this diff giving each of them
   new fallible route-substitution logic)
 
-Note: this file was regenerated several times during /ship as the pre-landing review,
-coverage audit, and adversarial-review fixes landed. This run reflects the diff as it ships.
+Note: this file was regenerated several times as the review, coverage audit and follow-up
+fixes landed. This run reflects the diff as it ships.
