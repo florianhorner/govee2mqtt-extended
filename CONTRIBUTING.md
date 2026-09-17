@@ -107,6 +107,28 @@ The pre-push hook logs every `--no-verify` to `~/.commit-bypass.log` with the ov
 - **Vendored copy in this repo:** [`.config/commit-rules.json`](.config/commit-rules.json) — SHA-pinned snapshot consumed by the local hook, the commitlint config, and CI. Do not hand-edit.
 <!-- END: commit-message-standards -->
 
+## Public content
+
+This repository is public. Some things never belong in it, and CI refuses them:
+
+- Private network details: LAN addresses, hardware and device identifiers (the sample
+  ids in `test-data/` are the exception), private host names, home-directory paths.
+- People: e-mail addresses, other than placeholder domains used by tests and the few
+  vendor and service addresses the guard lists by exact value.
+- Internal process: the names of review or coding tools, their commands, review-stage
+  vocabulary and status codes. Evidence in `proof/` states what ran and what it found;
+  it does not narrate which tool found it.
+- The maintainer's engineering backlog. It lives outside the repository; the public list
+  is `ROADMAP.md`. A tracked `TODOS.md` fails CI.
+
+`scripts/check_public_content.py --all` runs in CI and `--staged` runs in pre-commit;
+`python3 -m unittest scripts/test_check_public_content.py` covers it. Pull request
+bodies are linted for the same classes (`scripts/lint-patterns.sh`, read from the base
+branch so a PR cannot change the gate that judges it) plus a shared editorial baseline
+pinned by commit. The file scanner is the stricter of the two: it also exempts fixture values
+by exact match and refuses a tracked backlog. Redact logs pasted from a
+running bridge first: it prints device names, ids and LAN addresses at startup.
+
 ## Proof blocks
 
 Every PR body must end with a `## Proof` section: one checklist line per claim,

@@ -19,3 +19,9 @@ repos:
         language: script
         always_run: true
         pass_filenames: false
+      - id: public-content
+        name: public content check (staged files)
+        entry: python3 scripts/check_public_content.py --staged
+        language: system
+        always_run: true
+        pass_filenames: false

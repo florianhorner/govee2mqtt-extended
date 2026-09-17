@@ -1,17 +1,18 @@
+# Device name, device id and LAN address were redacted before publication; the log is otherwise unchanged.
 Runtime capture — feat/lan-music-palette running in the production
 bridge (image govee2mqtt:music-palette, host with 9 Govee devices,
 AWS IoT + LAN + Platform all active, GOVEE_MUSIC_PALETTE=true).
 
 Target: an H607C floor lamp, LAN-discovered at startup:
-  07:35:59 INFO  govee::commands::serve] antena (30:F2:EA:56:E7:59:FB:1D H607C)
-  07:35:59 INFO  govee::commands::serve]   LAN API: ip=192.168.1.244
+  07:35:59 INFO  govee::commands::serve] [device] ([device-id] H607C)
+  07:35:59 INFO  govee::commands::serve]   LAN API: ip=[lan-ip]
 
 Command published (mosquitto_pub, same broker the bridge uses):
-  topic:   gv2mqtt/30F2EA56E759FB1D/set-music-palette
+  topic:   gv2mqtt/[device-id]/set-music-palette
   payload: {"style":"Rhythm","colors":["#ff0000","#0000ff"],"sensitivity":80}
 
 1. The handler resolved the device and took the LAN path:
-  07:37:16 INFO  govee::service::state] Using LAN API to set antena (30:F2:EA:56:E7:59:FB:1D H607C) music palette
+  07:37:16 INFO  govee::service::state] Using LAN API to set [device] ([device-id] H607C) music palette
 
 2. The device acknowledged both UDP bursts with an AWS IoT ptReal echo
    carrying the activated profile — a3 41 <profile>, profile 0x72 being

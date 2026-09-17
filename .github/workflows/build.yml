@@ -272,9 +272,10 @@ jobs:
           # from to this tag. The merge job publishes govee2mqtt:<tag> via
           # docker/metadata-action type=ref,event=tag, and addon needs: merge,
           # so that tag exists before this step runs. Without the pin the
-          # Dockerfile default :latest applies, and merge only refreshes
-          # :latest on main, so a tag build would package whatever main last
-          # published.
+          # Dockerfile default :latest applies. :latest is a moving tag that
+          # metadata-action also writes on tag builds (observed on the
+          # 2026.09.16 run), so it can only ever mean "whatever was published
+          # last", never "this tag".
           build-args: |
             BUILD_FROM=ghcr.io/home-assistant/${{ matrix.arch }}-base-debian:bookworm
             GOVEE_IMAGE=ghcr.io/florianhorner/govee2mqtt:${{ github.ref_name }}

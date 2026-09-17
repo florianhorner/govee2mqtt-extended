@@ -1,0 +1,54 @@
+name: pr-body-lint
+
+# Editorial boundary for pull request bodies: the shared baseline from
+# florianhorner/gh-workflows plus this repository's own patterns in
+# scripts/lint-patterns.sh. Both are read from the BASE branch, so a pull
+# request cannot weaken the gate that judges it.
+#
+# The probe job exists for bootstrapping. The reusable workflow fails loudly
+# when a named pattern file is missing on the base branch, which is the right
+# behaviour once the file has landed and the wrong one for the pull request
+# that introduces it. The probe passes the file name only when the base branch
+# already has it.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, ready_for_review]
+
+concurrency:
+  group: pr-body-lint-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Locate repository patterns on the base branch
+    runs-on: ubuntu-latest
+    outputs:
+      extra: ${{ steps.find.outputs.extra }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - id: find
+        run: |
+          if [ -r scripts/lint-patterns.sh ]; then
+            echo "extra=scripts/lint-patterns.sh" >> "$GITHUB_OUTPUT"
+          else
+            echo "extra=" >> "$GITHUB_OUTPUT"
+            echo "::notice::scripts/lint-patterns.sh is not on the base branch yet; baseline patterns only"
+          fi
+
+  lint:
+    needs: probe
+    # A called workflow's permissions can only match or reduce the caller's.
+    permissions:
+      contents: read
+      actions: read
+    uses: florianhorner/gh-workflows/.github/workflows/body-lint.yml@fde64f42deb15511c2c71cb9798c2d6685379e38 # v1.5
+    with:
+      target: pr-body
+      extra_patterns: ${{ needs.probe.outputs.extra }}

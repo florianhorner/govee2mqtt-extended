@@ -1,5 +1,5 @@
 PR #37 — fold agent setup notes into CLAUDE.md
-Run date: 2026-08-23   Branch: cursor/setup-dev-environment-b918 @ 16ac9e0
+Run date: 2026-08-23   Branch: <feature branch> @ 16ac9e0
 Toolchain: rustc 1.94.1 (e408947bf 2026-03-25)
 Tree: origin/main (3172c08) merged in, incl. #48, #49 and #51
 

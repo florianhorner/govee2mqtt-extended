@@ -1312,7 +1312,7 @@ mod tests {
 
     #[test]
     fn scan_reply_does_not_reset_failure_counter() {
-        // Regression (squad P1): scans arrive every ~60s, polls every
+        // Regression: scans arrive every ~60s, polls every
         // 30s. If a scan reply cleared the counter, a device that
         // answers scans but drops status queries could never
         // accumulate `threshold` failures and the breaker would never
@@ -1328,7 +1328,7 @@ mod tests {
 
     #[test]
     fn scan_reply_during_half_open_probe_is_ignored() {
-        // Regression (squad P1): a scan reply arriving while a probe
+        // Regression: a scan reply arriving while a probe
         // is in flight must not destroy the entry, or the probe's
         // failure would restart the ladder at base cooldown.
         let mut b = breaker(3, 300 * SEC);

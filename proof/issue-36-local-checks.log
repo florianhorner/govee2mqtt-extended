@@ -93,14 +93,14 @@ Scope: delivery-unknown classification for post-status failures,
 ================================================================
 
 $ cargo build --all
-   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/seville)
+   Compiling govee v0.1.0 (<repo>)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.84s
 
 $ cargo fmt --all -- --check
 clean (no output)
 
 $ cargo clippy --all -- -D warnings
-   Compiling govee v0.1.0 (/Users/florianhorner/conductor/workspaces/govee2mqtt-extended/seville)
+   Compiling govee v0.1.0 (<repo>)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.75s
 
 $ cargo test --all
