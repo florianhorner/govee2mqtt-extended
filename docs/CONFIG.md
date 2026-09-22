@@ -150,6 +150,7 @@ app, leave these fields blank — they are filled in automatically.
 |`--mqtt-port`|`GOVEE_MQTT_PORT`|`mqtt_port`|`1883`|Port number of your MQTT broker|
 |`--mqtt-username`|`GOVEE_MQTT_USER`|`mqtt_username`|*(none)*|Username, if your broker requires authentication|
 |`--mqtt-password`|`GOVEE_MQTT_PASSWORD`|`mqtt_password`|*(none)*|Password, if your broker requires authentication|
+|*(none)*|`GOVEE_HTTP_ADDR`|`http_addr`|`0.0.0.0`|IP address the web UI and HTTP API listen on. With host networking the default exposes them on every interface; `127.0.0.1` keeps them local (the app's Open Web UI link then stops working). An invalid or empty value stops startup; leave it unset for the default.|
 
 ## Effects (Scenes)
 

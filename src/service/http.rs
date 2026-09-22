@@ -9,6 +9,7 @@
 // 1.94 to 1.98; the code it flags is unchanged and predates that.
 #![allow(clippy::result_large_err)]
 
+use crate::opt_env_var;
 use crate::service::coordinator::Coordinator;
 use crate::service::device::{Device, DeviceState};
 use crate::service::state::StateHandle;
@@ -19,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use tower_http::services::ServeDir;
 
 fn response_with_code<T: ToString + std::fmt::Display>(code: StatusCode, err: T) -> Response {
@@ -313,11 +314,41 @@ fn test_build_router() {
     let _ = build_router(StateHandle::default());
 }
 
-pub async fn run_http_server(state: StateHandle, port: u16) -> anyhow::Result<()> {
-    let app = build_router(state);
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
+/// The address the HTTP server binds to, from $GOVEE_HTTP_ADDR.
+/// Defaults to 0.0.0.0 (all IPv4 interfaces) when unset.
+///
+/// Surrounding whitespace is ignored, so a value pasted into the add-on's
+/// configuration field with a stray space still works. An empty value is an
+/// error rather than the default: it means the setting was filled in and
+/// mistyped, and silently listening on every interface is the outcome this
+/// option exists to avoid.
+pub fn http_addr_from_env() -> anyhow::Result<IpAddr> {
+    match opt_env_var::<String>("GOVEE_HTTP_ADDR")? {
+        None => Ok(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+        Some(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                anyhow::bail!(
+                    "$GOVEE_HTTP_ADDR is set but empty; unset it for the \
+                     default 0.0.0.0, or give an IP address"
+                );
+            }
+            trimmed.parse().map_err(|err| {
+                anyhow::anyhow!("$GOVEE_HTTP_ADDR={trimmed:?} is not an IP address: {err}")
+            })
+        }
+    }
+}
+
+async fn bind_http_listener(addr: IpAddr, port: u16) -> anyhow::Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind((addr, port))
         .await
-        .with_context(|| format!("run_http_server: binding to port {port}"))?;
+        .with_context(|| format!("run_http_server: binding to {addr} port {port}"))
+}
+
+pub async fn run_http_server(state: StateHandle, addr: IpAddr, port: u16) -> anyhow::Result<()> {
+    let app = build_router(state);
+    let listener = bind_http_listener(addr, port).await?;
     let addr = listener.local_addr()?;
     log::info!("http server addr is {addr:?}");
     if let Err(err) = axum::serve(listener, app).await {
@@ -325,4 +356,47 @@ pub async fn run_http_server(state: StateHandle, port: u16) -> anyhow::Result<()
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn test_http_addr_from_env() {
+    // One test: $GOVEE_HTTP_ADDR is process-global
+    std::env::remove_var("GOVEE_HTTP_ADDR");
+    let default = http_addr_from_env().unwrap();
+
+    std::env::set_var("GOVEE_HTTP_ADDR", "127.0.0.1");
+    let loopback = http_addr_from_env();
+
+    std::env::set_var("GOVEE_HTTP_ADDR", " 127.0.0.1 ");
+    let padded = http_addr_from_env();
+
+    std::env::set_var("GOVEE_HTTP_ADDR", "not-an-ip");
+    let invalid = http_addr_from_env();
+
+    // Empty and whitespace-only must FAIL, not fall back to 0.0.0.0
+    std::env::set_var("GOVEE_HTTP_ADDR", "");
+    let empty = http_addr_from_env();
+
+    std::env::set_var("GOVEE_HTTP_ADDR", "   ");
+    let blank = http_addr_from_env();
+    std::env::remove_var("GOVEE_HTTP_ADDR");
+
+    assert_eq!(default, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    assert_eq!(padded.unwrap(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+
+    for (label, result) in [("empty", empty), ("whitespace", blank)] {
+        let err = format!("{:#}", result.expect_err(label));
+        assert!(err.contains("set but empty"), "{label}: {err}");
+    }
+
+    let loopback = loopback.unwrap();
+    let listener = bind_http_listener(loopback, 0).await.unwrap();
+    assert_eq!(
+        listener.local_addr().unwrap().ip(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    );
+
+    let err = format!("{:#}", invalid.unwrap_err());
+    assert!(err.contains("\"not-an-ip\""), "{err}");
 }

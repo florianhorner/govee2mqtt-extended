@@ -52,3 +52,4 @@ schema:
   disable_effects: "bool?"
   allowed_effects: "str?"
   music_palette: "bool?"
+  http_addr: "str?"

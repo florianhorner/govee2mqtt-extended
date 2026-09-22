@@ -129,4 +129,8 @@ configuration:
       Off by default: the frames are reverse-engineered and only mapped for a
       few SKUs. See docs/MUSIC_MODE.md for the supported devices and the
       payload format.
+  http_addr:
+    name: Web UI Listen Address
+    description: >-
+      IP address the web UI and HTTP API listen on (default 0.0.0.0, all interfaces). Set 127.0.0.1 to keep them local; the Open Web UI link then stops working. Leave blank for the default; a filled-in but invalid value stops the add-on.
 
