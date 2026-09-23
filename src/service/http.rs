@@ -9,6 +9,7 @@
 // 1.94 to 1.98; the code it flags is unchanged and predates that.
 #![allow(clippy::result_large_err)]
 
+use crate::opt_env_var;
 use crate::service::coordinator::Coordinator;
 use crate::service::device::{Device, DeviceState};
 use crate::service::state::StateHandle;
@@ -19,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use tower_http::services::ServeDir;
 
 fn response_with_code<T: ToString + std::fmt::Display>(code: StatusCode, err: T) -> Response {
@@ -271,7 +272,8 @@ async fn activate_one_click(
 }
 
 async fn redirect_to_index() -> Response {
-    axum::response::Redirect::to("/assets/index.html").into_response()
+    // Relative: a rooted target escapes the ingress prefix.
+    axum::response::Redirect::to("assets/index.html").into_response()
 }
 
 fn build_router(state: StateHandle) -> Router {
@@ -313,11 +315,36 @@ fn test_build_router() {
     let _ = build_router(StateHandle::default());
 }
 
-pub async fn run_http_server(state: StateHandle, port: u16) -> anyhow::Result<()> {
-    let app = build_router(state);
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
+/// The address the HTTP server binds to, from $GOVEE_HTTP_ADDR; 0.0.0.0 when
+/// unset. Empty is an error, not the default: it means the setting was filled
+/// in and mistyped, and listening on every interface is what it exists to avoid.
+pub fn http_addr_from_env() -> anyhow::Result<IpAddr> {
+    match opt_env_var::<String>("GOVEE_HTTP_ADDR")? {
+        None => Ok(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+        Some(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                anyhow::bail!(
+                    "$GOVEE_HTTP_ADDR is set but empty; unset it for the \
+                     default 0.0.0.0, or give an IP address"
+                );
+            }
+            trimmed.parse().map_err(|err| {
+                anyhow::anyhow!("$GOVEE_HTTP_ADDR={trimmed:?} is not an IP address: {err}")
+            })
+        }
+    }
+}
+
+async fn bind_http_listener(addr: IpAddr, port: u16) -> anyhow::Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind((addr, port))
         .await
-        .with_context(|| format!("run_http_server: binding to port {port}"))?;
+        .with_context(|| format!("run_http_server: binding to {addr} port {port}"))
+}
+
+pub async fn run_http_server(state: StateHandle, addr: IpAddr, port: u16) -> anyhow::Result<()> {
+    let app = build_router(state);
+    let listener = bind_http_listener(addr, port).await?;
     let addr = listener.local_addr()?;
     log::info!("http server addr is {addr:?}");
     if let Err(err) = axum::serve(listener, app).await {
@@ -325,4 +352,89 @@ pub async fn run_http_server(state: StateHandle, port: u16) -> anyhow::Result<()
     }
 
     Ok(())
+}
+
+/// A rooted URL 404s only under ingress, where nobody is looking. These two
+/// fail here instead.
+#[cfg(test)]
+#[tokio::test]
+async fn test_redirect_to_index_is_relative() {
+    let response = redirect_to_index().await;
+    let location = response
+        .headers()
+        .get("location")
+        .expect("redirect sets location")
+        .to_str()
+        .expect("ascii");
+    assert_eq!(location, "assets/index.html");
+    assert!(!location.starts_with('/'), "{location} escapes the prefix");
+}
+
+#[cfg(test)]
+#[test]
+fn test_ui_sources_have_no_rooted_urls() {
+    for (name, source) in [
+        ("assets/index.html", include_str!("../../assets/index.html")),
+        (
+            "assets/components/devices.js",
+            include_str!("../../assets/components/devices.js"),
+        ),
+    ] {
+        for needle in [
+            "\"/assets",
+            "'/assets",
+            "\"/api",
+            "'/api",
+            "`/api",
+            "`/assets",
+        ] {
+            assert!(
+                !source.contains(needle),
+                "{name} contains {needle}: a rooted URL breaks under ingress"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn test_http_addr_from_env() {
+    // One test: $GOVEE_HTTP_ADDR is process-global
+    std::env::remove_var("GOVEE_HTTP_ADDR");
+    let default = http_addr_from_env().unwrap();
+
+    std::env::set_var("GOVEE_HTTP_ADDR", "127.0.0.1");
+    let loopback = http_addr_from_env();
+
+    std::env::set_var("GOVEE_HTTP_ADDR", " 127.0.0.1 ");
+    let padded = http_addr_from_env();
+
+    std::env::set_var("GOVEE_HTTP_ADDR", "not-an-ip");
+    let invalid = http_addr_from_env();
+
+    // Empty and whitespace-only must FAIL, not fall back to 0.0.0.0
+    std::env::set_var("GOVEE_HTTP_ADDR", "");
+    let empty = http_addr_from_env();
+
+    std::env::set_var("GOVEE_HTTP_ADDR", "   ");
+    let blank = http_addr_from_env();
+    std::env::remove_var("GOVEE_HTTP_ADDR");
+
+    assert_eq!(default, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    assert_eq!(padded.unwrap(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+
+    for (label, result) in [("empty", empty), ("whitespace", blank)] {
+        let err = format!("{:#}", result.expect_err(label));
+        assert!(err.contains("set but empty"), "{label}: {err}");
+    }
+
+    let loopback = loopback.unwrap();
+    let listener = bind_http_listener(loopback, 0).await.unwrap();
+    assert_eq!(
+        listener.local_addr().unwrap().ip(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    );
+
+    let err = format!("{:#}", invalid.unwrap_err());
+    assert!(err.contains("\"not-an-ip\""), "{err}");
 }

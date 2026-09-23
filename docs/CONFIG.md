@@ -150,6 +150,31 @@ app, leave these fields blank — they are filled in automatically.
 |`--mqtt-port`|`GOVEE_MQTT_PORT`|`mqtt_port`|`1883`|Port number of your MQTT broker|
 |`--mqtt-username`|`GOVEE_MQTT_USER`|`mqtt_username`|*(none)*|Username, if your broker requires authentication|
 |`--mqtt-password`|`GOVEE_MQTT_PASSWORD`|`mqtt_password`|*(none)*|Password, if your broker requires authentication|
+|*(none)*|`GOVEE_HTTP_ADDR`|`http_addr`|`0.0.0.0`, *(app: see below)*|IP address the web UI and HTTP API listen on. An invalid or empty value stops startup; leave it unset for the default.|
+
+### Where the web UI listens
+
+The web UI and its HTTP API have **no authentication**, and the control routes
+are plain `GET` requests, so anything that can reach the port can switch your
+devices.
+
+**Home Assistant app users:** the UI is served through Home Assistant's
+ingress proxy, so you open it from the app page like any other app, behind
+your usual Home Assistant login. Leave `http_addr` unset and the app binds the
+listener to the address Home Assistant proxies from, which is not on your
+network — so nothing else can reach it. You do not need to open a port.
+
+Set `http_addr` only if you want something different:
+
+- `0.0.0.0` restores the old behaviour, reachable at `http://<your-ha-host>:8056`
+  from anywhere on your network, with no password.
+- `127.0.0.1` makes the UI unreachable, **including through Home Assistant**:
+  the proxy connects from the Home Assistant bridge, not from loopback.
+
+**Docker users:** the default is `0.0.0.0`, unchanged. With `network_mode:
+host` that is every interface; set `127.0.0.1` to keep it on the local
+machine. If you publish ports instead, restrict the publish
+(`127.0.0.1:8056:8056`) rather than the bind.
 
 ## Effects (Scenes)
 

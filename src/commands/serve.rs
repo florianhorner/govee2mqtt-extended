@@ -2,7 +2,7 @@ use crate::lan_api::Client as LanClient;
 use crate::platform_api::GoveeApiClient;
 use crate::service::device::Device;
 use crate::service::hass::spawn_hass_integration;
-use crate::service::http::run_http_server;
+use crate::service::http::{http_addr_from_env, run_http_server};
 use crate::service::iot::start_iot_client;
 use crate::service::state::StateHandle;
 use crate::undoc_api::GoveeUndocumentedApi;
@@ -172,6 +172,8 @@ const ISSUE_76_EXPLANATION: &str = "\
 impl ServeCommand {
     pub async fn run(&self, args: &crate::Args) -> anyhow::Result<()> {
         log::info!("Starting service. version {}", govee_version());
+        // Resolve before discovery so that an invalid value fails fast
+        let http_addr = http_addr_from_env()?;
         let state = Arc::new(crate::service::state::State::new());
 
         // First, use the HTTP APIs to determine the list of devices and
@@ -352,8 +354,13 @@ impl ServeCommand {
         // start advertising on local mqtt
         spawn_hass_integration(state.clone(), &args.hass_args).await?;
 
-        run_http_server(state.clone(), self.http_port)
+        run_http_server(state.clone(), http_addr, self.http_port)
             .await
-            .with_context(|| format!("Starting HTTP service on port {}", self.http_port))
+            .with_context(|| {
+                format!(
+                    "Starting HTTP service on {http_addr} port {}",
+                    self.http_port
+                )
+            })
     }
 }

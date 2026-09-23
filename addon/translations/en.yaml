@@ -129,4 +129,12 @@ configuration:
       Off by default: the frames are reverse-engineered and only mapped for a
       few SKUs. See docs/MUSIC_MODE.md for the supported devices and the
       payload format.
+  http_addr:
+    name: Web UI Listen Address
+    description: >-
+      Leave blank. The web UI is then reachable only through Home
+      Assistant, which is what almost everyone wants. Set 0.0.0.0 to
+      also reach it at port 8056 from anywhere on your network, with no
+      password. Do not set 127.0.0.1: that makes the UI unreachable,
+      Home Assistant included. An invalid value stops the add-on.
 
