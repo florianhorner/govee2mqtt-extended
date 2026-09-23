@@ -1,0 +1,31 @@
+# NOT SHIPPED. Scaffolding for the live ingress test only.
+#
+# The add-on's real Dockerfile copies the binary out of the published
+# govee2mqtt image, so a local build of this branch would pair this branch's
+# run.sh with the PUBLISHED UI and binary — and the ingress check would fail
+# for the wrong reason. This file builds the binary and ships the assets from
+# the source in the build context instead, so the image under test is this
+# branch end to end. Nothing is pushed and nothing leaves the host.
+#
+# The runtime stage matches what the add-on really uses: Supervisor passes
+# BUILD_FROM from addon/build.yaml, which is
+# ghcr.io/home-assistant/{arch}-base-debian:bookworm — Debian, so the binary
+# is built against glibc on the matching Debian release. It keeps s6 and
+# bashio, which run.sh needs.
+
+ARG BUILD_FROM
+
+FROM rust:1-bookworm AS builder
+WORKDIR /src
+# cc, make and perl are needed: mosquitto-rs and openssl compile vendored
+# OpenSSL. They are already in this image.
+COPY . /src
+RUN cargo build --release --locked
+RUN test -f /src/target/release/govee
+
+FROM $BUILD_FROM
+COPY --from=builder /src/target/release/govee /app/govee
+COPY --from=builder /src/assets /app/assets
+COPY --from=builder /src/AmazonRootCA1.pem /app/
+COPY run.sh /run.sh
+CMD [ "/run.sh" ]

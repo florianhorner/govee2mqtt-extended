@@ -41,5 +41,29 @@ to every interface, because an empty string is not a valid address either. The
 guard buys a message that says what to do, not the refusal itself. That change
 was reverted too.
 
+## The rooted-URL scan can fail, and did
+
+`test_ui_sources_have_no_rooted_urls` scans the UI sources for asset and API
+URLs that start with a slash, because such a URL works when the UI is served
+from the root of a host and 404s only behind a path prefix — that is, only
+under ingress, where nobody is watching. No deliberate break was needed to
+show it can fail: on its first run it caught a rooted URL written inside an
+explanatory comment in `assets/components/devices.js`:
+
+```
+thread 'service::http::test_ui_sources_have_no_rooted_urls' panicked at src/service/http.rs:395:13:
+assets/components/devices.js contains "/api: a rooted URL breaks under ingress
+```
+
+The comment was reworded. The scan is deliberately blunt: a comment tripping
+it is the price of catching a real one.
+
+## What is NOT proven here
+
+Nothing in this file shows that the UI works under Home Assistant ingress.
+These tests run on a developer machine, where no Supervisor exists. The
+ingress behaviour is covered by `live-test-plan.md`, which has not been run
+yet.
+
 `local-checks.log` records the gates on the committed tree, where every one of
 these tests passes.

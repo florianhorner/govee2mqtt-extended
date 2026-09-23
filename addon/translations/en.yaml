@@ -132,5 +132,9 @@ configuration:
   http_addr:
     name: Web UI Listen Address
     description: >-
-      IP address the web UI and HTTP API listen on (default 0.0.0.0, all interfaces). Set 127.0.0.1 to keep them local; the Open Web UI link then stops working. Leave blank for the default; a filled-in but invalid value stops the add-on.
+      Leave blank. The web UI is then reachable only through Home
+      Assistant, which is what almost everyone wants. Set 0.0.0.0 to
+      also reach it at port 8056 from anywhere on your network, with no
+      password. Do not set 127.0.0.1: that makes the UI unreachable,
+      Home Assistant included. An invalid value stops the add-on.
 

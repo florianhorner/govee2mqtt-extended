@@ -4,15 +4,15 @@ Warning: can't set `imports_granularity = Module`, unstable features are only av
 --- exit=0 : cargo fmt --all -- --check ---
 === cargo build --all ===
    Compiling govee v0.1.0 (<repo>)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.35s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.24s
 --- exit=0 : cargo build --all ---
 === cargo clippy --all -- -D warnings ===
    Compiling govee v0.1.0 (<repo>)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.92s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.94s
 --- exit=0 : cargo clippy --all -- -D warnings ---
 === cargo clippy --all --all-features -- -D warnings ===
    Compiling govee v0.1.0 (<repo>)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.90s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.24s
 --- exit=0 : cargo clippy --all --all-features -- -D warnings ---
 === cargo test --all -- --show-output ===
     undoc_api::test::normalize_strips_trailing_newline_from_email_paste
@@ -38,7 +38,7 @@ Warning: can't set `imports_granularity = Module`, unstable features are only av
     undoc_api::test::with_code_empty_string_does_not_set_code_field
     undoc_api::test::with_code_normalizes_input
 
-test result: ok. 363 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.87s
+test result: ok. 365 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.85s
 
 --- exit=0 : cargo test --all -- --show-output ---
 === cargo test --all --all-features -- --show-output ===
@@ -65,7 +65,7 @@ test result: ok. 363 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fi
     undoc_api::test::with_code_empty_string_does_not_set_code_field
     undoc_api::test::with_code_normalizes_input
 
-test result: ok. 364 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.86s
+test result: ok. 366 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.85s
 
 --- exit=0 : cargo test --all --all-features -- --show-output ---
 === python3 scripts/check_public_content.py --all ===
@@ -78,14 +78,14 @@ public-content check passed (14 warning(s))
 === python3 -m unittest scripts/test_check_public_content.py ===
 [32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m
 ----------------------------------------------------------------------
-Ran 27 tests in 3.502s
+Ran 27 tests in 4.643s
 
 [32mOK[0m
 --- exit=0 : python3 -m unittest scripts/test_check_public_content.py ---
 === python3 -m unittest scripts/test_live_2fa.py ===
 [32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m
 ----------------------------------------------------------------------
-Ran 22 tests in 0.019s
+Ran 22 tests in 0.024s
 
 [32mOK[0m
 --- exit=0 : python3 -m unittest scripts/test_live_2fa.py ---

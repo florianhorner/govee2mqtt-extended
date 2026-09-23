@@ -120,8 +120,30 @@ if bashio::config.has_value music_palette ; then
   export GOVEE_MUSIC_PALETTE
 fi
 
+# Under host_network, Supervisor proxies ingress from the Home Assistant
+# bridge, not loopback, so that is the address to bind. Failing open on
+# detection failure is deliberate: an address the host does not own would
+# fail the bind and take the bridge down with it.
 if bashio::config.has_value http_addr ; then
   export GOVEE_HTTP_ADDR="$(bashio::config http_addr)"
+else
+  # bashio renamed addon.* to app.*; accept whichever this base image has.
+  supervisor_addr=""
+  if declare -F bashio::app.ip_address > /dev/null 2>&1 ; then
+    supervisor_addr="$(bashio::app.ip_address 2>/dev/null || true)"
+  elif declare -F bashio::addon.ip_address > /dev/null 2>&1 ; then
+    supervisor_addr="$(bashio::addon.ip_address 2>/dev/null || true)"
+  fi
+
+  if bashio::var.has_value "${supervisor_addr}" ; then
+    export GOVEE_HTTP_ADDR="${supervisor_addr}"
+    bashio::log.info "Web UI bound to ${GOVEE_HTTP_ADDR} (ingress only; set http_addr to 0.0.0.0 for direct access)"
+  else
+    bashio::log.warning "Could not ask Home Assistant which address to bind the web UI to."
+    bashio::log.warning "The web UI and its API are listening on ALL interfaces, reachable"
+    bashio::log.warning "from anywhere on your network, with no password. To fix this, set the"
+    bashio::log.warning "http_addr option, or report this with the lines above."
+  fi
 fi
 
 env | grep GOVEE_ | sed -r 's/_(EMAIL|KEY|PASSWORD|2FA_CODE)=.*/_\1=REDACTED/'
