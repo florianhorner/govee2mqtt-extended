@@ -4,6 +4,10 @@ import { timeAgo } from './timeago.js';
 
 const LAN_HELP_URL = 'https://github.com/florianhorner/govee2mqtt-extended/blob/main/docs/LAN.md';
 
+// Relative to the page at <prefix>/assets/index.html: a rooted URL escapes
+// the Home Assistant ingress prefix. <https://github.com/wez/govee2mqtt/issues/306>
+const API = '../api';
+
 export class DeviceList extends LitElement {
   timer;
   deviceList;
@@ -21,7 +25,7 @@ export class DeviceList extends LitElement {
 
   _deviceListTask = new Task(this, {
     task: async ([], {signal}) => {
-      const response = await fetch('/api/devices', {signal});
+      const response = await fetch(`${API}/devices`, {signal});
       if (!response.ok) {
         throw new Error(response.status);
       }
@@ -78,14 +82,14 @@ export class DeviceList extends LitElement {
   _set_power_on(e) {
     const device_id = e.target.dataset.id;
     const power = e.target.checked ? 'on' : 'off';
-    fetch(`/api/device/${device_id}/power/${power}`);
+    fetch(`${API}/device/${device_id}/power/${power}`);
   }
 
   _set_color(e) {
     const device_id = e.target.dataset.id;
     const color = encodeURIComponent(e.target.value);
     console.log(`color will change to ${color}`);
-    fetch(`/api/device/${device_id}/color/${color}`);
+    fetch(`${API}/device/${device_id}/color/${color}`);
   }
 
   _render_badge(label, active, activeClass = 'text-bg-primary') {

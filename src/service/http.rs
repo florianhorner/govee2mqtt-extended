@@ -272,7 +272,8 @@ async fn activate_one_click(
 }
 
 async fn redirect_to_index() -> Response {
-    axum::response::Redirect::to("/assets/index.html").into_response()
+    // Relative: a rooted target escapes the ingress prefix.
+    axum::response::Redirect::to("assets/index.html").into_response()
 }
 
 fn build_router(state: StateHandle) -> Router {
@@ -314,14 +315,9 @@ fn test_build_router() {
     let _ = build_router(StateHandle::default());
 }
 
-/// The address the HTTP server binds to, from $GOVEE_HTTP_ADDR.
-/// Defaults to 0.0.0.0 (all IPv4 interfaces) when unset.
-///
-/// Surrounding whitespace is ignored, so a value pasted into the add-on's
-/// configuration field with a stray space still works. An empty value is an
-/// error rather than the default: it means the setting was filled in and
-/// mistyped, and silently listening on every interface is the outcome this
-/// option exists to avoid.
+/// The address the HTTP server binds to, from $GOVEE_HTTP_ADDR; 0.0.0.0 when
+/// unset. Empty is an error, not the default: it means the setting was filled
+/// in and mistyped, and listening on every interface is what it exists to avoid.
 pub fn http_addr_from_env() -> anyhow::Result<IpAddr> {
     match opt_env_var::<String>("GOVEE_HTTP_ADDR")? {
         None => Ok(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
@@ -356,6 +352,48 @@ pub async fn run_http_server(state: StateHandle, addr: IpAddr, port: u16) -> any
     }
 
     Ok(())
+}
+
+/// A rooted URL 404s only under ingress, where nobody is looking. These two
+/// fail here instead.
+#[cfg(test)]
+#[tokio::test]
+async fn test_redirect_to_index_is_relative() {
+    let response = redirect_to_index().await;
+    let location = response
+        .headers()
+        .get("location")
+        .expect("redirect sets location")
+        .to_str()
+        .expect("ascii");
+    assert_eq!(location, "assets/index.html");
+    assert!(!location.starts_with('/'), "{location} escapes the prefix");
+}
+
+#[cfg(test)]
+#[test]
+fn test_ui_sources_have_no_rooted_urls() {
+    for (name, source) in [
+        ("assets/index.html", include_str!("../../assets/index.html")),
+        (
+            "assets/components/devices.js",
+            include_str!("../../assets/components/devices.js"),
+        ),
+    ] {
+        for needle in [
+            "\"/assets",
+            "'/assets",
+            "\"/api",
+            "'/api",
+            "`/api",
+            "`/assets",
+        ] {
+            assert!(
+                !source.contains(needle),
+                "{name} contains {needle}: a rooted URL breaks under ingress"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
