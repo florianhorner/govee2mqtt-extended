@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2016,SC2034
+# AUTO-GENERATED — DO NOT EDIT BY HAND.
+#
+# Managed by commit-lint-kit-v1 (rules schema_version 1.2.0).
+# Checks one commit message file:  commit-msg <message-file>
+# Spec:  CONTRIBUTING.md
+
+set -e
+export LC_ALL=C.UTF-8
+
+SPEC_URL='CONTRIBUTING.md'
+SCHEMA_VERSION='1.2.0'
+ALLOWED_TYPES_RE='^(v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ )?(feat|fix|docs|style|refactor|test|chore|ci|build|perf|revert)(\([a-z0-9][a-z0-9-]*\))?: .*[^[:space:]]'
+SUBJECT_MAX=72
+
+emit_block() {
+    local rule_id="$1"
+    local message="$2"
+    local fix_hint="$3"
+    local offending="$4"
+    {
+        printf 'BLOCK: %s %s\n' "$rule_id" "$message"
+        printf 'FIX: %s\n' "$fix_hint"
+        printf 'SPEC: %s (rule %s)\n' "$SPEC_URL" "$rule_id"
+        printf 'OFFENDING: %s\n' "$offending"
+    } >&2
+    exit 1
+}
+
+emit_warn() {
+    local rule_id="$1"
+    local message="$2"
+    local fix_hint="$3"
+    local offending="$4"
+    {
+        printf 'WARN: %s %s\n' "$rule_id" "$message"
+        printf 'FIX: %s\n' "$fix_hint"
+        printf 'SPEC: %s (rule %s)\n' "$SPEC_URL" "$rule_id"
+        printf 'OFFENDING: %s\n' "$offending"
+    } >&2
+}
+
+MSG_FILE="${1:?commit-msg hook called without a message file argument}"
+if [ ! -f "$MSG_FILE" ]; then
+    printf 'ERROR: commit-msg hook: message file %s not found\n' "$MSG_FILE" >&2
+    exit 2
+fi
+
+# Strip:
+#   1. Everything below git's scissors line (`# ------------------------ >8 ...`)
+#   2. Comment lines starting with `#`
+# Preserve blank lines so subject vs body separation works.
+CLEANED="$(awk '
+    /^# ------------------------ >8 ------------------------/ { exit }
+    /^#/ { next }
+    { print }
+' "$MSG_FILE")"
+
+# A message that is already committed has no editor comments left: every line
+# is part of it, including one that starts with `#`. The pull request runner
+# sets this variable; as a commit-msg hook the script leaves it unset.
+if [ "${COMMIT_LINT_COMMITTED:-}" = "1" ]; then
+    CLEANED="$(cat "$MSG_FILE")"
+fi
+
+# Strip leading blank lines, then take the first line as the subject.
+SUBJECT="$(printf '%s\n' "$CLEANED" | awk 'NF { print; exit }')"
+
+# Body = everything after the first blank line following the subject.
+BODY="$(printf '%s\n' "$CLEANED" | awk '
+    BEGIN { state = 0 }
+    state == 0 && NF { state = 1; next }
+    state == 1 && !NF { state = 2; next }
+    state == 2 { print }
+')"
+
+# Exemptions: subjects matching these skip ALL further format checks.
+EXEMPT_RE='(^Merge )|(^Revert )|(^cherry-pick: )|(^\[hotfix\] )'
+if printf '%s' "$SUBJECT" | grep -E -q "$EXEMPT_RE"; then
+    exit 0
+fi
+
+# Subject-only banned pattern: WEB_UI_DEFAULT
+if printf '%s' "$SUBJECT" | grep -E -q '^Add files via upload$|^Update [A-Z][A-Za-z]*\.md$|^Initial commit$'; then
+    emit_block 'WEB_UI_DEFAULT' 'GitHub web-UI default subject; rewrite to describe the change.' 'Use type(scope): subject format. Example: '"'"'docs(readme): clarify install steps'"'"'.' "$SUBJECT"
+fi
+
+# Subject-only banned pattern: VERSION_IN_SUBJECT
+if printf '%s' "$SUBJECT" | grep -E -q '^v[0-9]+(\.[0-9]+){0,2}([ :]|$)'; then
+    emit_block 'VERSION_IN_SUBJECT' 'Short version prefixes (v2, v1.2.3) don'"'"'t belong in commit subjects; let CHANGELOG do that. The 4-component ship-version prefix (v1.2.3.4) is allowed.' 'Drop the short version prefix. Use '"'"'chore(release): 1.2.3'"'"', or the 4-component '"'"'v1.2.3.4 type: subject'"'"' form for a release pull request title.' "$SUBJECT"
+fi
+
+# Format check: type(scope): subject — type required, scope optional.
+if ! printf '%s' "$SUBJECT" | grep -E -q "$ALLOWED_TYPES_RE"; then
+    emit_block 'SUBJECT_FORMAT' \
+        'Subject must match `type(scope): subject` with an allowed type.' \
+        'Use one of: feat fix docs style refactor test chore ci build perf revert. Example: `fix(auth): handle expired token`.' \
+        "$SUBJECT"
+fi
+
+# Subject length check.
+SUBJECT_LEN="$(printf '%s' "$SUBJECT" | awk '{ print length }')"
+if [ "${SUBJECT_LEN:-0}" -gt "$SUBJECT_MAX" ]; then
+    emit_block 'SUBJECT_TOO_LONG' \
+        "Subject length ${SUBJECT_LEN} exceeds maximum ${SUBJECT_MAX} characters." \
+        'Tighten the subject; move detail into the body.' \
+        "$SUBJECT"
+fi
+
+# Subject trailing-period check.
+case "$SUBJECT" in
+    *.)
+        emit_block 'SUBJECT_TRAILING_PERIOD' \
+            'Subject must not end with a period; subjects are not sentences.' \
+            'Drop the trailing `.` from the subject line.' \
+            "$SUBJECT"
+        ;;
+esac
+
+# Body-only banned patterns. Skip entirely when body is empty.
+if [ -n "$BODY" ]; then
+
+    # Body-only banned pattern: OPERATOR_ATTRIBUTION
+    if printf '%s' "$BODY" | grep -E -i -q 'florian asked|as requested|per request|per my request'; then
+        OFFENDING_LINE="$(printf '%s' "$BODY" | grep -E -i -m 1 'florian asked|as requested|per request|per my request')"
+        emit_block 'OPERATOR_ATTRIBUTION' 'Don'"'"'t attribute the commit to the operator/prompter; explain WHY the change is needed instead.' 'Replace '"'"'florian asked me to fix X'"'"' with '"'"'fix X because Y'"'"'.' "$OFFENDING_LINE"
+    fi
+
+    # Body-only banned pattern: AGENT_SELF_TALK
+    if printf '%s' "$BODY" | grep -E -i -q 'addressed all|fix all|fixed all|cleaned up everything'; then
+        OFFENDING_LINE="$(printf '%s' "$BODY" | grep -E -i -m 1 'addressed all|fix all|fixed all|cleaned up everything')"
+        emit_block 'AGENT_SELF_TALK' 'Agent self-talk like '"'"'addressed all comments'"'"' is empty; describe specific changes.' 'Replace with the specific issues fixed: '"'"'fix N+1 in Foo.query, dedupe Bar.helper'"'"'.' "$OFFENDING_LINE"
+    fi
+fi
+
+# Local warn-only rule: WHY_REQUIRED (CI does the authoritative block).
+# Heuristic: if subject is `feat(...)` and body lacks a `Why:` line, warn.
+if printf '%s' "$SUBJECT" | grep -E -q '^feat(\([a-z0-9][a-z0-9-]*\))?: '; then
+    if [ -z "$BODY" ] || ! printf '%s' "$BODY" | grep -E -q '^[Ww]hy:'; then
+        emit_warn 'WHY_REQUIRED' 'feat with >50 lines must include a `Why:` body line.' 'Add a body section starting with '"'"'Why: <one-line reason>'"'"'. See spec for templates.' "$SUBJECT"
+    fi
+fi
+
+# All checks passed.
+exit 0

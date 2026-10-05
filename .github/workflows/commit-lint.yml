@@ -1,6 +1,4 @@
-# Per-repo includer for the engineering-standards reusable commit-lint workflow.
-# Canonical workflow: https://github.com/florianhorner/engineering-standards/blob/main/.github/workflows/commit-lint-reusable.yml
-# Pin to a SHA in production; 1fe9a730a3779349ddcea67974f10050a7548a47 is the bootstrap placeholder until bootstrap-repo.sh resolves the actual SHA.
+# Managed by commit-lint-kit-v1. Generated; do not edit by hand.
 name: commit-lint
 
 on:
@@ -9,8 +7,20 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   commit-lint:
-    uses: florianhorner/engineering-standards/.github/workflows/commit-lint-reusable.yml@1fe9a730a3779349ddcea67974f10050a7548a47
+    name: commit-lint / validate commit messages
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The script reads the pull request from the event file, so its title
+      # never appears in this step's logged environment.
+      - name: Validate commit messages and pull request title
+        run: bash .config/commit-lint/validate-pr.sh

@@ -1,0 +1,10 @@
+{
+  "managed_by": "commit-lint-kit-v1",
+  "source_revision": "ed6a4e9c758c436d664a53aea0f858b6d2e7b07f",
+  "rules_schema_version": "1.2.0",
+  "files": {
+    ".config/commit-lint/commit-msg": "34756a6c98f4fe66b98e46d7e3428a1127af6a42fc4279ddb39340c24828e10e",
+    ".config/commit-lint/validate-pr.sh": "19f5430a053885ed756d413b5c4b08ae97c98c1416dcccf992f630a7639e8531",
+    ".github/workflows/commit-lint.yml": "788358beac9bc3c3959083ed3d1806da33ec0c2846e8137f5ddfc7d0a3f823cc"
+  }
+}
