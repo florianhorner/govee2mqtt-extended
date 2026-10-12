@@ -11,10 +11,18 @@ For `feat` commits with >50 lines changed, add a body line beginning with
 `Why:` that explains the reason for the change. This is a convention; CI does
 not fail without it.
 
-CI checks every commit of a pull request and the pull request title with
-`.config/commit-lint/validate-pr.sh`. To check a message before pushing, run
-`bash .config/commit-lint/commit-msg <message-file>`. Both files are generated;
+The trusted CI workflow uses `.config/commit-lint/validate-trusted.py` from
+the default branch and reads PR commit history as data. It runs the adjacent
+`.config/commit-lint/validate-pr.sh` and `commit-msg`; it never executes PR files.
+It checks the PR title and non-merge commits. Changes to these
+policy files take effect after they merge. To check a message before pushing, run
+`bash .config/commit-lint/commit-msg <message-file>`. These policy files are generated;
 do not edit them by hand.
+
+During installation, the existing check remains active. The trusted
+workflow first runs as `commit-lint / trusted policy preview`. Retire
+the old check only after the preview passes on the PR head and the
+repository's Actions event policy permits `pull_request_target`.
 
 <!-- END: commit-message-standards -->
 

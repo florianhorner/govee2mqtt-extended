@@ -180,9 +180,15 @@ Use Conventional Commits: `type(scope): subject`, with a subject of at most
 72 characters and no trailing period. The title of a pull request opened by a
 dependency bot may be longer.
 For `feat` commits with >50 lines changed, add a `Why:` line to the body; this
-is a convention and CI does not fail without it. CI runs
-`.config/commit-lint/validate-pr.sh` on every pull request commit and on the
-pull request title. Check a message before pushing with
+is a convention and CI does not fail without it. The trusted CI workflow runs
+`.config/commit-lint/validate-trusted.py` and `.config/commit-lint/validate-pr.sh` from
+the default branch. PR history is data; PR files are never executed. Policy
+changes take effect after merge. Check a message before pushing with
 `bash .config/commit-lint/commit-msg <message-file>`.
+
+During installation, the existing check remains active. The trusted
+workflow first runs as `commit-lint / trusted policy preview`. Retire
+the old check only after the preview passes on the PR head and the
+repository's Actions event policy permits `pull_request_target`.
 
 <!-- END: commit-message-standards -->

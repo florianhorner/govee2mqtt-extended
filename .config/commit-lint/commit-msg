@@ -134,7 +134,7 @@ if [ -n "$BODY" ]; then
     fi
 fi
 
-# Local warn-only rule: WHY_REQUIRED (CI does the authoritative block).
+# Warn-only rule: WHY_REQUIRED; this hook does not block CI for it.
 # Heuristic: if subject is `feat(...)` and body lacks a `Why:` line, warn.
 if printf '%s' "$SUBJECT" | grep -E -q '^feat(\([a-z0-9][a-z0-9-]*\))?: '; then
     if [ -z "$BODY" ] || ! printf '%s' "$BODY" | grep -E -q '^[Ww]hy:'; then

@@ -1,0 +1,38 @@
+# Managed by commit-lint-kit-v1. Generated; do not edit by hand.
+name: Trusted commit policy
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+
+concurrency:
+  group: trusted-commit-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  commit-lint:
+    name: commit-lint / trusted policy preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Only reviewed default-branch code is checked out or executed.
+      - name: Checkout trusted policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: trusted-policy
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+          lfs: false
+
+      # PR history is fetched into a bare repository and read as data only.
+      - name: Validate pull request with trusted policy
+        working-directory: trusted-policy
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I .config/commit-lint/validate-trusted.py
