@@ -131,12 +131,6 @@ class RuleMatching(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(blocked(f"ip {value}"), [])
 
-    def test_commit_rules_file_may_name_the_tooling(self):
-        text = "codex gstack subagent then /ship and /review"
-        self.assertEqual(blocked(text, path=".config/commit-rules.json"), [])
-        self.assertEqual(sorted(blocked(text)), [
-            "process-codex", "process-gstack", "process-slash-commands", "process-subagent"])
-
     def test_remaining_path_exemptions(self):
         self.assertEqual(blocked("Codex", path="AUTHOR-NOTES.md"), [])
         self.assertEqual(blocked("scratch in .context/", path="CONTRIBUTING.md"), [])
@@ -271,6 +265,43 @@ class RepoModes(unittest.TestCase):
         result = self.run_guard("--all")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("passed", result.stdout)
+
+    def test_retired_policy_files_fail_even_when_empty(self):
+        paths = [".config/commit-rules.json", ".config/commit-rules.meta.json",
+                 ".commitlintrc.json"]
+        for path in paths:
+            dest = self.repo / path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text("")
+        self.git("add", *paths)
+        for mode in ["--all", "--staged"]:
+            with self.subTest(mode=mode):
+                result = self.run_guard(mode)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                for path in paths:
+                    self.assertIn(f"BLOCK {path}: obsolete commit-policy file", result.stdout)
+
+    def test_current_generated_manifest_passes(self):
+        path = ".config/commit-lint/MANIFEST.json"
+        dest = self.repo / path
+        dest.parent.mkdir(parents=True)
+        dest.write_text('{}\n')
+        self.git("add", path)
+        for mode in ["--all", "--staged"]:
+            with self.subTest(mode=mode):
+                result = self.run_guard(mode)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_retired_policy_deletion_passes(self):
+        path = ".config/commit-rules.json"
+        dest = self.repo / path
+        dest.parent.mkdir(parents=True)
+        dest.write_text('{}\n')
+        self.git("add", path)
+        dest.unlink()
+        self.assertEqual(self.run_guard("--all").returncode, 0)
+        self.git("add", path)
+        self.assertEqual(self.run_guard("--staged").returncode, 0)
 
     def test_tracked_backlog_fails_even_when_empty(self):
         (self.repo / "todos.md").write_text("")

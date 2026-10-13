@@ -19,11 +19,6 @@ policy files take effect after they merge. To check a message before pushing, ru
 `bash .config/commit-lint/commit-msg <message-file>`. These policy files are generated;
 do not edit them by hand.
 
-During installation, the existing check remains active. The trusted
-workflow first runs as `commit-lint / trusted policy preview`. Retire
-the old check only after the preview passes on the PR head and the
-repository's Actions event policy permits `pull_request_target`.
-
 <!-- END: commit-message-standards -->
 
 ## Public content

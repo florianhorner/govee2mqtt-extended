@@ -4,7 +4,8 @@
 Scans tracked (or staged) text files for content that must not be published:
 private network addresses, device identifiers, home-directory paths, personal
 e-mail addresses, and internal review or tooling narration. Also refuses a
-tracked engineering backlog (todos.md), which lives outside the repository.
+tracked engineering backlog (todos.md), which lives outside the repository,
+and retired commit-policy files that would conflict with the generated check.
 
 Usage:
   scripts/check_public_content.py --all          # every tracked file (CI)
@@ -89,7 +90,11 @@ class Rule:
         return re.compile(self.pattern, re.IGNORECASE if self.ignore_case else 0)
 
 
-COMMIT_RULES = ".config/commit-rules.json"
+RETIRED_POLICY_FILES = frozenset({
+    ".config/commit-rules.json",
+    ".config/commit-rules.meta.json",
+    ".commitlintrc.json",
+})
 
 RULES: list[Rule] = [
     # --- internal review and tooling narration ---------------------------------
@@ -101,13 +106,12 @@ RULES: list[Rule] = [
          "internal release-process stage names", ignore_case=True),
     Rule("process-slash-commands",
          r"(^|[\s`(])/(ship|review|retro|autoplan|office-hours|codex|qa|investigate|plan-[a-z]+-review)(?![A-Za-z0-9_-])",
-         True, "local tooling commands", exempt_paths=frozenset({COMMIT_RULES})),
+         True, "local tooling commands"),
     Rule("process-codex", r"codex", True, "review tool name", ignore_case=True,
-         exempt_paths=frozenset({COMMIT_RULES, "AUTHOR-NOTES.md", "CLAUDE.md"})),
+         exempt_paths=frozenset({"AUTHOR-NOTES.md", "CLAUDE.md"})),
     Rule("process-gstack", r"gstack", True, "local tooling name", ignore_case=True,
-         exempt_paths=frozenset({".gitignore", COMMIT_RULES})),
-    Rule("process-subagent", r"subagent", True, "tooling internals", ignore_case=True,
-         exempt_paths=frozenset({COMMIT_RULES})),
+         exempt_paths=frozenset({".gitignore"})),
+    Rule("process-subagent", r"subagent", True, "tooling internals", ignore_case=True),
     Rule("process-status-tokens", r"DONE_WITH_CONCERNS|NEEDS_CONTEXT", True,
          "internal status vocabulary"),
     Rule("process-scope-discipline", r"scope discipline", True,
@@ -159,10 +163,10 @@ RULES: list[Rule] = [
          r"specialist reviewers?|specialist pass|classified FIXABLE|confidence:? [0-9]+([,)/]| of)",
          False, "review vocabulary", ignore_case=True),
     Rule("process-conductor", r"conductor", False, "workspace tooling", ignore_case=True,
-         exempt_paths=frozenset({"CLAUDE.md", ".conductor/settings.toml", ".gitignore", COMMIT_RULES})),
+         exempt_paths=frozenset({"CLAUDE.md", ".conductor/settings.toml", ".gitignore"})),
     Rule("process-skill-word", r"(?<![A-Za-z0-9_])skills?(?![A-Za-z0-9_])", False,
          "tooling vocabulary", ignore_case=True,
-         exempt_paths=frozenset({"CLAUDE.md", "CONTRIBUTING.md", COMMIT_RULES})),
+         exempt_paths=frozenset({"CLAUDE.md", "CONTRIBUTING.md"})),
     Rule("process-maintainer-name", r"(?<![/@A-Za-z0-9])Florian(?![A-Za-z0-9])", False,
          "maintainer named in prose"),
     Rule("net-10-slash-8", r"(?<![0-9.])10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}", False,
@@ -192,10 +196,11 @@ class Report:
     blocks: list[Hit] = field(default_factory=list)
     warns: list[Hit] = field(default_factory=list)
     tracked_backlog: list[str] = field(default_factory=list)
+    retired_policy_files: list[str] = field(default_factory=list)
 
     @property
     def failed(self) -> bool:
-        return bool(self.blocks or self.tracked_backlog)
+        return bool(self.blocks or self.tracked_backlog or self.retired_policy_files)
 
 
 def git(*args: str, cwd: Path | None = None) -> str:
@@ -243,6 +248,9 @@ def check_paths(root: Path, paths: list[str], reader) -> Report:
         data = reader(path)
         if data is None:
             continue
+        if Path(path).as_posix() in RETIRED_POLICY_FILES:
+            report.retired_policy_files.append(path)
+            continue
         for hit in scan_text(path, data.decode("utf-8", errors="replace")):
             (report.blocks if hit.rule.block else report.warns).append(hit)
     return report
@@ -272,6 +280,9 @@ def print_report(report: Report) -> None:
     for path in report.tracked_backlog:
         print(f"BLOCK {path}: the engineering backlog is private and must not be tracked "
               "(see CONTRIBUTING.md, Public content)")
+    for path in report.retired_policy_files:
+        print(f"BLOCK {path}: obsolete commit-policy file; use the generated check "
+              "in .config/commit-lint/")
     for hit in report.blocks:
         print(f"BLOCK {hit.path}:{hit.line}: [{hit.rule.id}] {hit.rule.why}: {hit.value!r}")
     if report.warns:
@@ -284,7 +295,8 @@ def print_report(report: Report) -> None:
             print(f"WARN  [{rule_id}] {len(hits)} hit(s): {places}{more}")
     if report.failed:
         print(f"public-content check FAILED: {len(report.blocks)} blocking hit(s), "
-              f"{len(report.tracked_backlog)} tracked backlog file(s)")
+              f"{len(report.tracked_backlog)} tracked backlog file(s), "
+              f"{len(report.retired_policy_files)} obsolete commit-policy file(s)")
     else:
         print(f"public-content check passed ({len(report.warns)} warning(s))")
 
