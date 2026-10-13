@@ -94,6 +94,7 @@ RETIRED_POLICY_FILES = frozenset({
     ".config/commit-rules.json",
     ".config/commit-rules.meta.json",
     ".commitlintrc.json",
+    ".github/workflows/commit-lint.yml",
 })
 
 RULES: list[Rule] = [

@@ -281,27 +281,68 @@ class RepoModes(unittest.TestCase):
                 for path in paths:
                     self.assertIn(f"BLOCK {path}: obsolete commit-policy file", result.stdout)
 
+    def test_retired_workflow_fails_when_empty(self):
+        path = ".github/workflows/commit-lint.yml"
+        dest = self.repo / path
+        dest.parent.mkdir(parents=True)
+        dest.write_text("")
+        self.git("add", path)
+        for mode in ["--all", "--staged"]:
+            with self.subTest(mode=mode):
+                result = self.run_guard(mode)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"BLOCK {path}: obsolete commit-policy file", result.stdout)
+
+    def test_retired_workflow_fails_when_legacy_caller_restored(self):
+        path = ".github/workflows/commit-lint.yml"
+        dest = self.repo / path
+        dest.parent.mkdir(parents=True)
+        dest.write_text("""name: commit-lint
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited]
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  commit-lint:
+    uses: florianhorner/engineering-standards/.github/workflows/commit-lint-reusable.yml@1fe9a730a3779349ddcea67974f10050a7548a47
+""")
+        self.git("add", path)
+        for mode in ["--all", "--staged"]:
+            with self.subTest(mode=mode):
+                result = self.run_guard(mode)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"BLOCK {path}: obsolete commit-policy file", result.stdout)
+
     def test_current_generated_manifest_passes(self):
         path = ".config/commit-lint/MANIFEST.json"
         dest = self.repo / path
         dest.parent.mkdir(parents=True)
         dest.write_text('{}\n')
-        self.git("add", path)
+        workflow_path = ".github/workflows/commit-lint-trusted.yml"
+        workflow = self.repo / workflow_path
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text("name: Trusted commit policy\non: pull_request_target\njobs: {}\n")
+        self.git("add", path, workflow_path)
         for mode in ["--all", "--staged"]:
             with self.subTest(mode=mode):
                 result = self.run_guard(mode)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_retired_policy_deletion_passes(self):
-        path = ".config/commit-rules.json"
-        dest = self.repo / path
-        dest.parent.mkdir(parents=True)
-        dest.write_text('{}\n')
-        self.git("add", path)
-        dest.unlink()
-        self.assertEqual(self.run_guard("--all").returncode, 0)
-        self.git("add", path)
-        self.assertEqual(self.run_guard("--staged").returncode, 0)
+        paths = [".config/commit-rules.json", ".config/commit-rules.meta.json",
+                 ".commitlintrc.json", ".github/workflows/commit-lint.yml"]
+        for path in paths:
+            with self.subTest(path=path):
+                dest = self.repo / path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text("")
+                self.git("add", path)
+                dest.unlink()
+                self.assertEqual(self.run_guard("--all").returncode, 0)
+                self.git("add", path)
+                self.assertEqual(self.run_guard("--staged").returncode, 0)
 
     def test_tracked_backlog_fails_even_when_empty(self):
         (self.repo / "todos.md").write_text("")
