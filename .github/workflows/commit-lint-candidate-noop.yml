@@ -1,0 +1,25 @@
+# Runs the checker from this pull request. A pass here only shows that the
+# candidate checker is a no-op. It is not the trusted policy result.
+name: Candidate checker
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  noop:
+    name: commit-lint / candidate no-op
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          submodules: false
+          lfs: false
+      - name: Run the candidate checker
+        run: bash .config/commit-lint/validate-pr.sh
