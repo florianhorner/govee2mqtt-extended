@@ -176,15 +176,19 @@ pre-commit install
 <!-- BEGIN: commit-message-standards (managed by bootstrap-repo.sh — do not hand-edit) -->
 ## Commit message standards
 
-This repo follows the [engineering-standards commit-message spec](https://github.com/florianhorner/engineering-standards/blob/main/specs/commit-message-spec.md).
+Use Conventional Commits: `type(scope): subject`, with a subject of at most
+72 characters and no trailing period. The title of a pull request opened by a
+dependency bot may be longer.
+For `feat` commits with >50 lines changed, add a `Why:` line to the body; this
+is a convention and CI does not fail without it. The trusted CI workflow runs
+`.config/commit-lint/validate-trusted.py` and `.config/commit-lint/validate-pr.sh` from
+the default branch. PR history is data; PR files are never executed. Policy
+changes take effect after merge. Check a message before pushing with
+`bash .config/commit-lint/commit-msg <message-file>`.
 
-**Quick rule:** Conventional Commits (`type(scope): subject`, ≤72 chars). A `Why:` body line is REQUIRED when type is `feat` AND >50 lines changed; otherwise optional.
+During installation, the existing check remains active. The trusted
+workflow first runs as `commit-lint / trusted policy preview`. Retire
+the old check only after the preview passes on the PR head and the
+repository's Actions event policy permits `pull_request_target`.
 
-**Local invocation:** Use the `/commit` skill in Claude Code / Conductor. Default behavior is dry-run (drafts a message and shows the validator output without committing); pass `--commit` to actually create the commit. Manual `git commit` works too — the local `commit-msg` hook validates either path.
-
-**Per-repo cheat sheet:** [`./CONTRIBUTING.md`](./CONTRIBUTING.md) carries the 30-second cheat sheet, good/bad examples, banned patterns, exempt subjects, bot allowlist, and bypass policy. It is self-sufficient for cloud agents (Claude Code Cloud, Codex web) that only see repo-local files.
-
-**Machine-readable rules:** [`.config/commit-rules.json`](.config/commit-rules.json) is a SHA-pinned vendored copy of the upstream `commit-rules.json`. The validator binary, commit-msg hook, and CI workflow all read this file. Do not hand-edit — re-run `bootstrap-repo.sh` to refresh.
-
-**Bypass:** `git commit --no-verify` requires a `Policy-Override: <reason>` trailer to pass CI. Logged to `~/.commit-bypass.log` by the pre-push hook.
 <!-- END: commit-message-standards -->
