@@ -6,7 +6,7 @@ Validated on 2026-10-12. Generated source revision: `dcc7310891aa9f295fdbcc02340
 
 - Validator suite: 82 tests passed, including 20 controller tests and the 61-case message corpus exercised by the kit tests.
 - Installer suite: 30 tests passed. The regression for an old three-file manifest verifies four current generated entries, correct SHA256 values, and an unchanged retained caller.
-- Workflow syntax: `actionlint` passed for the trusted workflow.
+- Workflow syntax: trusted workflow syntax validation passed.
 
 The controller tests use real temporary Git repositories and the real trusted message checker. API responses and network fetch destinations are substituted locally. Invalid commits and titles fail even when the PR replaces its checker and workflow with no-op or executable payloads. Tests also cover credential isolation, missing or modified trusted policy, fetch failures, stale PR snapshots, bot-title allowances, and timeout failures.
 
