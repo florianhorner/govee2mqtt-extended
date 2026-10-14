@@ -76,6 +76,18 @@ PRs must pass `cargo build`, `cargo clippy -- -D warnings`, `cargo test`, and `c
 
 ## Public content boundary
 
+For direct public-content checks, install the pinned parser in an isolated environment:
+
+```sh
+python3 -m venv .venv-public-content
+.venv-public-content/bin/python -m pip install --require-hashes -r scripts/requirements-public-content.txt
+.venv-public-content/bin/python scripts/check_public_content.py --all
+.venv-public-content/bin/python -m unittest scripts/test_check_public_content.py
+```
+
+The public-content pre-commit hook manages its own parser environment. CI installs
+candidate test dependencies separately from the guard dependencies on the base branch.
+
 This is a public repository. `CONTRIBUTING.md` (section "Public content") lists what never
 goes in: private network addresses, device identifiers, home-directory paths, personal
 e-mail addresses, and the names, commands and stage vocabulary of internal review or
@@ -185,10 +197,5 @@ is a convention and CI does not fail without it. The trusted CI workflow runs
 the default branch. PR history is data; PR files are never executed. Policy
 changes take effect after merge. Check a message before pushing with
 `bash .config/commit-lint/commit-msg <message-file>`.
-
-During installation, the existing check remains active. The trusted
-workflow first runs as `commit-lint / trusted policy preview`. Retire
-the old check only after the preview passes on the PR head and the
-repository's Actions event policy permits `pull_request_target`.
 
 <!-- END: commit-message-standards -->

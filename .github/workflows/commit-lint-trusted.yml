@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   commit-lint:
-    name: commit-lint / trusted policy preview
+    name: commit-lint / validate commit messages
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
