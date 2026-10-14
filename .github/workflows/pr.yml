@@ -64,8 +64,12 @@ jobs:
         ref: ${{ github.event.pull_request.base.sha }}
         path: _base
         persist-credentials: false
+    - name: Install guard test dependencies
+      run: |
+        python3 -m venv "$RUNNER_TEMP/public-content-tests"
+        "$RUNNER_TEMP/public-content-tests/bin/python" -m pip install --require-hashes -r scripts/requirements-public-content.txt
     - name: Guard unit tests
-      run: python3 -m unittest scripts/test_check_public_content.py
+      run: '"$RUNNER_TEMP/public-content-tests/bin/python" -m unittest scripts/test_check_public_content.py'
     - name: Public content check (guard from the base branch)
       run: |
         guard=_base/scripts/check_public_content.py
@@ -73,7 +77,12 @@ jobs:
           echo "::notice::base branch has no guard yet; using the head copy (bootstrap)"
           guard=scripts/check_public_content.py
         fi
-        python3 "$guard" --all
+        requirements="$(dirname "$guard")/requirements-public-content.txt"
+        python3 -m venv "$RUNNER_TEMP/public-content-base"
+        if [ -f "$requirements" ]; then
+          "$RUNNER_TEMP/public-content-base/bin/python" -m pip install --require-hashes -r "$requirements"
+        fi
+        "$RUNNER_TEMP/public-content-base/bin/python" -I "$guard" --all
     - name: PR-body pattern file loads under bash
       run: |
         bash -n scripts/lint-patterns.sh

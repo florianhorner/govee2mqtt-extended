@@ -16,3 +16,6 @@ package-lock.json
 
 # The engineering backlog is private and lives outside the repository; ROADMAP.md is the public list.
 /TODOS.md
+
+# Isolated dependencies for direct public-content checks.
+/.venv-public-content/

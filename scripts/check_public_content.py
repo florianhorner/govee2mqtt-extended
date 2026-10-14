@@ -4,7 +4,8 @@
 Scans tracked (or staged) text files for content that must not be published:
 private network addresses, device identifiers, home-directory paths, personal
 e-mail addresses, and internal review or tooling narration. Also refuses a
-tracked engineering backlog (todos.md), which lives outside the repository.
+tracked engineering backlog (todos.md), which lives outside the repository,
+and retired commit-policy files that would conflict with the generated check.
 
 Usage:
   scripts/check_public_content.py --all          # every tracked file (CI)
@@ -28,6 +29,11 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 SELF = Path(__file__).name
 # These three files must contain the very strings the rules look for. They are
@@ -89,7 +95,17 @@ class Rule:
         return re.compile(self.pattern, re.IGNORECASE if self.ignore_case else 0)
 
 
-COMMIT_RULES = ".config/commit-rules.json"
+RETIRED_POLICY_FILES = frozenset({
+    ".config/commit-rules.json",
+    ".config/commit-rules.meta.json",
+    ".commitlintrc.json",
+    ".github/workflows/commit-lint.yml",
+})
+RETIRED_COMMIT_WORKFLOW = Rule(
+    "retired-commit-workflow",
+    r"\bflorianhorner/engineering-standards/\.github/workflows/commit-lint-reusable\.ya?ml@",
+    True, "retired reusable commit workflow; use the generated policy", ignore_case=True,
+)
 
 RULES: list[Rule] = [
     # --- internal review and tooling narration ---------------------------------
@@ -101,13 +117,12 @@ RULES: list[Rule] = [
          "internal release-process stage names", ignore_case=True),
     Rule("process-slash-commands",
          r"(^|[\s`(])/(ship|review|retro|autoplan|office-hours|codex|qa|investigate|plan-[a-z]+-review)(?![A-Za-z0-9_-])",
-         True, "local tooling commands", exempt_paths=frozenset({COMMIT_RULES})),
+         True, "local tooling commands"),
     Rule("process-codex", r"codex", True, "review tool name", ignore_case=True,
-         exempt_paths=frozenset({COMMIT_RULES, "AUTHOR-NOTES.md", "CLAUDE.md"})),
+         exempt_paths=frozenset({"AUTHOR-NOTES.md", "CLAUDE.md"})),
     Rule("process-gstack", r"gstack", True, "local tooling name", ignore_case=True,
-         exempt_paths=frozenset({".gitignore", COMMIT_RULES})),
-    Rule("process-subagent", r"subagent", True, "tooling internals", ignore_case=True,
-         exempt_paths=frozenset({COMMIT_RULES})),
+         exempt_paths=frozenset({".gitignore"})),
+    Rule("process-subagent", r"subagent", True, "tooling internals", ignore_case=True),
     Rule("process-status-tokens", r"DONE_WITH_CONCERNS|NEEDS_CONTEXT", True,
          "internal status vocabulary"),
     Rule("process-scope-discipline", r"scope discipline", True,
@@ -159,10 +174,10 @@ RULES: list[Rule] = [
          r"specialist reviewers?|specialist pass|classified FIXABLE|confidence:? [0-9]+([,)/]| of)",
          False, "review vocabulary", ignore_case=True),
     Rule("process-conductor", r"conductor", False, "workspace tooling", ignore_case=True,
-         exempt_paths=frozenset({"CLAUDE.md", ".conductor/settings.toml", ".gitignore", COMMIT_RULES})),
+         exempt_paths=frozenset({"CLAUDE.md", ".conductor/settings.toml", ".gitignore"})),
     Rule("process-skill-word", r"(?<![A-Za-z0-9_])skills?(?![A-Za-z0-9_])", False,
          "tooling vocabulary", ignore_case=True,
-         exempt_paths=frozenset({"CLAUDE.md", "CONTRIBUTING.md", COMMIT_RULES})),
+         exempt_paths=frozenset({"CLAUDE.md", "CONTRIBUTING.md"})),
     Rule("process-maintainer-name", r"(?<![/@A-Za-z0-9])Florian(?![A-Za-z0-9])", False,
          "maintainer named in prose"),
     Rule("net-10-slash-8", r"(?<![0-9.])10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}", False,
@@ -192,10 +207,11 @@ class Report:
     blocks: list[Hit] = field(default_factory=list)
     warns: list[Hit] = field(default_factory=list)
     tracked_backlog: list[str] = field(default_factory=list)
+    retired_policy_files: list[str] = field(default_factory=list)
 
     @property
     def failed(self) -> bool:
-        return bool(self.blocks or self.tracked_backlog)
+        return bool(self.blocks or self.tracked_backlog or self.retired_policy_files)
 
 
 def git(*args: str, cwd: Path | None = None) -> str:
@@ -233,7 +249,97 @@ def scan_text(path: str, text: str, rules: list[Rule] = RULES) -> list[Hit]:
     return hits
 
 
+if yaml is not None:
+    class WorkflowLoader(yaml.SafeLoader):
+        def construct_mapping(self, node, deep=False):
+            # Workflow mapping keys are names; YAML 1.1 must not turn job
+            # names such as "on" and "true" into the same boolean key.
+            self.flatten_mapping(node)
+            return {key.value: self.construct_object(value, deep=deep)
+                    for key, value in node.value}
+
+
+def workflow_reference_hits(path: str, data: bytes) -> list[Hit]:
+    loader = None
+    try:
+        loader = WorkflowLoader(data)
+        node = loader.get_single_node()
+        # Validate explicit keys before merge flattening mutates their pairs.
+        # Aliases can revisit the same node, including recursive structures.
+        pending, visited, active = [(node, False)], set(), set()
+        while pending:
+            current, exiting = pending.pop()
+            if current is None or id(current) in visited:
+                continue
+            if exiting:
+                active.remove(id(current))
+                visited.add(id(current))
+                continue
+            if id(current) in active:
+                raise yaml.constructor.ConstructorError(
+                    None, None, "recursive workflow alias", current.start_mark)
+            active.add(id(current))
+            pending.append((current, True))
+            if (current.tag not in loader.yaml_constructors
+                    and current.tag != "tag:yaml.org,2002:merge"):
+                raise yaml.constructor.ConstructorError(
+                    None, None, "unsupported YAML tag", current.start_mark)
+            if isinstance(current, yaml.MappingNode):
+                keys = set()
+                for key, value in current.value:
+                    if not isinstance(key, yaml.ScalarNode) or key.value in keys:
+                        raise yaml.constructor.ConstructorError(
+                            None, None, "invalid or duplicate mapping key", key.start_mark)
+                    keys.add(key.value)
+                    pending.extend(((key, False), (value, False)))
+            elif isinstance(current, yaml.SequenceNode):
+                pending.extend((value, False) for value in current.value)
+        document = loader.construct_document(node) if node is not None else None
+    except Exception as error:
+        mark = getattr(error, "problem_mark", None)
+        position = f":{mark.line + 1}:{mark.column + 1}" if mark is not None else ""
+        # Parser excerpts can contain private input. Report its location only.
+        raise RuntimeError(f"{path}{position}: invalid workflow YAML") from None
+    finally:
+        if loader is not None:
+            loader.dispose()
+
+    def value_node(mapping, key):
+        if isinstance(mapping, yaml.MappingNode):
+            return next((value for name, value in reversed(mapping.value)
+                         if name.value == key), None)
+        return None
+
+    if document is None:
+        return []
+    if not isinstance(document, dict):
+        raise RuntimeError(f"{path}: workflow must be a mapping")
+    if "jobs" not in document:
+        return []
+    jobs = document["jobs"]
+    if not isinstance(jobs, dict):
+        raise RuntimeError(f"{path}: workflow jobs must be a mapping")
+    jobs_node = value_node(node, "jobs")
+    hits = []
+    for name, job in jobs.items():
+        if not isinstance(job, dict):
+            raise RuntimeError(f"{path}: workflow job must be a mapping")
+        if "uses" not in job:
+            continue
+        reference = job["uses"]
+        if not isinstance(reference, str):
+            raise RuntimeError(f"{path}: reusable workflow reference must be a string")
+        match = RETIRED_COMMIT_WORKFLOW.regex().match(reference.strip())
+        if match is not None:
+            reference_node = value_node(value_node(jobs_node, name), "uses")
+            line = reference_node.start_mark.line + 1 if reference_node is not None else 1
+            hits.append(Hit(path, line, RETIRED_COMMIT_WORKFLOW, match.group(0)))
+    return hits
+
+
 def check_paths(root: Path, paths: list[str], reader) -> Report:
+    if yaml is None:
+        raise RuntimeError("PyYAML is required; install scripts/requirements-public-content.txt")
     report = Report()
     for path in paths:
         if TODOS_PATTERN.search(path):
@@ -243,6 +349,12 @@ def check_paths(root: Path, paths: list[str], reader) -> Report:
         data = reader(path)
         if data is None:
             continue
+        if Path(path).as_posix() in RETIRED_POLICY_FILES:
+            report.retired_policy_files.append(path)
+            continue
+        candidate = Path(path)
+        if candidate.parent.as_posix() == ".github/workflows" and candidate.suffix.lower() in {".yml", ".yaml"}:
+            report.blocks.extend(workflow_reference_hits(path, data))
         for hit in scan_text(path, data.decode("utf-8", errors="replace")):
             (report.blocks if hit.rule.block else report.warns).append(hit)
     return report
@@ -272,6 +384,9 @@ def print_report(report: Report) -> None:
     for path in report.tracked_backlog:
         print(f"BLOCK {path}: the engineering backlog is private and must not be tracked "
               "(see CONTRIBUTING.md, Public content)")
+    for path in report.retired_policy_files:
+        print(f"BLOCK {path}: obsolete commit-policy file; use the generated check "
+              "in .config/commit-lint/")
     for hit in report.blocks:
         print(f"BLOCK {hit.path}:{hit.line}: [{hit.rule.id}] {hit.rule.why}: {hit.value!r}")
     if report.warns:
@@ -284,7 +399,8 @@ def print_report(report: Report) -> None:
             print(f"WARN  [{rule_id}] {len(hits)} hit(s): {places}{more}")
     if report.failed:
         print(f"public-content check FAILED: {len(report.blocks)} blocking hit(s), "
-              f"{len(report.tracked_backlog)} tracked backlog file(s)")
+              f"{len(report.tracked_backlog)} tracked backlog file(s), "
+              f"{len(report.retired_policy_files)} obsolete commit-policy file(s)")
     else:
         print(f"public-content check passed ({len(report.warns)} warning(s))")
 
