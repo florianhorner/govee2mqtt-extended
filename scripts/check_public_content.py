@@ -96,6 +96,11 @@ RETIRED_POLICY_FILES = frozenset({
     ".commitlintrc.json",
     ".github/workflows/commit-lint.yml",
 })
+RETIRED_COMMIT_WORKFLOW = Rule(
+    "retired-commit-workflow",
+    r"\bflorianhorner/engineering-standards/\.github/workflows/commit-lint-reusable\.ya?ml@",
+    True, "retired reusable commit workflow; use the generated policy", ignore_case=True,
+)
 
 RULES: list[Rule] = [
     # --- internal review and tooling narration ---------------------------------
@@ -252,7 +257,13 @@ def check_paths(root: Path, paths: list[str], reader) -> Report:
         if Path(path).as_posix() in RETIRED_POLICY_FILES:
             report.retired_policy_files.append(path)
             continue
-        for hit in scan_text(path, data.decode("utf-8", errors="replace")):
+        rules = RULES
+        candidate = Path(path)
+        if candidate.parent.as_posix() == ".github/workflows" and candidate.suffix.lower() in {".yml", ".yaml"}:
+            # GitHub accepts either extension and arbitrary workflow names.
+            # Reject the retired reference even when its caller is renamed.
+            rules = [*RULES, RETIRED_COMMIT_WORKFLOW]
+        for hit in scan_text(path, data.decode("utf-8", errors="replace"), rules):
             (report.blocks if hit.rule.block else report.warns).append(hit)
     return report
 

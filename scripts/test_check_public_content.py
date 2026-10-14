@@ -315,6 +315,65 @@ jobs:
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn(f"BLOCK {path}: obsolete commit-policy file", result.stdout)
 
+    def test_renamed_retired_workflow_fails(self):
+        reference = ("florianhorner/engineering-standards/.github/workflows/"
+                     "commit-lint-reusable.yml@1fe9a730a3779349ddcea67974f10050a7548a47")
+        for filename in ["commit-lint.yaml", "renamed-policy.yml"]:
+            path = f".github/workflows/{filename}"
+            dest = self.repo / path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(f"name: policy\non: pull_request\njobs:\n  policy:\n    uses: {reference}\n")
+            self.git("add", path)
+            for mode in ["--all", "--staged"]:
+                with self.subTest(path=path, mode=mode):
+                    result = self.run_guard(mode)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn(f"BLOCK {path}:", result.stdout)
+                    self.assertIn("[retired-commit-workflow]", result.stdout)
+            self.git("rm", "-f", path)
+
+    def test_retired_workflow_reference_forms_fail(self):
+        reference = ("florianhorner/engineering-standards/.github/workflows/"
+                     "commit-lint-reusable.yml@1fe9a730a3779349ddcea67974f10050a7548a47")
+        path = ".github/workflows/policy.yaml"
+        dest = self.repo / path
+        dest.parent.mkdir(parents=True)
+        forms = [f"uses: '{reference}'", f'uses: "{reference}"',
+                 f"jobs: {{policy: {{uses: {reference}}}}}",
+                 f"uses: >-\n  {reference}", f"uses: {reference.upper()}"]
+        for text in forms:
+            dest.write_text(text + "\n")
+            self.git("add", path)
+            for mode in ["--all", "--staged"]:
+                with self.subTest(text=text, mode=mode):
+                    result = self.run_guard(mode)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn("[retired-commit-workflow]", result.stdout)
+
+    def test_retired_workflow_reference_in_prose_is_allowed(self):
+        path = "docs/history.md"
+        dest = self.repo / path
+        dest.parent.mkdir()
+        dest.write_text("Removed florianhorner/engineering-standards/.github/workflows/"
+                        "commit-lint-reusable.yml@1fe9a730a3779349ddcea67974f10050a7548a47\n")
+        self.git("add", path)
+        for mode in ["--all", "--staged"]:
+            with self.subTest(mode=mode):
+                result = self.run_guard(mode)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_unrelated_workflow_is_allowed(self):
+        path = ".github/workflows/other.yaml"
+        dest = self.repo / path
+        dest.parent.mkdir(parents=True)
+        dest.write_text("name: other\non: pull_request\njobs:\n  check:\n    runs-on: ubuntu-latest\n"
+                        "    steps:\n      - uses: actions/checkout@v6\n")
+        self.git("add", path)
+        for mode in ["--all", "--staged"]:
+            with self.subTest(mode=mode):
+                result = self.run_guard(mode)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_current_generated_manifest_passes(self):
         path = ".config/commit-lint/MANIFEST.json"
         dest = self.repo / path
