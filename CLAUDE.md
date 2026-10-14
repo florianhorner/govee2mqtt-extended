@@ -76,6 +76,18 @@ PRs must pass `cargo build`, `cargo clippy -- -D warnings`, `cargo test`, and `c
 
 ## Public content boundary
 
+For direct public-content checks, install the pinned parser in an isolated environment:
+
+```sh
+python3 -m venv .venv-public-content
+.venv-public-content/bin/python -m pip install --require-hashes -r scripts/requirements-public-content.txt
+.venv-public-content/bin/python scripts/check_public_content.py --all
+.venv-public-content/bin/python -m unittest scripts/test_check_public_content.py
+```
+
+The public-content pre-commit hook manages its own parser environment. CI installs
+candidate test dependencies separately from the guard dependencies on the base branch.
+
 This is a public repository. `CONTRIBUTING.md` (section "Public content") lists what never
 goes in: private network addresses, device identifiers, home-directory paths, personal
 e-mail addresses, and the names, commands and stage vocabulary of internal review or

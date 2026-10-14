@@ -30,6 +30,11 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 SELF = Path(__file__).name
 # These three files must contain the very strings the rules look for. They are
 # the one place a leak could be hidden from this guard, so review their diffs.
@@ -244,7 +249,97 @@ def scan_text(path: str, text: str, rules: list[Rule] = RULES) -> list[Hit]:
     return hits
 
 
+if yaml is not None:
+    class WorkflowLoader(yaml.SafeLoader):
+        def construct_mapping(self, node, deep=False):
+            # Workflow mapping keys are names; YAML 1.1 must not turn job
+            # names such as "on" and "true" into the same boolean key.
+            self.flatten_mapping(node)
+            return {key.value: self.construct_object(value, deep=deep)
+                    for key, value in node.value}
+
+
+def workflow_reference_hits(path: str, data: bytes) -> list[Hit]:
+    loader = None
+    try:
+        loader = WorkflowLoader(data)
+        node = loader.get_single_node()
+        # Validate explicit keys before merge flattening mutates their pairs.
+        # Aliases can revisit the same node, including recursive structures.
+        pending, visited, active = [(node, False)], set(), set()
+        while pending:
+            current, exiting = pending.pop()
+            if current is None or id(current) in visited:
+                continue
+            if exiting:
+                active.remove(id(current))
+                visited.add(id(current))
+                continue
+            if id(current) in active:
+                raise yaml.constructor.ConstructorError(
+                    None, None, "recursive workflow alias", current.start_mark)
+            active.add(id(current))
+            pending.append((current, True))
+            if (current.tag not in loader.yaml_constructors
+                    and current.tag != "tag:yaml.org,2002:merge"):
+                raise yaml.constructor.ConstructorError(
+                    None, None, "unsupported YAML tag", current.start_mark)
+            if isinstance(current, yaml.MappingNode):
+                keys = set()
+                for key, value in current.value:
+                    if not isinstance(key, yaml.ScalarNode) or key.value in keys:
+                        raise yaml.constructor.ConstructorError(
+                            None, None, "invalid or duplicate mapping key", key.start_mark)
+                    keys.add(key.value)
+                    pending.extend(((key, False), (value, False)))
+            elif isinstance(current, yaml.SequenceNode):
+                pending.extend((value, False) for value in current.value)
+        document = loader.construct_document(node) if node is not None else None
+    except Exception as error:
+        mark = getattr(error, "problem_mark", None)
+        position = f":{mark.line + 1}:{mark.column + 1}" if mark is not None else ""
+        # Parser excerpts can contain private input. Report its location only.
+        raise RuntimeError(f"{path}{position}: invalid workflow YAML") from None
+    finally:
+        if loader is not None:
+            loader.dispose()
+
+    def value_node(mapping, key):
+        if isinstance(mapping, yaml.MappingNode):
+            return next((value for name, value in reversed(mapping.value)
+                         if name.value == key), None)
+        return None
+
+    if document is None:
+        return []
+    if not isinstance(document, dict):
+        raise RuntimeError(f"{path}: workflow must be a mapping")
+    if "jobs" not in document:
+        return []
+    jobs = document["jobs"]
+    if not isinstance(jobs, dict):
+        raise RuntimeError(f"{path}: workflow jobs must be a mapping")
+    jobs_node = value_node(node, "jobs")
+    hits = []
+    for name, job in jobs.items():
+        if not isinstance(job, dict):
+            raise RuntimeError(f"{path}: workflow job must be a mapping")
+        if "uses" not in job:
+            continue
+        reference = job["uses"]
+        if not isinstance(reference, str):
+            raise RuntimeError(f"{path}: reusable workflow reference must be a string")
+        match = RETIRED_COMMIT_WORKFLOW.regex().match(reference.strip())
+        if match is not None:
+            reference_node = value_node(value_node(jobs_node, name), "uses")
+            line = reference_node.start_mark.line + 1 if reference_node is not None else 1
+            hits.append(Hit(path, line, RETIRED_COMMIT_WORKFLOW, match.group(0)))
+    return hits
+
+
 def check_paths(root: Path, paths: list[str], reader) -> Report:
+    if yaml is None:
+        raise RuntimeError("PyYAML is required; install scripts/requirements-public-content.txt")
     report = Report()
     for path in paths:
         if TODOS_PATTERN.search(path):
@@ -257,13 +352,10 @@ def check_paths(root: Path, paths: list[str], reader) -> Report:
         if Path(path).as_posix() in RETIRED_POLICY_FILES:
             report.retired_policy_files.append(path)
             continue
-        rules = RULES
         candidate = Path(path)
         if candidate.parent.as_posix() == ".github/workflows" and candidate.suffix.lower() in {".yml", ".yaml"}:
-            # GitHub accepts either extension and arbitrary workflow names.
-            # Reject the retired reference even when its caller is renamed.
-            rules = [*RULES, RETIRED_COMMIT_WORKFLOW]
-        for hit in scan_text(path, data.decode("utf-8", errors="replace"), rules):
+            report.blocks.extend(workflow_reference_hits(path, data))
+        for hit in scan_text(path, data.decode("utf-8", errors="replace")):
             (report.blocks if hit.rule.block else report.warns).append(hit)
     return report
 

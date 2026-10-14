@@ -230,6 +230,20 @@ class PrBodyPatterns(unittest.TestCase):
                 self.assertEqual(self.hits(line), [], line)
 
 
+class ParserSetup(unittest.TestCase):
+    def test_hook_parser_pin_matches_requirements(self):
+        import re
+        import yaml
+        root = HERE.parent
+        requirements = (HERE / "requirements-public-content.txt").read_text()
+        pin = re.search(r"^PyYAML==[^\s\\]+", requirements, re.MULTILINE).group(0)
+        hooks = yaml.safe_load((root / ".pre-commit-config.yaml").read_text())
+        public_content = next(hook for repo in hooks["repos"] for hook in repo["hooks"]
+                              if hook["id"] == "public-content")
+        self.assertEqual(public_content["language"], "python")
+        self.assertEqual(public_content["additional_dependencies"], [pin])
+
+
 class RepoModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -342,6 +356,8 @@ jobs:
                  f"jobs: {{policy: {{uses: {reference}}}}}",
                  f"uses: >-\n  {reference}", f"uses: {reference.upper()}"]
         for text in forms:
+            if not text.startswith("jobs:"):
+                text = "jobs:\n  policy:\n" + "\n".join("    " + line for line in text.splitlines())
             dest.write_text(text + "\n")
             self.git("add", path)
             for mode in ["--all", "--staged"]:
@@ -349,6 +365,138 @@ jobs:
                     result = self.run_guard(mode)
                     self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                     self.assertIn("[retired-commit-workflow]", result.stdout)
+
+    def test_encoded_retired_workflow_references_fail(self):
+        reference = ("florianhorner/engineering-standards/.github/workflows/"
+                     "commit-lint-reusable.yml@1fe9a730a3779349ddcea67974f10050a7548a47")
+        forms = [reference.replace(".yml@", r".\x79ml@"),
+                 reference.replace(".yml@", r".\u0079ml@"),
+                 reference.replace("/.github", "/\\\n      .github")]
+        for suffix in ["yml", "yaml"]:
+            path = f".github/workflows/encoded.{suffix}"
+            dest = self.repo / path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            for form in forms:
+                dest.write_text(f'name: validation\non: pull_request\njobs:\n  check:\n    uses: "{form}"\n')
+                self.git("add", path)
+                for mode in ["--all", "--staged"]:
+                    with self.subTest(suffix=suffix, form=form, mode=mode):
+                        result = self.run_guard(mode)
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        self.assertIn("[retired-commit-workflow]", result.stdout)
+            self.git("rm", "-f", path)
+
+    def test_decoded_keys_and_aliases_are_inspected(self):
+        reference = "florianhorner/engineering-standards/.github/workflows/commit-lint-reusable.yml@v1"
+        forms = [
+            f'"\\x6aobs": {{check: {{"\\u0075ses": "{reference}"}}}}',
+            f'reference: &reference "{reference}"\njobs: {{check: {{uses: *reference}}}}',
+            f'template: &job {{uses: "{reference}"}}\njobs: {{check: *job}}',
+            f'template: &job {{uses: "{reference}"}}\njobs: {{check: {{<<: *job}}}}',
+            f'jobs: {{on: {{uses: "{reference}"}}, true: {{runs-on: ubuntu-latest}}}}',
+        ]
+        path = ".github/workflows/aliases.yaml"
+        dest = self.repo / path
+        dest.parent.mkdir(parents=True)
+        for text in forms:
+            dest.write_text(text + "\n")
+            self.git("add", path)
+            for mode in ["--all", "--staged"]:
+                with self.subTest(text=text, mode=mode):
+                    result = self.run_guard(mode)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn("[retired-commit-workflow]", result.stdout)
+
+    def test_nonexecuted_references_and_merge_overrides_are_allowed(self):
+        reference = "florianhorner/engineering-standards/.github/workflows/commit-lint-reusable.yml@v1"
+        forms = [
+            f'# uses: {reference}\njobs: {{}}',
+            f'description: "{reference}"\njobs: {{check: {{steps: [{{run: "echo {reference}"}}, {{uses: "{reference}"}}]}}}}',
+            f'template: &job {{uses: "{reference}"}}\njobs: {{check: {{<<: *job, uses: example/repo/.github/workflows/check.yml@v1}}}}',
+            'jobs: {on: {runs-on: ubuntu-latest}, true: {runs-on: ubuntu-latest}}',
+            'jobs: {check: {uses: example-florianhorner/engineering-standards/.github/workflows/commit-lint-reusable.yml@v1}}',
+            'jobs: {check: {steps: [{run: "echo \\u0079"}], env: {EXAMPLE: "escaped \\x79"}}}',
+        ]
+        path = ".github/workflows/allowed.yaml"
+        dest = self.repo / path
+        dest.parent.mkdir(parents=True)
+        for text in forms:
+            dest.write_text(text + "\n")
+            self.git("add", path)
+            for mode in ["--all", "--staged"]:
+                with self.subTest(text=text, mode=mode):
+                    result = self.run_guard(mode)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_invalid_workflow_yaml_fails_without_echoing_input(self):
+        path = ".github/workflows/invalid.yaml"
+        dest = self.repo / path
+        dest.parent.mkdir(parents=True)
+        forms = [
+            'jobs: [private-input',
+            'jobs: {}\n---\njobs: {}',
+            'jobs: !!python/object/apply:os.system ["touch should-not-exist"]',
+            'jobs: {check: {uses: safe, "\\u0075ses": other}}',
+            'jobs: {}\n"\\x6aobs": {}',
+            'jobs: {check: {<<: invalid}}',
+            'jobs: {check: &cycle {<<: *cycle}}',
+            'jobs: invalid',
+            'jobs: {check: {uses: 42}}',
+            'jobs: {check: {uses: !!int private-input}}',
+            'jobs: {check: {uses: !!bool private-input}}',
+            'jobs: {check: {uses: !!timestamp private-input}}',
+        ]
+        for text in forms:
+            dest.write_text(text + "\n")
+            self.git("add", path)
+            for mode in ["--all", "--staged"]:
+                with self.subTest(text=text, mode=mode):
+                    result = self.run_guard(mode)
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertIn("ERROR:", result.stderr)
+                    self.assertNotIn("private-input", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertFalse((self.repo / "should-not-exist").exists())
+
+    def test_invalid_workflow_bytes_fail_without_echoing_input(self):
+        path = ".github/workflows/invalid.yaml"
+        dest = self.repo / path
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(b"jobs: {check: {uses: private-input}}\n\xff")
+        self.git("add", path)
+        for mode in ["--all", "--staged"]:
+            with self.subTest(mode=mode):
+                result = self.run_guard(mode)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("ERROR:", result.stderr)
+                self.assertNotIn("private-input", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_workflow_scan_uses_index_bytes_independently(self):
+        path = ".github/workflows/index.yaml"
+        dest = self.repo / path
+        dest.parent.mkdir(parents=True)
+        bad = ('jobs: {check: {uses: "florianhorner/engineering-standards/.github/workflows/'
+               'commit-lint-reusable.\\x79ml@v1"}}\n')
+        dest.write_text(bad)
+        self.git("add", path)
+        dest.write_text("jobs: {}\n")
+        self.assertEqual(self.run_guard("--staged").returncode, 1)
+        self.assertEqual(self.run_guard("--all").returncode, 0)
+        dest.unlink()
+        self.assertEqual(self.run_guard("--staged").returncode, 1)
+        dest.write_text("jobs: {}\n")
+        self.git("add", path)
+        dest.write_text(bad)
+        self.assertEqual(self.run_guard("--staged").returncode, 0)
+        self.assertEqual(self.run_guard("--all").returncode, 1)
+
+    def test_missing_yaml_dependency_fails_explicitly(self):
+        result = subprocess.run([sys.executable, "-S", str(GUARD), "--all"],
+                                cwd=self.repo, env={**self.env, "PYTHONPATH": ""},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("PyYAML is required", result.stderr)
 
     def test_retired_workflow_reference_in_prose_is_allowed(self):
         path = "docs/history.md"

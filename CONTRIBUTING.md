@@ -43,6 +43,17 @@ pinned by commit. The file scanner is the stricter of the two: it also exempts f
 by exact match and refuses a tracked backlog. Redact logs pasted from a
 running bridge first: it prints device names, ids and LAN addresses at startup.
 
+The guard safely decodes job-level reusable workflow references before checking
+the retired policy. Its parser is pinned in `scripts/requirements-public-content.txt`.
+The pre-commit hook installs it in an isolated environment. For direct checks:
+
+```sh
+python3 -m venv .venv-public-content
+.venv-public-content/bin/python -m pip install --require-hashes -r scripts/requirements-public-content.txt
+.venv-public-content/bin/python scripts/check_public_content.py --all
+.venv-public-content/bin/python -m unittest scripts/test_check_public_content.py
+```
+
 ## Proof blocks
 
 Every PR body must end with a `## Proof` section: one checklist line per claim,
